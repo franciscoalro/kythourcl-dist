@@ -1,0 +1,9 @@
+{
+  "name": "kythourcl",
+  "iconUrl": "",
+  "description": "NetCine only",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/plugins.json?v=37"
+  ]
+}

@@ -1,0 +1,67 @@
+[
+  {
+    "iconUrl": "https://cdn.bcdn.zip/wp-content/uploads/2017/04/nc-header-responsive.png",
+    "fileSize": 39181,
+    "apiVersion": 4,
+    "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
+    "status": 1,
+    "language": "pt-br",
+    "authors": [
+      "franciscoalro"
+    ],
+    "tvTypes": [
+      "Movie",
+      "TvSeries",
+      "Anime",
+      "AnimeMovie"
+    ],
+    "version": 37,
+    "internalName": "NetCine",
+    "jarUrl": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/NetCine.jar?v=37",
+    "description": "NetCine Extension",
+    "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/NetCine.cs3?v=37",
+    "name": "NetCine"
+  },
+  {
+    "iconUrl": "https://topanimes.net/wp-content/uploads/2020/06/favicon.png",
+    "fileSize": 25000,
+    "apiVersion": 4,
+    "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
+    "status": 1,
+    "language": "pt-br",
+    "authors": [
+      "franciscoalro"
+    ],
+    "tvTypes": [
+      "Anime",
+      "AnimeMovie"
+    ],
+    "version": 11,
+    "internalName": "TopAnimes",
+    "jarUrl": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/TopAnimes.jar?v=11",
+    "description": "TopAnimes Extension",
+    "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/TopAnimes.cs3?v=11",
+    "name": "TopAnimes"
+  },
+  {
+    "iconUrl": "https://animefire.io/img/favicon.png",
+    "fileSize": 25000,
+    "apiVersion": 4,
+    "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
+    "status": 1,
+    "language": "pt-br",
+    "authors": [
+      "franciscoalro"
+    ],
+    "tvTypes": [
+      "Anime",
+      "AnimeMovie"
+    ],
+    "version": 8,
+    "internalName": "AnimeFire",
+    "jarUrl": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/AnimeFire.jar?v=8",
+    "description": "AnimeFire Extension",
+    "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/AnimeFire.cs3?v=8",
+    "name": "AnimeFire"
+  }
+]
