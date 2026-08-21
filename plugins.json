@@ -45,7 +45,7 @@
   },
   {
     "iconUrl": "https://animefire.io/img/favicon.png",
-    "fileSize": 24981,
+    "fileSize": 26746,
     "apiVersion": 4,
     "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
     "status": 1,
@@ -57,11 +57,11 @@
       "Anime",
       "AnimeMovie"
     ],
-    "version": 41,
+    "version": 42,
     "internalName": "AnimeFire",
-    "jarUrl": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/AnimeFire.jar?v=41",
+    "jarUrl": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/AnimeFire.jar?v=42",
     "description": "AnimeFire Extension",
-    "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/AnimeFire.cs3?v=41",
+    "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/AnimeFire.cs3?v=42",
     "name": "AnimeFire"
   }
 ]
