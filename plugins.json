@@ -57,11 +57,11 @@
       "Anime",
       "AnimeMovie"
     ],
-    "version": 39,
+    "version": 40,
     "internalName": "AnimeFire",
-    "jarUrl": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/AnimeFire.jar?v=39",
+    "jarUrl": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/AnimeFire.jar?v=40",
     "description": "AnimeFire Extension",
-    "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/AnimeFire.cs3?v=39",
+    "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/AnimeFire.cs3?v=40",
     "name": "AnimeFire"
   }
 ]
