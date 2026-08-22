@@ -14,6 +14,20 @@
         "name": "AnimeFire"
     },
     {
+        "fileHash": "sha256-2ca208597ba37f5d7eaa2971e14992a77d6802cb650eea113765da46a2094660",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
+        "fileSize": 25463,
+        "status": 3,
+        "authors": [
+            "franciscoalro"
+        ],
+        "version": 43,
+        "internalName": "CineVision",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/CineVision.cs3",
+        "name": "CineVision"
+    },
+    {
         "fileHash": "sha256-0099b9eb54468edc2edc315bbb40060f8e35f031b2981ef5a2dbe98e97d42238",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
