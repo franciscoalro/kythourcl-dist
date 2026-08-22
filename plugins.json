@@ -8,7 +8,7 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 47,
+        "version": 48,
         "internalName": "AnimeFire",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/AnimeFire.cs3",
         "name": "AnimeFire"
@@ -22,7 +22,7 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 47,
+        "version": 48,
         "internalName": "CineVision",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/CineVision.cs3",
         "name": "CineVision"
@@ -36,7 +36,7 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 47,
+        "version": 48,
         "internalName": "NetCine",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/NetCine.cs3",
         "name": "NetCine"
@@ -50,21 +50,21 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 47,
+        "version": 48,
         "internalName": "Pobreflix",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/Pobreflix.cs3",
         "name": "Pobreflix"
     },
     {
-        "fileHash": "sha256-631c234512a9937a9b9f27aab63a0253468d5d0a512e9bb8dba20fe864828411",
+        "fileHash": "sha256-2535f5c5df9c0393daad3ed1fb5abb31210cf91c79d55a8829d21c351f92535a",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 30089,
+        "fileSize": 30155,
         "status": 3,
         "authors": [
             "franciscoalro"
         ],
-        "version": 47,
+        "version": 48,
         "internalName": "RedeCanais",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/RedeCanais.cs3",
         "name": "RedeCanais"
@@ -78,7 +78,7 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 47,
+        "version": 48,
         "internalName": "TopAnimes",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/TopAnimes.cs3",
         "name": "TopAnimes"
