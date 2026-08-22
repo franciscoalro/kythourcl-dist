@@ -1,67 +1,58 @@
 [
-  {
-    "iconUrl": "https://cdn.bcdn.zip/wp-content/uploads/2017/04/nc-header-responsive.png",
-    "fileSize": 39181,
-    "apiVersion": 4,
-    "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-    "status": 1,
-    "language": "pt-br",
-    "authors": [
-      "franciscoalro"
-    ],
-    "tvTypes": [
-      "Movie",
-      "TvSeries",
-      "Anime",
-      "AnimeMovie"
-    ],
-    "version": 37,
-    "internalName": "NetCine",
-    "jarUrl": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/NetCine.jar?v=37",
-    "description": "NetCine Extension",
-    "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/NetCine.cs3?v=37",
-    "name": "NetCine"
-  },
-  {
-    "iconUrl": "https://topanimes.net/wp-content/uploads/2020/06/favicon.png",
-    "fileSize": 25000,
-    "apiVersion": 4,
-    "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-    "status": 1,
-    "language": "pt-br",
-    "authors": [
-      "franciscoalro"
-    ],
-    "tvTypes": [
-      "Anime",
-      "AnimeMovie"
-    ],
-    "version": 11,
-    "internalName": "TopAnimes",
-    "jarUrl": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/TopAnimes.jar?v=11",
-    "description": "TopAnimes Extension",
-    "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/TopAnimes.cs3?v=11",
-    "name": "TopAnimes"
-  },
-  {
-    "iconUrl": "https://animefire.io/img/favicon.png",
-    "fileSize": 26980,
-    "apiVersion": 4,
-    "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-    "status": 1,
-    "language": "pt-br",
-    "authors": [
-      "franciscoalro"
-    ],
-    "tvTypes": [
-      "Anime",
-      "AnimeMovie"
-    ],
-    "version": 43,
-    "internalName": "AnimeFire",
-    "jarUrl": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/AnimeFire.jar?v=43",
-    "description": "AnimeFire Extension",
-    "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/AnimeFire.cs3?v=43",
-    "name": "AnimeFire"
-  }
+    {
+        "fileHash": "sha256-2c61dd3189ac7fddcf9d123292c5f54ce2fb3bde9cf301a765bd5a1e3bf754e7",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
+        "fileSize": 26980,
+        "status": 3,
+        "authors": [
+            "franciscoalro"
+        ],
+        "version": 43,
+        "internalName": "AnimeFire",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/AnimeFire.cs3",
+        "name": "AnimeFire"
+    },
+    {
+        "fileHash": "sha256-0099b9eb54468edc2edc315bbb40060f8e35f031b2981ef5a2dbe98e97d42238",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
+        "fileSize": 53387,
+        "status": 3,
+        "authors": [
+            "franciscoalro"
+        ],
+        "version": 43,
+        "internalName": "NetCine",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/NetCine.cs3",
+        "name": "NetCine"
+    },
+    {
+        "fileHash": "sha256-b68e352a7c0c0024d65fb37f8d6bd7dd57e75d66f2f3c52d5be1a0ef5aca7b97",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
+        "fileSize": 23440,
+        "status": 3,
+        "authors": [
+            "franciscoalro"
+        ],
+        "version": 43,
+        "internalName": "Pobreflix",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/Pobreflix.cs3",
+        "name": "Pobreflix"
+    },
+    {
+        "fileHash": "sha256-2ef0ea39d00cc65440fbe3b88ce3073c546c4cbcc07985bb75c4e2b9dc7a6ed8",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
+        "fileSize": 25200,
+        "status": 3,
+        "authors": [
+            "franciscoalro"
+        ],
+        "version": 43,
+        "internalName": "TopAnimes",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/TopAnimes.cs3",
+        "name": "TopAnimes"
+    }
 ]
