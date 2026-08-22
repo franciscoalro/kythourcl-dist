@@ -42,6 +42,20 @@
         "name": "Pobreflix"
     },
     {
+        "fileHash": "sha256-585c9c27b76d54629a5802fff2c9c61b80b59c6a3316de2e13b313a3aab11ff2",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
+        "fileSize": 22251,
+        "status": 3,
+        "authors": [
+            "franciscoalro"
+        ],
+        "version": 43,
+        "internalName": "RedeCanais",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/RedeCanais.cs3",
+        "name": "RedeCanais"
+    },
+    {
         "fileHash": "sha256-2ef0ea39d00cc65440fbe3b88ce3073c546c4cbcc07985bb75c4e2b9dc7a6ed8",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",

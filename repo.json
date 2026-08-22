@@ -1,7 +1,7 @@
 {
   "name": "kythourcl",
   "iconUrl": "",
-  "description": "AnimeFire, NetCine, Pobreflix, TopAnimes",
+  "description": "AnimeFire, NetCine, Pobreflix, RedeCanais, TopAnimes",
   "manifestVersion": 1,
   "pluginLists": [
     "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/plugins.json",
