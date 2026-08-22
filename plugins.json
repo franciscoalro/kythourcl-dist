@@ -8,7 +8,7 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 61,
+        "version": 62,
         "internalName": "AnimeFire",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/AnimeFire.cs3",
         "name": "AnimeFire"
@@ -22,7 +22,7 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 61,
+        "version": 62,
         "internalName": "CineVision",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/CineVision.cs3",
         "name": "CineVision"
@@ -36,7 +36,7 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 61,
+        "version": 62,
         "internalName": "NetCine",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/NetCine.cs3",
         "name": "NetCine"
@@ -50,7 +50,7 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 61,
+        "version": 62,
         "internalName": "Pobreflix",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/Pobreflix.cs3",
         "name": "Pobreflix"
@@ -64,21 +64,21 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 61,
+        "version": 62,
         "internalName": "RedeCanais",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/RedeCanais.cs3",
         "name": "RedeCanais"
     },
     {
-        "fileHash": "sha256-5b2088223850b4663ebe7abf01c1e731033076fe82e05562a954ba8c0b2c0e2c",
+        "fileHash": "sha256-6c62f3860c860fa8b4304c222ea5da4b3a525006f7a6e68ff6733d9a7aa4bbbd",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 31498,
+        "fileSize": 32160,
         "status": 3,
         "authors": [
             "franciscoalro"
         ],
-        "version": 61,
+        "version": 62,
         "internalName": "RedeCanaisAF",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/RedeCanaisAF.cs3",
         "name": "RedeCanaisAF"
@@ -92,7 +92,7 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 61,
+        "version": 62,
         "internalName": "TopAnimes",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/TopAnimes.cs3",
         "name": "TopAnimes"
