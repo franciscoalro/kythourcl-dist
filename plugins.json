@@ -42,10 +42,10 @@
         "name": "Pobreflix"
     },
     {
-        "fileHash": "sha256-1accb18f88987765eccef0566ef094dbe51646e066e69a3aa3820b8617298557",
+        "fileHash": "sha256-631c234512a9937a9b9f27aab63a0253468d5d0a512e9bb8dba20fe864828411",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 29949,
+        "fileSize": 30089,
         "status": 3,
         "authors": [
             "franciscoalro"
