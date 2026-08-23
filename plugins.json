@@ -70,17 +70,17 @@
         "name": "RedeCanais"
     },
     {
-        "fileHash": "sha256-6d650da4a0ad5b4f0cb38c17c1eea95889c88eddcda6a9d5174d1fe733578c93",
+        "fileHash": "sha256-5f92993ec37365523fd7f76a1f5e565ae5d93a515ecb68d3bd7e0458402d587a",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 49520,
+        "fileSize": 50020,
         "status": 3,
         "authors": [
             "franciscoalro"
         ],
-        "version": 96,
+        "version": 97,
         "internalName": "RedeCanaisAF",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/RedeCanaisAF_v96.cs3",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/RedeCanaisAF_v97.cs3",
         "name": "RedeCanaisAF"
     },
     {
