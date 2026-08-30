@@ -241,8 +241,20 @@ object CloudflareSolver {
     fun setCatalogUrls(urls: List<String>) {
         if (catalogUrls != urls) {
             catalogUrls = urls
-            capturedHtmlByUrl.clear()
-            Log.i(TAG, "[CF] catalogUrls setadas (${urls.size}) — cache de HTML limpo")
+            // v148: preserva HTML de disco/RAM que já pertence a estas URLs (antes: clear() apagava
+            // o cache restaurado em <100ms e forçava WebView de 30-45s em TODO cold start → "Pré-
+            // carregamento" infinito). Só descarta entradas fora do catálogo atual.
+            val keep = capturedHtmlByUrl.filterKeys { it in urls }
+            val removed = capturedHtmlByUrl.size - keep.size
+            if (removed != 0 || capturedHtmlByUrl.size != keep.size) {
+                capturedHtmlByUrl.clear()
+                capturedHtmlByUrl.putAll(keep)
+                // mantém só timestamps das URLs mantidas
+                val keepTs = diskHtmlTsByUrl.filterKeys { it in urls }
+                diskHtmlTsByUrl.clear()
+                diskHtmlTsByUrl.putAll(keepTs)
+            }
+            Log.i(TAG, "[CF] catalogUrls setadas (${urls.size}) — cache preservado keep=${keep.size} removed=$removed RAM=${capturedHtmlByUrl.size}")
         }
     }
 

@@ -9,7 +9,7 @@ Linguagem: Kotlin. Build: Gradle. Target: Android API 21+.
 - SEMPRE leia o arquivo antes de editar.
 - SEMPRE mantenha comentários e logs existentes.
 - Seja cirúrgico: altere apenas o necessário.
-- Versão atual: BUILD_VERSION = 147. Próxima: 148.
+- Versão atual: BUILD_VERSION = 148. Próxima: 149.
 
 ## Arquitetura
 - `RedeCanaisAF.kt` — Provider principal: search, getMainPage, loadLinks

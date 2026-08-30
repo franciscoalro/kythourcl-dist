@@ -2,10 +2,8 @@ package com.RedeCanaisAF
 
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
-import com.lagradost.cloudstream3.MainPageRequest
 import android.content.Context
 import android.util.Log
-import android.webkit.CookieManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -15,19 +13,20 @@ class RedeCanaisAFProvider: Plugin() {
     override fun load(context: Context) {
         val api = RedeCanaisAF()
         registerMainAPI(api)
-        
-        // Warm-up em segundo plano assim que o CloudStream inicializa
+
+        // v148: warm-up LEVE — só restaura cf_clearance + html cache de disco (<100ms).
+        // v144 chamava getMainPage("home") que usava URL inválida "home-1-date.html" e segurava
+        // o interactiveMutex por até 45s, fazendo a home real ficar em "Precarregamento"/loading
+        // até o diálogo expirar. Agora o load() retorna instantâneo; a home usa o caminho rápido
+        // de disco ou o diálogo serializado normal (primeiro REQ resolve, demais pegam cache ~0ms).
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                Log.i("RedeCanaisAF-Trace", "[BOOT_WARMUP] Inicializando pré-carregamento silencioso no boot do app...")
-                val cookies = CookieManager.getInstance().getCookie(api.mainUrl) ?: ""
-                Log.d("RedeCanaisAF-Trace", "[BOOT_WARMUP] Cookies existentes no boot | len=${cookies.length}")
-                
-                // Pré-aquece o cache de lançamentos
-                api.getMainPage(1, MainPageRequest("home", "Lançamentos", false))
-                Log.i("RedeCanaisAF-Trace", "[BOOT_WARMUP] Pré-carregamento concluído com sucesso!")
+                Log.i("RedeCanaisAF-Trace", "[BOOT_WARMUP] restauração rápida (sem rede/WebView)...")
+                val restoredClearance = CloudflareSolver.restoreClearanceIfValid(api.mainUrl)
+                val restoredCache = CloudflareSolver.restoreDiskCacheIfNeeded()
+                Log.i("RedeCanaisAF-Trace", "[BOOT_WARMUP] ok clearance=$restoredClearance cacheDisco=$restoredCache (load instantâneo)")
             } catch (e: Throwable) {
-                Log.d("RedeCanaisAF-Trace", "[BOOT_WARMUP] Warm-up em background finalizado: ${e.message}")
+                Log.d("RedeCanaisAF-Trace", "[BOOT_WARMUP] finalizado: ${e.message}")
             }
         }
     }

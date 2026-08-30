@@ -29,7 +29,7 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 147
+        const val BUILD_VERSION = 148
         private const val TAG = "RedeCanaisAF-Trace"
 
         // v112: cache maior (30min) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a 1Ãƒâ€šÃ‚Âª carga custa (WebView), depois ÃƒÆ’Ã‚Â© instantÃƒÆ’Ã‚Â¢nea
@@ -98,18 +98,10 @@ class RedeCanaisAF : MainAPI() {
         val baseSlug = request.data
         val url = "$baseSlug-$page-date.html"
         val now = android.os.SystemClock.elapsedRealtime()
-        // v146: cold start — restaura HTML do disco (30min) antes de bater na rede
-        runCatching { CloudflareSolver.restoreDiskCacheIfNeeded() }
-        homeCache[url]?.takeIf { now - it.first < RESPONSE_CACHE_TTL_MS }?.second?.let {
-            Log.i(TAG, "[HOME_CACHE_HIT] Cat=${request.name} url=$url")
-            return it
-        }
-
-        Log.i(TAG, "[MAINPAGE_ENTER] Cat=${request.name} url=$url")
-
-        // v130: registra as 4 URLs do catálogo — o primeiro REQ a resolver o Turnstile navega o
-        // MESMO WebView do diálogo (sessão TLS compartilhada) por todas, capturando cada uma no
-        // cache. Os REQs seguintes retornam do cache ~0ms sem reabrir diálogo.
+        // v148: ordem importa — registra catálogo ANTES de checar cache, para o fast path de
+        // disco/RAM ser consultável (antes: getMainPage checava cache, depois apagava tudo no
+        // setCatalogUrls().clear() → TODO cold start sem cache → WebView 30-45s → "Pré-
+        // carregamento" infinito quando o challenge falha).
         val catalogSlugs = listOf(
             "$mainUrl/browse-filmes-lancamentos-videos",
             "$mainUrl/browse-series-videos",
@@ -117,6 +109,35 @@ class RedeCanaisAF : MainAPI() {
             "$mainUrl/browse-desenhos-videos"
         )
         CloudflareSolver.setCatalogUrls(catalogSlugs.map { "$it-$page-date.html" })
+        runCatching { CloudflareSolver.restoreDiskCacheIfNeeded() }
+        homeCache[url]?.takeIf { now - it.first < RESPONSE_CACHE_TTL_MS }?.second?.let {
+            Log.i(TAG, "[HOME_CACHE_HIT] Cat=${request.name} url=$url")
+            return it
+        }
+        // v148: fast path de HTML de disco — retorna ANTES de bloquear em requestDoc/WebView
+        CloudflareSolver.getDiskCachedHtml(url)?.let { cached ->
+            if (!CloudflareSolver.isChallengeContent(cached) && !CloudflareSolver.isIpBannedContent(cached)) {
+                val parsed = org.jsoup.Jsoup.parse(cached, url)
+                if (parsed.select("a[href]").isNotEmpty()) {
+                    Log.i(TAG, "[HOME_DISK_HIT] Cat=${request.name} url=$url htmlLen=${cached.length} (<100ms, sem rede)")
+                    val elements = parsed.select("div.pm-video-thumb, li.pm-video-thumb, .pm-video-thumb, .pm-li-video, .video-thumb, article, div[class*='video-thumb']")
+                    val homeList = elements.mapNotNull { parseCard(it) }.distinctBy { it.url }
+                    if (homeList.isNotEmpty()) {
+                        val hasNext = parsed.select(".pagination a[rel='next'], .pagination a.next, a:contains(Próximo), a:contains(»)").isNotEmpty() || homeList.size >= 12
+                        val response = newHomePageResponse(listOf(HomePageList(request.name, homeList)), hasNext = hasNext)
+                        Log.i(TAG, "[HOME_DISK_DONE] Cat=${request.name} cards=${homeList.size}")
+                        homeCache[url] = android.os.SystemClock.elapsedRealtime() to response
+                        // revalida em 2º plano (não bloqueia a home); log canalha para debug
+                        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                            try { requestDoc(url); Log.i(TAG, "[HOME_BG_REVALIDATE] ok url=$url") } catch (_: Throwable) {}
+                        }
+                        return response
+                    }
+                }
+            }
+        }
+
+        Log.i(TAG, "[MAINPAGE_ENTER] Cat=${request.name} url=$url")
 
         val doc = try {
             requestDoc(url)

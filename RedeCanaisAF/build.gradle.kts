@@ -1,5 +1,5 @@
-// v147 — IP ban 1006 detect+cache fallback (bypass não re-tenta quando banido)
+// v148 — warm-up sem rede (fix loading Precarregamento) + retry rapido Cloudflare
 cloudstream {
-    version = 147
+    version = 148
 }
 

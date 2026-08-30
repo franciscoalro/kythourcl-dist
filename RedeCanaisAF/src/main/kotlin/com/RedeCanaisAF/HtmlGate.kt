@@ -48,13 +48,16 @@ internal class HtmlGate(
             }
 
             // v146: cache em disco (30min) — cold start retorna em <500ms sem WebView
+            // v148: retorna mesmo no cold start, ANTES de qualquer rede/WebView (sem este fast path
+            // a home fica em "Pré-carregamento" até o WebView de 30-45s terminar).
             CloudflareSolver.getDiskCachedHtml(url)?.let { cachedHtml ->
-                if (!CloudflareSolver.isChallengeContent(cachedHtml)) {
+                if (!CloudflareSolver.isChallengeContent(cachedHtml) && !CloudflareSolver.isIpBannedContent(cachedHtml)) {
                     val parsed = Jsoup.parse(cachedHtml, url)
                     if (parsed.select("a[href]").isNotEmpty()) {
-                        Log.i(TAG, "[REQ#$reqId][CACHE_FAST_HIT] url=$url | htmlLen=${cachedHtml.length}")
+                        Log.i(TAG, "[REQ#$reqId][CACHE_FAST_HIT] url=$url | htmlLen=${cachedHtml.length} (ram+disco)")
                         return parsed
                     }
+                    Log.d(TAG, "[REQ#$reqId][CACHE_FAST_HIT_EMPTY] cache sem links úteis len=${cachedHtml.length} — segue para rede")
                 }
             }
 
