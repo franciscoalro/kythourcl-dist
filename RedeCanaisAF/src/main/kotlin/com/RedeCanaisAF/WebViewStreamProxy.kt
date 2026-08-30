@@ -12,7 +12,6 @@ import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.CommonActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
@@ -20,13 +19,10 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.ServerSocket
 import java.net.Socket
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.FutureTask
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
-import kotlin.coroutines.resume
 
 /**
  * v122 — Proxy local de stream via WebView.
@@ -96,13 +92,11 @@ object WebViewStreamProxy {
 
                 val view = WebView(activity).apply {
                     visibility = android.view.View.INVISIBLE
-                    val density = resources.displayMetrics.density
-                    val wvW = (720 * density).toInt()
-                    val wvH = (1280 * density).toInt()
-                    layoutParams = android.widget.FrameLayout.LayoutParams(wvW, wvH).apply {
-                        leftMargin = -(wvW + 100)
-                        topMargin = -(wvH + 100)
+                    layoutParams = android.widget.FrameLayout.LayoutParams(1, 1).apply {
+                        leftMargin = 0
+                        topMargin = 0
                     }
+                    alpha = 0f
                     cookieManager.setAcceptThirdPartyCookies(this, true)
                     settings.apply {
                         javaScriptEnabled = true
@@ -118,6 +112,15 @@ object WebViewStreamProxy {
                         userAgentString = MOBILE_UA
                     }
                     webViewClient = object : WebViewClient() {
+                        override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                            Log.w(TAG, "[CF_WV] onRenderProcessGone seguro acionado (didCrash=${detail?.didCrash()})")
+                            try {
+                                (view?.parent as? ViewGroup)?.removeView(view)
+                                view?.destroy()
+                            } catch (_: Throwable) {}
+                            return true
+                        }
+
                         override fun shouldInterceptRequest(
                             view: WebView?,
                             request: WebResourceRequest
@@ -230,10 +233,12 @@ object WebViewStreamProxy {
 
                 // 3) Poll via performance entries (fallback se shouldInterceptRequest falhar)
                 if (!captured.get()) {
-                    val found = withTimeoutOrNull(4000L) {
-                        evaluateJavascript(
-                            wvNow,
-                            """(function() {
+                    val found = withContext(Dispatchers.Main) {
+                        var result: String? = null
+                        val future = CompletableFuture<String?>()
+                        try {
+                            wvNow.evaluateJavascript(
+                                """(function() {
                                     try {
                                         const entries = performance.getEntriesByType('resource');
                                         for (let i = entries.length - 1; i >= 0; i--) {
@@ -248,8 +253,11 @@ object WebViewStreamProxy {
                                     }
                                     return '';
                                 })();""".trimIndent()
-                        )
-                    }?.removeSurrounding("\"")
+                            ) { res -> future.complete(res?.removeSurrounding("\"")) }
+                            result = future.get(4, TimeUnit.SECONDS)
+                        } catch (_: Throwable) {}
+                        result
+                    }
                     if (!found.isNullOrBlank() && !captured.get()) {
                         streamUrl = found
                         captured.set(true)
@@ -277,15 +285,20 @@ object WebViewStreamProxy {
                     reloadCount < MAX_RELOADS
                 ) {
                     lastReloadCheckMs = now
-                    val hasCaptcha = withTimeoutOrNull(4000L) {
-                        evaluateJavascript(
-                            wvNow,
-                            """(function() {
+                    val hasCaptcha = withContext(Dispatchers.Main) {
+                        var ok = false
+                        val future = CompletableFuture<Boolean>()
+                        try {
+                            wvNow.evaluateJavascript(
+                                """(function() {
                                     return document.querySelectorAll('.captcha_button, #submit').length > 0
                                         && typeof window.rcPreloadPlayer === 'function';
                                 })();""".trimIndent()
-                        )?.contains("true") == true
-                    } ?: false
+                            ) { res -> future.complete(res?.contains("true") == true) }
+                            ok = future.get(4, TimeUnit.SECONDS)
+                        } catch (_: Throwable) {}
+                        ok
+                    }
                     if (dudClick || !hasCaptcha) {
                         reloadCount++
                         if (dudClick) {
@@ -323,21 +336,6 @@ object WebViewStreamProxy {
 
         Log.i(TAG, "[PROXY] Captura OK: $finalUrl")
         return startLocalServer(finalUrl)
-    }
-
-    /** Executa JavaScript sem bloquear a main thread enquanto o WebView entrega o callback. */
-    private suspend fun evaluateJavascript(webView: WebView, script: String): String? {
-        return withContext(Dispatchers.Main) {
-            suspendCancellableCoroutine { continuation ->
-                try {
-                    webView.evaluateJavascript(script) { result ->
-                        if (continuation.isActive) continuation.resume(result)
-                    }
-                } catch (_: Throwable) {
-                    if (continuation.isActive) continuation.resume(null)
-                }
-            }
-        }
     }
 
     /**
@@ -409,12 +407,9 @@ object WebViewStreamProxy {
                 // v123: prefetch duplo — busca o chunk N+1 em paralelo enquanto serve o N,
                 // eliminando a latência de rede/JS entre chunks (sem pausas na reprodução).
                 var pos = rangeStart
-                val firstStart = pos
-                var nextChunk = FutureTask<ByteArray?> {
-                    fetchChunk(targetUrl, firstStart, firstStart + CHUNK_SIZE - 1)
-                }
+                var nextChunk = CompletableFuture<ByteArray?>()
                 thread(isDaemon = true, name = "RCProxy-Prefetch") {
-                    nextChunk.run()
+                    nextChunk.complete(fetchChunk(targetUrl, pos, pos + CHUNK_SIZE - 1))
                 }
                 while (isServing) {
                     val chunk = try {
@@ -426,11 +421,9 @@ object WebViewStreamProxy {
                     if (chunk.isEmpty()) break // EOF (416)
                     val nextStart = pos + chunk.size
                     // dispara o fetch do próximo chunk ANTES de escrever o atual no socket
-                    val next = FutureTask<ByteArray?> {
-                        fetchChunk(targetUrl, nextStart, nextStart + CHUNK_SIZE - 1)
-                    }
+                    val next = CompletableFuture<ByteArray?>()
                     thread(isDaemon = true, name = "RCProxy-Prefetch") {
-                        next.run()
+                        next.complete(fetchChunk(targetUrl, nextStart, nextStart + CHUNK_SIZE - 1))
                     }
                     out.write(chunk)
                     out.flush()
@@ -451,8 +444,7 @@ object WebViewStreamProxy {
      */
     private fun fetchChunk(url: String, start: Long, end: Long): ByteArray? {
         val wv = webView ?: return null
-        val result = AtomicReference<String?>()
-        val latch = CountDownLatch(1)
+        val future = CompletableFuture<String>()
         try {
             wv.post {
                 try {
@@ -478,13 +470,9 @@ object WebViewStreamProxy {
                             return idx >= 0 ? dataUrl.substring(idx + 1) : 'ERR:no-data';
                         } catch(e) { return 'ERR:' + e; }
                     })();""".trimIndent()
-                    wv.evaluateJavascript(js) { res ->
-                        result.set(res ?: "ERR:null")
-                        latch.countDown()
-                    }
+                    wv.evaluateJavascript(js) { res -> future.complete(res ?: "ERR:null") }
                 } catch (e: Throwable) {
-                    result.set("ERR:${e.message}")
-                    latch.countDown()
+                    future.complete("ERR:${e.message}")
                 }
             }
         } catch (e: Throwable) {
@@ -492,11 +480,7 @@ object WebViewStreamProxy {
         }
 
         val raw = try {
-            if (!latch.await(CHUNK_FETCH_TIMEOUT_S, TimeUnit.SECONDS)) {
-                Log.w(TAG, "[PROXY] timeout fetch chunk $start..$end")
-                return null
-            }
-            result.get()
+            future.get(CHUNK_FETCH_TIMEOUT_S, TimeUnit.SECONDS)
         } catch (e: Exception) {
             Log.w(TAG, "[PROXY] timeout fetch chunk $start..$end: ${e.message}")
             return null
@@ -522,6 +506,18 @@ object WebViewStreamProxy {
         try { serverSocket?.close() } catch (_: Throwable) {}
         serverSocket = null
         streamUrl = null
+        try {
+            val v = webView
+            if (v != null) {
+                CommonActivity.activity?.runOnUiThread {
+                    try {
+                        (v.parent as? ViewGroup)?.removeView(v)
+                        v.destroy()
+                    } catch (_: Throwable) {}
+                }
+            }
+        } catch (_: Throwable) {}
+        webView = null
         val wv = webView
         webView = null
         if (wv != null) {

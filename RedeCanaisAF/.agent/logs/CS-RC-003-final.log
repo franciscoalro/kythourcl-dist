@@ -1,0 +1,7 @@
+ M src/main/kotlin/com/RedeCanaisAF/CloudflareSolver.kt
+ M src/main/kotlin/com/RedeCanaisAF/RedeCanaisAF.kt
+ M src/main/kotlin/com/RedeCanaisAF/RedeCanaisAFProvider.kt
+ M src/main/kotlin/com/RedeCanaisAF/WebViewStreamProxy.kt
+ M ../builds/RedeCanaisAF.cs3
+?? ../.kotlin/errors/errors-1788098776037.log
+?? .agent/
