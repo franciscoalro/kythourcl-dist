@@ -33,7 +33,7 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 144
+        const val BUILD_VERSION = 150
         private const val TAG = "RedeCanaisAF-Trace"
 
         private val reqCounter = java.util.concurrent.atomic.AtomicInteger(0)
@@ -223,9 +223,30 @@ class RedeCanaisAF : MainAPI() {
         val fullBase = if (baseSlug.startsWith("http")) baseSlug else "$mainUrl/browse-${baseSlug.lowercase()}-videos"
         val url = if (fullBase.endsWith(".html")) fullBase else "$fullBase-$page-date.html"
         val now = android.os.SystemClock.elapsedRealtime()
+
+        // 1. Fast path RAM
         homeCache[url]?.takeIf { now - it.first < RESPONSE_CACHE_TTL_MS }?.second?.let {
-            Log.i(TAG, "[HOME_CACHE_HIT] Cat=${request.name} url=$url")
+            Log.i(TAG, "[HOME_RAM_HIT] Cat=${request.name} url=$url")
             return it
+        }
+
+        // 2. Fast path DISCO (<50ms - Abre instantâneo como outros plugins)
+        CloudflareSolver.restoreDiskCacheIfNeeded()
+        CloudflareSolver.getDiskCachedHtml(url)?.let { cachedHtml ->
+            if (!CloudflareSolver.isChallengeContent(cachedHtml) && !CloudflareSolver.isIpBannedContent(cachedHtml)) {
+                val doc = Jsoup.parse(cachedHtml, url)
+                val elements = doc.select("div.pm-video-thumb, li.pm-video-thumb, .pm-video-thumb")
+                val homeList = elements.mapNotNull { parseCard(it) }.distinctBy { it.url }
+                if (homeList.isNotEmpty()) {
+                    val resp = newHomePageResponse(
+                        listOf(HomePageList(request.name, homeList)),
+                        hasNext = true
+                    )
+                    homeCache[url] = Pair(now, resp)
+                    Log.i(TAG, "[HOME_DISK_HIT] Cat=${request.name} retornando ${homeList.size} cards instantâneo (<50ms)")
+                    return resp
+                }
+            }
         }
 
         Log.i(TAG, "[MAINPAGE_ENTER] Cat=${request.name} url=$url")
