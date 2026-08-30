@@ -3,6 +3,6 @@
   "description": "Repositório de extensões CloudStream do Kythour",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/plugins.json"
+    "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/plugins.json"
   ]
 }
