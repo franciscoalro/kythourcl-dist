@@ -12,6 +12,7 @@ import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.CommonActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
@@ -19,10 +20,13 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.ServerSocket
 import java.net.Socket
-import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
+import kotlin.coroutines.resume
 
 /**
  * v122 — Proxy local de stream via WebView.
@@ -226,12 +230,10 @@ object WebViewStreamProxy {
 
                 // 3) Poll via performance entries (fallback se shouldInterceptRequest falhar)
                 if (!captured.get()) {
-                    val found = withContext(Dispatchers.Main) {
-                        var result: String? = null
-                        val future = CompletableFuture<String?>()
-                        try {
-                            wvNow.evaluateJavascript(
-                                """(function() {
+                    val found = withTimeoutOrNull(4000L) {
+                        evaluateJavascript(
+                            wvNow,
+                            """(function() {
                                     try {
                                         const entries = performance.getEntriesByType('resource');
                                         for (let i = entries.length - 1; i >= 0; i--) {
@@ -246,11 +248,8 @@ object WebViewStreamProxy {
                                     }
                                     return '';
                                 })();""".trimIndent()
-                            ) { res -> future.complete(res?.removeSurrounding("\"")) }
-                            result = future.get(4, TimeUnit.SECONDS)
-                        } catch (_: Throwable) {}
-                        result
-                    }
+                        )
+                    }?.removeSurrounding("\"")
                     if (!found.isNullOrBlank() && !captured.get()) {
                         streamUrl = found
                         captured.set(true)
@@ -278,20 +277,15 @@ object WebViewStreamProxy {
                     reloadCount < MAX_RELOADS
                 ) {
                     lastReloadCheckMs = now
-                    val hasCaptcha = withContext(Dispatchers.Main) {
-                        var ok = false
-                        val future = CompletableFuture<Boolean>()
-                        try {
-                            wvNow.evaluateJavascript(
-                                """(function() {
+                    val hasCaptcha = withTimeoutOrNull(4000L) {
+                        evaluateJavascript(
+                            wvNow,
+                            """(function() {
                                     return document.querySelectorAll('.captcha_button, #submit').length > 0
                                         && typeof window.rcPreloadPlayer === 'function';
                                 })();""".trimIndent()
-                            ) { res -> future.complete(res?.contains("true") == true) }
-                            ok = future.get(4, TimeUnit.SECONDS)
-                        } catch (_: Throwable) {}
-                        ok
-                    }
+                        )?.contains("true") == true
+                    } ?: false
                     if (dudClick || !hasCaptcha) {
                         reloadCount++
                         if (dudClick) {
@@ -329,6 +323,21 @@ object WebViewStreamProxy {
 
         Log.i(TAG, "[PROXY] Captura OK: $finalUrl")
         return startLocalServer(finalUrl)
+    }
+
+    /** Executa JavaScript sem bloquear a main thread enquanto o WebView entrega o callback. */
+    private suspend fun evaluateJavascript(webView: WebView, script: String): String? {
+        return withContext(Dispatchers.Main) {
+            suspendCancellableCoroutine { continuation ->
+                try {
+                    webView.evaluateJavascript(script) { result ->
+                        if (continuation.isActive) continuation.resume(result)
+                    }
+                } catch (_: Throwable) {
+                    if (continuation.isActive) continuation.resume(null)
+                }
+            }
+        }
     }
 
     /**
@@ -400,9 +409,12 @@ object WebViewStreamProxy {
                 // v123: prefetch duplo — busca o chunk N+1 em paralelo enquanto serve o N,
                 // eliminando a latência de rede/JS entre chunks (sem pausas na reprodução).
                 var pos = rangeStart
-                var nextChunk = CompletableFuture<ByteArray?>()
+                val firstStart = pos
+                var nextChunk = FutureTask<ByteArray?> {
+                    fetchChunk(targetUrl, firstStart, firstStart + CHUNK_SIZE - 1)
+                }
                 thread(isDaemon = true, name = "RCProxy-Prefetch") {
-                    nextChunk.complete(fetchChunk(targetUrl, pos, pos + CHUNK_SIZE - 1))
+                    nextChunk.run()
                 }
                 while (isServing) {
                     val chunk = try {
@@ -414,9 +426,11 @@ object WebViewStreamProxy {
                     if (chunk.isEmpty()) break // EOF (416)
                     val nextStart = pos + chunk.size
                     // dispara o fetch do próximo chunk ANTES de escrever o atual no socket
-                    val next = CompletableFuture<ByteArray?>()
+                    val next = FutureTask<ByteArray?> {
+                        fetchChunk(targetUrl, nextStart, nextStart + CHUNK_SIZE - 1)
+                    }
                     thread(isDaemon = true, name = "RCProxy-Prefetch") {
-                        next.complete(fetchChunk(targetUrl, nextStart, nextStart + CHUNK_SIZE - 1))
+                        next.run()
                     }
                     out.write(chunk)
                     out.flush()
@@ -437,7 +451,8 @@ object WebViewStreamProxy {
      */
     private fun fetchChunk(url: String, start: Long, end: Long): ByteArray? {
         val wv = webView ?: return null
-        val future = CompletableFuture<String>()
+        val result = AtomicReference<String?>()
+        val latch = CountDownLatch(1)
         try {
             wv.post {
                 try {
@@ -463,9 +478,13 @@ object WebViewStreamProxy {
                             return idx >= 0 ? dataUrl.substring(idx + 1) : 'ERR:no-data';
                         } catch(e) { return 'ERR:' + e; }
                     })();""".trimIndent()
-                    wv.evaluateJavascript(js) { res -> future.complete(res ?: "ERR:null") }
+                    wv.evaluateJavascript(js) { res ->
+                        result.set(res ?: "ERR:null")
+                        latch.countDown()
+                    }
                 } catch (e: Throwable) {
-                    future.complete("ERR:${e.message}")
+                    result.set("ERR:${e.message}")
+                    latch.countDown()
                 }
             }
         } catch (e: Throwable) {
@@ -473,7 +492,11 @@ object WebViewStreamProxy {
         }
 
         val raw = try {
-            future.get(CHUNK_FETCH_TIMEOUT_S, TimeUnit.SECONDS)
+            if (!latch.await(CHUNK_FETCH_TIMEOUT_S, TimeUnit.SECONDS)) {
+                Log.w(TAG, "[PROXY] timeout fetch chunk $start..$end")
+                return null
+            }
+            result.get()
         } catch (e: Exception) {
             Log.w(TAG, "[PROXY] timeout fetch chunk $start..$end: ${e.message}")
             return null

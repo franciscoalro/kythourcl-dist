@@ -1,7 +1,5 @@
-// Minimal build file
-
-// v130 — primeiro diálogo navega o MESMO WebView por todas as URLs do catálogo (sessão TLS resolvida)
+// v147 — IP ban 1006 detect+cache fallback (bypass não re-tenta quando banido)
 cloudstream {
-    version = 144
+    version = 147
 }
 
