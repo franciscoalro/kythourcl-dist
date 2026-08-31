@@ -752,12 +752,14 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                 interactiveWebView = wv
 
                 // v141: a WebView precisa estar visível e receber foco para permitir interação manual.
-                wv.visibility = android.view.View.INVISIBLE
-                wv.alpha = 0f
-                wv.layoutParams = FrameLayout.LayoutParams(1, 1).apply {
-                    leftMargin = 0
-                    topMargin = 0
-                }
+                wv.visibility = android.view.View.VISIBLE
+                wv.alpha = 0.01f
+                wv.translationX = -50000f
+                wv.translationY = -50000f
+                wv.layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
                 rootLayout.addView(wv)
                 Log.i(TAG, "[CF] WebView 100% HEADLESS (invisível) acoplada em background | url=$url")
                 wv.loadUrl(url)
@@ -1125,12 +1127,14 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                     }
                 }
                 wvVar = wv
-                wv.visibility = android.view.View.INVISIBLE
-                wv.alpha = 0f
-                wv.layoutParams = FrameLayout.LayoutParams(1, 1).apply {
-                    leftMargin = 0
-                    topMargin = 0
-                }
+                wv.visibility = android.view.View.VISIBLE
+                wv.alpha = 0.01f
+                wv.translationX = -50000f
+                wv.translationY = -50000f
+                wv.layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
                 rootLayout.addView(wv)
                 wv.loadUrl(url)
             } catch (e: Throwable) {
