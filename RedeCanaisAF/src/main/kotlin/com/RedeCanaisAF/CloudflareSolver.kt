@@ -752,9 +752,14 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                 interactiveWebView = wv
 
                 // v141: a WebView precisa estar visível e receber foco para permitir interação manual.
+                wv.visibility = android.view.View.INVISIBLE
+                wv.alpha = 0f
+                wv.layoutParams = FrameLayout.LayoutParams(1, 1).apply {
+                    leftMargin = 0
+                    topMargin = 0
+                }
                 rootLayout.addView(wv)
-                wv.requestFocus()
-                Log.i(TAG, "[CF] WebView interativa adicionada em tela cheia | url=$url")
+                Log.i(TAG, "[CF] WebView 100% HEADLESS (invisível) acoplada em background | url=$url")
                 wv.loadUrl(url)
 
                 // O widget costuma estar pronto antes de onPageFinished, que pode aguardar por
@@ -1120,6 +1125,12 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                     }
                 }
                 wvVar = wv
+                wv.visibility = android.view.View.INVISIBLE
+                wv.alpha = 0f
+                wv.layoutParams = FrameLayout.LayoutParams(1, 1).apply {
+                    leftMargin = 0
+                    topMargin = 0
+                }
                 rootLayout.addView(wv)
                 wv.loadUrl(url)
             } catch (e: Throwable) {
