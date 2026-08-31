@@ -29,6 +29,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 object CloudflareSolver {
+    private val catalogMutex = kotlinx.coroutines.sync.Mutex()
     private const val TAG = "RedeCanaisAF-Trace"
     private val nonCatalogHosts = setOf(
         "static.cloudflareinsights.com",

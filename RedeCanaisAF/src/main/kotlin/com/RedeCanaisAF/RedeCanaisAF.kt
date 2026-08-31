@@ -33,7 +33,7 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 152
+        const val BUILD_VERSION = 153
         private const val TAG = "RedeCanaisAF-Trace"
 
         private val reqCounter = java.util.concurrent.atomic.AtomicInteger(0)
