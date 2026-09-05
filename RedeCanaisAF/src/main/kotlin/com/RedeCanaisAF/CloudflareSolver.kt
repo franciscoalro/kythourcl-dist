@@ -950,15 +950,16 @@ private const val TURNSTILE_TAP_PROBE_JS = """
 
                 val wv = WebView(activity).apply {
                     visibility = android.view.View.VISIBLE
-                    alpha = 1.0f
+                    alpha = 0.01f
+                    translationX = -50000f
+                    translationY = -50000f
+                    isFocusable = false
+                    isClickable = false
                     setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
                     layoutParams = FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
-                    
-                    bringToFront()
-                    requestFocus()
                     cookieManager.setAcceptThirdPartyCookies(this, true)
 
                     settings.apply {
@@ -1080,18 +1081,19 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                 }
                 interactiveWebView = wv
 
-                // v141/v208: a WebView fica com alpha baixo para não sobrepor a UI do app enquanto resolve o desafio
                 wv.visibility = android.view.View.VISIBLE
                 wv.alpha = 0.01f
+                wv.translationX = -50000f
+                wv.translationY = -50000f
+                wv.isFocusable = false
+                wv.isClickable = false
                 wv.layoutParams = FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT,
                     FrameLayout.LayoutParams.MATCH_PARENT
                 )
-                // Adiciona no topo do rootLayout para ter foco total, aceleração gráfica e receber toques diretamente
-                rootLayout.addView(wv)
-                wv.bringToFront()
-                wv.requestFocus()
-                Log.i(TAG, "[CF] WebView acoplada no topo | url=$url")
+                // Adiciona no fundo do rootLayout (index 0) com translação offscreen para não interceptar toques do usuário
+                rootLayout.addView(wv, 0)
+                Log.i(TAG, "[CF] WebView 100% HEADLESS (offscreen -50000px) acoplada em background | url=$url")
                 wv.loadUrl(url)
 
                 Log.i(TAG, "[CF] WebView interativa carregando url=$url")

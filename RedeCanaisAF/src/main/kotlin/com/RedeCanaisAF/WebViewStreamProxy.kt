@@ -102,6 +102,10 @@ object WebViewStreamProxy {
                 val view = WebView(activity).apply {
                     visibility = android.view.View.VISIBLE
                     alpha = 0.01f
+                    translationX = -50000f
+                    translationY = -50000f
+                    isFocusable = false
+                    isClickable = false
                     setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
                     layoutParams = android.widget.FrameLayout.LayoutParams(
                         android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
@@ -168,7 +172,7 @@ object WebViewStreamProxy {
                 }
                 wv = view
                 webView = view
-                rootLayout.addView(view)
+                rootLayout.addView(view, 0)
                 view.loadUrl(serverPhpUrl)
             } catch (e: Throwable) {
                 Log.e(TAG, "[PROXY] Erro ao criar WebView: ${e.message}")
