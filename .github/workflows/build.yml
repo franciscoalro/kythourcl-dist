@@ -21,11 +21,12 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
       - name: Build Plugins
-        run: ./gradlew :RedeCanaisAF:make :AnimeFire:make :CineVision:make :Pobreflix:make :TopAnimes:make --stacktrace
-      - name: Copy cs3 to builds
+        run: ./gradlew makePlugins --stacktrace
+      - name: Copy cs3 and plugins.json to builds
         run: |
           mkdir -p builds
-          find . -name "*.cs3" -exec cp {} builds/ \;
+          find . -maxdepth 3 -name "*.cs3" -exec cp {} builds/ \;
+          if [ -f build/plugins.json ]; then cp build/plugins.json builds/plugins.json; fi
           ls -lh builds/
       - name: Commit builds
         run: |

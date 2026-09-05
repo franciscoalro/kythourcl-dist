@@ -5,7 +5,6 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 
 buildscript {
     repositories {
-        mavenLocal()
         google()
         mavenCentral()
         maven { url = uri("https://jitpack.io") } 
@@ -13,7 +12,6 @@ buildscript {
 
     dependencies {
         classpath("com.android.tools.build:gradle:8.7.3")
-        classpath("com.lagradost.cloudstream3:gradle:local-SNAPSHOT")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.10")
     }
 }
@@ -28,6 +26,7 @@ allprojects {
 
 plugins {
     id("org.jetbrains.kotlin.android") version "2.1.10" apply false
+    id("com.lagradost.cloudstream3.gradle") apply false
 }
 
 fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) = 
