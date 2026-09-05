@@ -16,3 +16,14 @@ local.properties
 __pycache__/
 *.pyc
 .gradle_home/
+.kotlin/
+*.png
+cloudstream_logs.txt
+data.csv
+etl.py
+example.txt
+novo_arquivo.txt
+scratch/
+com/
+CLAUDE.md
+

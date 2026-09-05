@@ -5,6 +5,7 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 
 buildscript {
     repositories {
+        mavenLocal()
         google()
         mavenCentral()
         maven { url = uri("https://jitpack.io") } 
@@ -12,7 +13,7 @@ buildscript {
 
     dependencies {
         classpath("com.android.tools.build:gradle:8.7.3")
-        classpath("com.github.recloudstream:gradle:master-SNAPSHOT")
+        classpath("com.lagradost.cloudstream3:gradle:local-SNAPSHOT")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.10")
     }
 }
@@ -47,7 +48,7 @@ subprojects {
     cloudstream {
         setRepo("https://github.com/franciscoalro/kythourcl-dist") 
         authors = listOf("franciscoalro")
-        version = 43
+        version = 149
     }
 
     android {

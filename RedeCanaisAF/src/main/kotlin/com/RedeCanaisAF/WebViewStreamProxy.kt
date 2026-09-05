@@ -2,14 +2,19 @@ package com.RedeCanaisAF
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.graphics.Bitmap
+import android.os.SystemClock
 import android.util.Log
+import android.view.MotionEvent
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.CommonActivity
+import com.lagradost.cloudstream3.network.WebViewResolver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -90,26 +95,35 @@ object WebViewStreamProxy {
                 val cookieManager = CookieManager.getInstance()
                 cookieManager.setAcceptCookie(true)
 
+                val userAgent = CloudflareSolver.lastUserAgent
+                    ?: WebViewResolver.webViewUserAgent
+                    ?: MOBILE_UA
+
                 val view = WebView(activity).apply {
-                    visibility = android.view.View.INVISIBLE
-                    layoutParams = android.widget.FrameLayout.LayoutParams(1, 1).apply {
-                        leftMargin = 0
-                        topMargin = 0
-                    }
-                    alpha = 0f
+                    visibility = android.view.View.VISIBLE
+                    alpha = 0.01f
+                    setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
+                    layoutParams = android.widget.FrameLayout.LayoutParams(
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+                    )
                     cookieManager.setAcceptThirdPartyCookies(this, true)
                     settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
-                        databaseEnabled = true
-                        blockNetworkImage = true
-                        loadsImagesAutomatically = false
+                        blockNetworkImage = false
+                        loadsImagesAutomatically = true
                         useWideViewPort = true
                         loadWithOverviewMode = true
                         javaScriptCanOpenWindowsAutomatically = true
                         mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                        // v122: UA mobile exato (o mesmo que funcionou via browser-harness)
-                        userAgentString = MOBILE_UA
+                        userAgentString = userAgent
+                    }
+                    webChromeClient = object : WebChromeClient() {
+                        override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                            super.onProgressChanged(view, newProgress)
+                            view?.evaluateJavascript(CloudflareSolver.ANTI_DETECTION_JS, null)
+                        }
                     }
                     webViewClient = object : WebViewClient() {
                         override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
@@ -119,6 +133,11 @@ object WebViewStreamProxy {
                                 view?.destroy()
                             } catch (_: Throwable) {}
                             return true
+                        }
+
+                        override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                            super.onPageStarted(view, url, favicon)
+                            view?.evaluateJavascript(CloudflareSolver.ANTI_DETECTION_JS, null)
                         }
 
                         override fun shouldInterceptRequest(
@@ -141,6 +160,7 @@ object WebViewStreamProxy {
                         override fun onPageFinished(view: WebView?, finishedUrl: String?) {
                             super.onPageFinished(view, finishedUrl)
                             CookieManager.getInstance().flush()
+                            view?.evaluateJavascript(CloudflareSolver.ANTI_DETECTION_JS, null)
                             pageReady.set(true)
                             Log.d(TAG, "[PROXY] onPageFinished url=$finishedUrl")
                         }
@@ -188,7 +208,18 @@ object WebViewStreamProxy {
                         try {
                             wvNow.evaluateJavascript(
                                 """(function() {
-                                    if (typeof window.rcPreloadPlayer !== 'function') return 'wait';
+                                    const cfIframe = document.querySelector("iframe[src*='challenges.cloudflare.com']");
+                                    if (cfIframe) {
+                                        const rect = cfIframe.getBoundingClientRect();
+                                        if (rect.width > 0 && rect.height > 0) {
+                                            return 'cf:' + (rect.left + 35) + ':' + (rect.top + rect.height/2);
+                                        }
+                                    }
+                                    if (typeof window.rcPreloadPlayer !== 'function') {
+                                        const b = document.getElementById('submit') || document.querySelector('.captcha_button') || document.querySelector('button');
+                                        if (b) { b.click(); return 'click_early'; }
+                                        return 'wait';
+                                    }
                                     const b = document.getElementById('submit') || document.querySelector('.captcha_button');
                                     if (b) { b.click(); return 'click'; }
                                     window.rcPreloadPlayer(Date.now());
@@ -197,7 +228,31 @@ object WebViewStreamProxy {
                             ) { res ->
                                 val r = res?.removeSurrounding("\"")
                                 Log.i(TAG, "[PROXY] click recap -> $r")
-                                if (r == "click" || r == "direct") {
+                                if (r?.startsWith("cf:") == true) {
+                                    val parts = r.split(":")
+                                    val x = parts.getOrNull(1)?.toFloatOrNull() ?: 50f
+                                    val y = parts.getOrNull(2)?.toFloatOrNull() ?: 50f
+                                    val downTime = SystemClock.uptimeMillis()
+                                    val eventDown = MotionEvent.obtain(
+                                        downTime, downTime,
+                                        MotionEvent.ACTION_DOWN,
+                                        x, y,
+                                        0.85f, 0.85f, 0, 1.0f, 1.0f, 0, 0
+                                    ).apply { source = android.view.InputDevice.SOURCE_TOUCHSCREEN }
+                                    wvNow.dispatchTouchEvent(eventDown)
+                                    eventDown.recycle()
+
+                                    val eventUp = MotionEvent.obtain(
+                                        downTime, downTime + 80,
+                                        MotionEvent.ACTION_UP,
+                                        x + 0.5f, y + 0.5f,
+                                        0f, 0f, 0, 1.0f, 1.0f, 0, 0
+                                    ).apply { source = android.view.InputDevice.SOURCE_TOUCHSCREEN }
+                                    wvNow.dispatchTouchEvent(eventUp)
+                                    eventUp.recycle()
+                                    Log.i(TAG, "[PROXY] Turnstile checkbox clicado no server.php em ($x, $y)")
+                                }
+                                if (r == "click" || r == "direct" || r == "click_early") {
                                     clickDone.set(true)
                                     clickDoneAtMs = now
                                 }

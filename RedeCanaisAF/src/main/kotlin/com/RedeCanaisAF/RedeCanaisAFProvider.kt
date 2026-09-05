@@ -24,7 +24,7 @@ class RedeCanaisAFProvider: Plugin() {
                 Log.d("RedeCanaisAF-Trace", "[BOOT_WARMUP] Cookies existentes no boot | len=${cookies.length}")
                 
                 // Pré-aquece o cache de lançamentos
-                api.getMainPage(1, MainPageRequest("Filmes Lançamentos", "${api.mainUrl}/browse-filmes-lancamentos-videos", false))
+                api.getMainPage(1, MainPageRequest("Filmes Lançamentos", "${api.mainUrl}/browse-filmes-videos-1-date.html", false))
                 Log.i("RedeCanaisAF-Trace", "[BOOT_WARMUP] Pré-carregamento concluído com sucesso!")
             } catch (e: Throwable) {
                 Log.d("RedeCanaisAF-Trace", "[BOOT_WARMUP] Warm-up em background finalizado: ${e.message}")

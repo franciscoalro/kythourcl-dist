@@ -7,7 +7,9 @@ import android.util.Log
 import android.view.MotionEvent
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
+import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.WebResourceRequest
@@ -31,10 +33,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 object CloudflareSolver {
     private val catalogMutex = kotlinx.coroutines.sync.Mutex()
     private const val TAG = "RedeCanaisAF-Trace"
-    private val nonCatalogHosts = setOf(
-        "static.cloudflareinsights.com",
-        "acscdn.com"
-    )
+    // v158: static.cloudflareinsights.com e acscdn.com REMOVIDOS — são infraestrutura
+    // Cloudflare. Bloqueá-los impede o Turnstile managed de injetar o iframe (beacon.min.js
+    // é sinal de verificação). emptyResource() retornava 200/0-bytes silenciosamente.
+    private val nonCatalogHosts = setOf<String>()
     var lastUserAgent: String? = null
 
     // v145: persistência cf_clearance — após validar o Turnstile uma vez, o cookie é salvo em
@@ -115,9 +117,12 @@ object CloudflareSolver {
     }
 
     internal fun challengeUserAgent(rawUserAgent: String): String {
-        val chromeToken = Regex("Chrome/[0-9.]+").find(rawUserAgent)?.value ?: return rawUserAgent
-        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) $chromeToken Safari/537.36"
+        if (rawUserAgent.isBlank()) return rawUserAgent
+        return rawUserAgent
+            .replace("; wv", "")
+            .replace("Version/4.0 ", "")
+            .trim()
+            .replace(Regex("\\s+"), " ")
     }
 
     suspend fun currentUserAgent(): String {
@@ -132,7 +137,7 @@ object CloudflareSolver {
         val resolved = challengeUserAgent(rawUserAgent)
         lastUserAgent = resolved
         if (resolved != rawUserAgent) {
-            Log.i(TAG, "[CF] User-Agent WebView normalizado para perfil Chrome desktop")
+            Log.i(TAG, "[CF] User-Agent WebView normalizado para perfil Chrome Mobile: $resolved")
         }
         Log.i(TAG, "[CF] User-Agent compartilhado HTTP/WebView: $resolved")
         return resolved
@@ -145,8 +150,12 @@ object CloudflareSolver {
                 url,
                 "cf_clearance=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; Domain=.redecanais.af; Secure; SameSite=None"
             )
+            cookieManager.setCookie(
+                url,
+                "__cf_bm=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; Domain=.redecanais.af; Secure; SameSite=None"
+            )
             cookieManager.flush()
-            Log.w(TAG, "[CF] cf_clearance invalidado após resposta de challenge")
+            Log.w(TAG, "[CF] cf_clearance e __cf_bm invalidados para $url")
         } catch (e: Throwable) {
             Log.w(TAG, "[CF] Falha ao invalidar cf_clearance: ${e.message}")
         }
@@ -284,46 +293,79 @@ object CloudflareSolver {
 private const val TURNSTILE_TAP_PROBE_JS = """
         (function() {
             try {
-                var frames = document.querySelectorAll(
-                    'iframe[src*="challenges.cloudflare.com"], ' +
-                    'iframe[src*="challenge-platform"], ' +
-                    'iframe[id^="cf-chl-"], ' +
-                    'iframe[data-testid*="turnstile"], ' +
-                    'iframe[src*="turnstile"]'
-                );
-                var viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
-                var viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-                for (var i = 0; i < frames.length; i++) {
-                    var rect = frames[i].getBoundingClientRect();
-                    if (rect.width >= 30 && rect.height >= 30) {
-                        return [
-                            'iframe_rect', rect.left, rect.top, rect.width, rect.height,
-                            viewportWidth, viewportHeight
-                        ].join('|');
+                function getRect(type, el) {
+                    var r = el.getBoundingClientRect();
+                    var w = window.innerWidth || document.documentElement.clientWidth || 720;
+                    var h = window.innerHeight || document.documentElement.clientHeight || 1280;
+                    return [type, r.left, r.top, r.width, r.height, w, h].join('|');
+                }
+
+                var w = window.innerWidth || document.documentElement.clientWidth || 720;
+                var h = window.innerHeight || document.documentElement.clientHeight || 1280;
+
+                // 1. Procura DIRETA por botoes interativos ("Verify you are human" / "Verificar se você é humano")
+                var btns = document.querySelectorAll('button, input[type="button"], input[type="submit"], [role="button"], a.btn, .btn');
+                for (var b = 0; b < btns.length; b++) {
+                    var btn = btns[b];
+                    var txt = (btn.innerText || btn.value || btn.textContent || '').trim();
+                    if (/verify|verificar|human|humano/i.test(txt)) {
+                        var br = btn.getBoundingClientRect();
+                        if (br.width >= 30 && br.height >= 20) {
+                            return getRect('button_rect', btn);
+                        }
                     }
                 }
-                var response = document.querySelector(
-                    'input[id^="cf-chl-widget-"][id$="_response"], input[name="cf-turnstile-response"]'
-                );
-                if (!response) return 'iframe_missing';
-                var host = response.parentElement;
-                while (host && host !== document.body) {
-                    var r2 = host.getBoundingClientRect();
-                    if (r2.width > 0 && r2.height >= 40 && r2.height <= 150) {
-                        return [
-                            'turnstile_rect', r2.left, r2.top, r2.height,
-                            viewportWidth, viewportHeight
-                        ].join('|');
+
+                // 2. Procura direta em IFRAMEs do Turnstile (o widget principal fica abaixo do titulo, top >= 200)
+                var iframes = document.querySelectorAll('iframe');
+                for (var i = 0; i < iframes.length; i++) {
+                    var ifr = iframes[i];
+                    var ir = ifr.getBoundingClientRect();
+                    if (ir.width >= 150 && ir.height >= 40 && ir.top >= 200) {
+                        return getRect('iframe_rect', ifr);
                     }
-                    host = host.parentElement;
                 }
-                return 'turnstile_rect_missing';
-            } catch (e) {
-                return 'iframe_probe_error:' + e.message;
+
+                // 3. Procura recursiva em Shadow DOMs
+                var all = document.querySelectorAll('*');
+                for (var j = 0; j < all.length; j++) {
+                    var node = all[j];
+                    if (node.shadowRoot) {
+                        var shadowBtn = node.shadowRoot.querySelector('button, input[type="button"], [role="button"]');
+                        if (shadowBtn) {
+                            var sbr = shadowBtn.getBoundingClientRect();
+                            if (sbr.width > 0 && sbr.height > 0 && sbr.top >= 200) return getRect('button_rect', shadowBtn);
+                        }
+                        var shadowIframe = node.shadowRoot.querySelector('iframe');
+                        if (shadowIframe) {
+                            var sir = shadowIframe.getBoundingClientRect();
+                            if (sir.width >= 20 && sir.height >= 20 && sir.top >= 200) return getRect('iframe_rect', shadowIframe);
+                        }
+                        var shadowCb = node.shadowRoot.querySelector('input[type="checkbox"], .ctp-checkbox-label, [class*="checkbox"], [id*="turnstile"]');
+                        if (shadowCb) {
+                            var scbr = shadowCb.getBoundingClientRect();
+                            if (scbr.width > 0 && scbr.height > 0 && scbr.top >= 200) return getRect('checkbox_rect', shadowCb);
+                        }
+                    }
+                }
+
+                // 4. Procura por DIVs / containers do widget Turnstile
+                var divs = document.querySelectorAll('.cf-turnstile, [class*="turnstile"], [id*="turnstile"], [id*="cf-chl-widget"], div');
+                for (var k = 0; k < divs.length; k++) {
+                    var d = divs[k];
+                    var dr = d.getBoundingClientRect();
+                    if (dr.width >= 200 && dr.width <= 400 && dr.height >= 40 && dr.height <= 100 && dr.top >= 200) {
+                        return getRect('iframe_rect', d);
+                    }
+                }
+
+                // 5. Fallback calibrado para o widget Turnstile na tela mobile (top = 358 CSS px)
+                return ['iframe_rect', 16, 358, 328, 65, w, h].join('|');
+            } catch(err) {
+                return 'probe_error:' + err.message;
             }
         })();
-
-    """
+"""
 
     internal fun turnstileTapPoint(
         probeResult: String?,
@@ -343,20 +385,55 @@ private const val TURNSTILE_TAP_PROBE_JS = """
         val viewportHeight = parts[parts.size - 1].toFloatOrNull()?.takeIf { it > 0f } ?: return null
 
         return when (parts[0]) {
-            // v144: retangulo do IFRAME do Turnstile (cross-origin) — o clique e no checkbox
-            // que ocupa os primeiros ~65 CSS px do widget padrao (300 x 65).
-            // Formato: iframe_rect|left|top|width|height|viewportWidth|viewportHeight
-            "iframe_rect" -> {
+            // v181: Botao "Verify you are human" do Cloudflare
+            "button_rect" -> {
                 if (parts.size != 7) return null
                 val left = parts[1].toFloatOrNull() ?: return null
                 val top = parts[2].toFloatOrNull() ?: return null
                 val width = parts[3].toFloatOrNull() ?: return null
                 val height = parts[4].toFloatOrNull() ?: return null
-                if (width < 30f || height < 30f) return null
-                val checkboxCenterX = if (width >= 200f) 40f else width / 2f
+                if (width < 20f || height < 10f) return null
                 scaleToView(
+                    left + width / 2f,
+                    top + height / 2f,
+                    viewWidth, viewHeight, viewportWidth, viewportHeight
+                )
+            }
+            // v144: retangulo do IFRAME do Turnstile (cross-origin) — o clique e no checkbox
+            // que ocupa os primeiros ~65 CSS px do widget padrao (300 x 65).
+            // Formato: iframe_rect|left|top|width|height|viewportWidth|viewportHeight
+            "iframe_rect" -> {
+                val fallbackX = viewWidth * 0.14f
+                val fallbackY = viewHeight * 0.50f
+                if (parts.size != 7) return fallbackX to fallbackY
+                val left = parts[1].toFloatOrNull() ?: return fallbackX to fallbackY
+                val top = parts[2].toFloatOrNull() ?: return fallbackX to fallbackY
+                val width = parts[3].toFloatOrNull() ?: return fallbackX to fallbackY
+                val height = parts[4].toFloatOrNull() ?: return fallbackX to fallbackY
+                if (width < 30f || height < 30f) return fallbackX to fallbackY
+                // O checkbox fica a ~36 CSS px da borda esquerda do iframe
+                val checkboxCenterX = if (width >= 200f) 36f else width / 2f
+                val checkboxCenterY = height / 2f
+                val scaled = scaleToView(
                     left + checkboxCenterX,
-                    top + minOf(height / 2f, 32.5f),
+                    top + checkboxCenterY,
+                    viewWidth, viewHeight, viewportWidth, viewportHeight
+                )
+                if (scaled != null && scaled.second in 30f..(viewHeight * 0.95f)) {
+                    scaled
+                } else {
+                    fallbackX to fallbackY
+                }
+            }
+            "checkbox_rect" -> {
+                if (parts.size != 7) return null
+                val left = parts[1].toFloatOrNull() ?: return null
+                val top = parts[2].toFloatOrNull() ?: return null
+                val width = parts[3].toFloatOrNull() ?: return null
+                val height = parts[4].toFloatOrNull() ?: return null
+                scaleToView(
+                    left + width / 2f,
+                    top + height / 2f,
                     viewWidth, viewHeight, viewportWidth, viewportHeight
                 )
             }
@@ -377,7 +454,7 @@ private const val TURNSTILE_TAP_PROBE_JS = """
         }
     }
 
-    // v144: converte CSS px do viewport do WebView para px fisicos da view (escala dpr).
+    // v172: Converte CSS px do viewport para px físicos usando proporção uniforme (device pixel ratio).
     private fun scaleToView(
         cssX: Float,
         cssY: Float,
@@ -386,8 +463,9 @@ private const val TURNSTILE_TAP_PROBE_JS = """
         viewportWidth: Float,
         viewportHeight: Float
     ): Pair<Float, Float>? {
-        val touchX = cssX * viewWidth / viewportWidth
-        val touchY = cssY * viewHeight / viewportHeight
+        val scale = viewWidth.toFloat() / viewportWidth
+        val touchX = cssX * scale
+        val touchY = cssY * scale
         if (touchX !in 0f..viewWidth.toFloat() || touchY !in 0f..viewHeight.toFloat()) return null
         return touchX to touchY
     }
@@ -395,17 +473,29 @@ private const val TURNSTILE_TAP_PROBE_JS = """
     internal fun isChallengeContent(content: String): Boolean {
         if (content.isBlank()) return false
         if (isIpBannedContent(content)) return true
+        if (content.contains("pm-video-thumb") ||
+            content.contains("pm-li-video") ||
+            content.contains("pm-video-title") ||
+            content.contains("entry-title")) {
+            return false
+        }
         return content.contains("Just a moment", ignoreCase = true) ||
             content.contains("Um momento", ignoreCase = true) ||
             content.contains("Checking your browser", ignoreCase = true) ||
             content.contains("Verificando", ignoreCase = true) ||
+            content.contains("security verification", ignoreCase = true) ||
+            content.contains("security service", ignoreCase = true) ||
+            content.contains("verifies you are not a bot", ignoreCase = true) ||
+            content.contains("Ray ID:", ignoreCase = true) ||
             content.contains("Error code 520", ignoreCase = true) ||
             content.contains("Error code 522", ignoreCase = true) ||
             content.contains("Error code 524", ignoreCase = true) ||
             content.contains("Web server is returning", ignoreCase = true) ||
             content.contains("id=\"challenge-form\"", ignoreCase = true) ||
-            (content.contains("challenge-platform", ignoreCase = true) &&
-                content.contains("cf-chl-", ignoreCase = true))
+            content.contains("challenge-platform", ignoreCase = true) ||
+            content.contains("cf-turnstile", ignoreCase = true) ||
+            content.contains("cf-challenge", ignoreCase = true) ||
+            (content.contains("Cloudflare", ignoreCase = true) && !content.contains("redecanais"))
     }
 
     // v147: Error 1006 / "Access denied — banned your IP" é bloqueio PERMANENTE do IP pelo dono do site
@@ -419,44 +509,106 @@ private const val TURNSTILE_TAP_PROBE_JS = """
             content.contains("Attention Required", ignoreCase = true) && content.contains("cf-error-details", ignoreCase = true)
     }
 
+    // v159: anti-detection JS compartilhado entre Flow A (solveInteractive) e Flow B (solveAndGetHtml).
+    // Patches essenciais para esconder sinais de automação/WebView do Cloudflare Turnstile mantendo
+    // o perfil de dispositivo móvel consistente e sem corrupção de canvas ou GPU.
+    internal const val ANTI_DETECTION_JS = """
+        (function() {
+            try {
+                if (navigator.webdriver) {
+                    try {
+                        Object.defineProperty(navigator, 'webdriver', {
+                            get: function() { return undefined; },
+                            configurable: true
+                        });
+                    } catch(e) {}
+                }
+                if (!window.chrome) {
+                    window.chrome = {
+                        runtime: {},
+                        loadTimes: function() {},
+                        csi: function() {},
+                        app: {}
+                    };
+                }
+                if (!navigator.plugins || navigator.plugins.length === 0) {
+                    try {
+                        var dummyPlugin = {
+                            0: { type: "application/x-google-chrome-pdf", suffixes: "pdf", description: "Portable Document Format" },
+                            description: "Portable Document Format",
+                            filename: "internal-pdf-viewer",
+                            name: "Chrome PDF Viewer",
+                            length: 1
+                        };
+                        var plugins = [dummyPlugin];
+                        Object.defineProperty(plugins, 'namedItem', {
+                            value: function(name) { return this[name] || null; }
+                        });
+                        Object.defineProperty(plugins, 'item', {
+                            value: function(index) { return this[index] || null; }
+                        });
+                        Object.defineProperty(navigator, 'plugins', {
+                            get: function() { return plugins; },
+                            configurable: true
+                        });
+                    } catch(e) {}
+                }
+                if (!navigator.languages || navigator.languages.length === 0) {
+                    try {
+                        Object.defineProperty(navigator, 'languages', {
+                            get: function() { return ['pt-BR', 'pt', 'en-US', 'en']; },
+                            configurable: true
+                        });
+                    } catch(e) {}
+                }
+                return 'ok';
+            } catch(e) { return 'err:' + e.message; }
+        })();
+    """
+
     // v128: serializa os diálogos de verificação — o Turnstile managed de redecanais.af SÓ resolve
     // quando o WebView do diálogo tem foco/visibilidade. Com 4 REQs paralelos (uma categoria cada)
     // abrindo 4 diálogos ao mesmo tempo, NENHUM resolve (todos target_page_loaded=false após 60s).
     // Um diálogo por vez + cf_clearance compartilhado no CookieManager resolve o catálogo inteiro.
     private val interactiveMutex = Mutex()
 
+    class HtmlCaptureInterface(private val onHtml: (String, String) -> Unit) {
+        @android.webkit.JavascriptInterface
+        fun onHtmlCaptured(url: String, html: String) {
+            onHtml(url, html)
+        }
+    }
+
+    suspend fun solve(url: String): String {
+        capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() && !isChallengeContent(it) }?.let {
+            return it
+        }
+
+        val interactiveHtml = solveInteractive(url, timeoutMs = 75000L, force = false)
+        if (!interactiveHtml.isNullOrBlank() && !isChallengeContent(interactiveHtml)) {
+            return interactiveHtml
+        }
+        capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() && !isChallengeContent(it) }?.let {
+            return it
+        }
+        return ""
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
-    suspend fun solveInteractive(url: String, timeoutMs: Long = 30000L, force: Boolean = false): String? {
-        // v130: cache da sessão do diálogo — se outro REQ já navegou o WebView do diálogo para esta
-        // URL (mesma sessão TLS), devolve o HTML capturado sem reabrir diálogo (rápido, ~0ms).
-        capturedHtmlByUrl[url]?.let {
+    suspend fun solveInteractive(url: String, timeoutMs: Long = 75000L, force: Boolean = false): String? {
+        capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() && !isChallengeContent(it) }?.let {
             Log.i(TAG, "[CF] HTML do cache da sessão (outro REQ capturou) url=$url len=${it.length}")
             return it
         }
         return interactiveMutex.withLock {
-            // v130: o REQ#1 (primeiro a pegar o lock) navega o MESMO WebView por TODAS as URLs do
-            // catálogo antes de soltar o lock. Os REQs 2-4 que esperaram o mutex encontram o HTML da
-            // própria URL já no cache — sem abrir outro diálogo (senão: +70s cada, estoura o deadline).
-            capturedHtmlByUrl[url]?.let {
-                Log.i(TAG, "[CF] HTML do cache dentro do lock (REQ#1 navegou por todas) url=$url len=${it.length}")
+            capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() && !isChallengeContent(it) }?.let {
+                Log.i(TAG, "[CF] HTML do cache dentro do lock url=$url len=${it.length}")
                 return@withLock it
             }
-            // v128: dentro do lock, re-checa cf_clearance — outro REQ pode ter resolvido o Turnstile
-            // enquanto este aguardava o mutex; com o cookie válido, não precisa abrir outro diálogo.
-            val cookiesNow = CookieManager.getInstance().getCookie(url) ?: ""
-            if (cookiesNow.contains("cf_clearance") && !force) {
-                Log.i(TAG, "[CF] cf_clearance presente após lock (outro REQ resolveu) — pulando diálogo")
-                return@withLock ""
-            }
-            if (cookiesNow.contains("cf_clearance") && force) {
-                Log.w(TAG, "[CF] cf_clearance presente, mas force=true — reabrindo diálogo")
-            }
-            // v130: o primeiro diálogo a resolver navega o MESMO WebView pelas outras URLs do
-            // catálogo (mesma sessão TLS, sem re-challenge). Retorna o HTML desta URL.
             val extras = catalogUrls.filter { it != url && capturedHtmlByUrl[it] == null }
             val result = solveInteractiveLocked(url, timeoutMs, force, extras)
-            if (result == null) {
-                capturedHtmlByUrl[url]?.let { return@withLock it }
+            if (result == null || result.isBlank() || isChallengeContent(result)) {
+                capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() && !isChallengeContent(it) }?.let { return@withLock it }
             }
             result
         }
@@ -465,14 +617,9 @@ private const val TURNSTILE_TAP_PROBE_JS = """
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun solveInteractiveLocked(url: String, timeoutMs: Long, force: Boolean, extraUrls: List<String> = emptyList()): String? {
         val initialCookies = CookieManager.getInstance().getCookie(url) ?: ""
-        val hasClearanceBefore = initialCookies.contains("cf_clearance")
+        val initialClearance = Regex("""cf_clearance=([^;]+)""").find(initialCookies)?.groupValues?.get(1).orEmpty()
+        val hasClearanceBefore = initialClearance.isNotBlank()
         Log.d(TAG, "[CF] clearance_present=$hasClearanceBefore (before interactive)")
-
-        // v122: com force=true (chamado após solveAndGetHtml falhar), o cf_clearance existente pode
-        // estar INVALIDADO pelo IP dinâmico — não confia nele, abre o diálogo mesmo assim.
-        if (hasClearanceBefore && !force) {
-            return ""
-        }
 
         val activity: Activity? = CommonActivity.activity
         if (activity == null || activity.isFinishing || activity.isDestroyed) {
@@ -495,11 +642,17 @@ private const val TURNSTILE_TAP_PROBE_JS = """
         var interactiveWebView: WebView? = null
         var lastTurnstileTapAt = 0L
         var tapJitterIndex = 0
-
+        var pollAttempts = 0
+        var isPollScheduled = false
+        var isPollRunning = false
+        var clearanceDetectedAt = 0L
+        var hasTriggeredPostClearanceLoad = false
+        var lastTapType = ""
 
         fun tryTapTurnstile(view: WebView, reason: String) {
             val now = SystemClock.uptimeMillis()
-            if (!isPollingActive.get() || now - lastTurnstileTapAt < 5000L) return
+            val minCooldown = if (lastTapType == "button_rect") 2500L else 15000L
+            if (!isPollingActive.get() || now - lastTurnstileTapAt < minCooldown) return
             view.evaluateJavascript(TURNSTILE_TAP_PROBE_JS.trimIndent()) { probeResult ->
                 if (!isPollingActive.get() || !view.isAttachedToWindow) return@evaluateJavascript
                 val point = turnstileTapPoint(probeResult, view.width, view.height)
@@ -508,40 +661,283 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                     return@evaluateJavascript
                 }
 
+                val probeType = probeResult?.trim()?.removeSurrounding("\"")?.split('|')?.firstOrNull().orEmpty()
+                lastTapType = probeType
                 lastTurnstileTapAt = SystemClock.uptimeMillis()
-                // v144: jitter leve (±6px) para o toque nao cair sempre no mesmo pixel.
-                val jitter = ((tapJitterIndex++ % 5) - 2) * 3f
+                // Jitter leve (±4px) para naturalidade
+                val jitter = ((tapJitterIndex++ % 5) - 2) * 2f
                 val tapPoint = (point.first + jitter) to (point.second + jitter)
                 val downTime = lastTurnstileTapAt
-                MotionEvent.obtain(
+
+                val loc = IntArray(2)
+                view.getLocationOnScreen(loc)
+                val screenX = loc[0] + tapPoint.first
+                val screenY = loc[1] + tapPoint.second
+
+                Log.i(
+                    TAG,
+                    "[CF] toque no Turnstile view=(${tapPoint.first.toInt()}, ${tapPoint.second.toInt()}) | motivo=$reason | raw=(${point.first.toInt()}, ${point.second.toInt()}) | probe=$probeResult"
+                )
+
+                val properties = arrayOf(
+                    MotionEvent.PointerProperties().apply {
+                        id = 0
+                        toolType = MotionEvent.TOOL_TYPE_FINGER
+                    }
+                )
+                val coordsDown = arrayOf(
+                    MotionEvent.PointerCoords().apply {
+                        x = tapPoint.first
+                        y = tapPoint.second
+                        pressure = 0.85f
+                        size = 0.08f
+                    }
+                )
+
+                val eventDown = MotionEvent.obtain(
                     downTime,
                     downTime,
                     MotionEvent.ACTION_DOWN,
-                    tapPoint.first,
-                    tapPoint.second,
+                    1,
+                    properties,
+                    coordsDown,
+                    0,
+                    0,
+                    1.0f,
+                    1.0f,
+                    0,
+                    0,
+                    android.view.InputDevice.SOURCE_TOUCHSCREEN,
                     0
-                ).also { event ->
-                    view.dispatchTouchEvent(event)
-                    event.recycle()
-                }
+                )
+                view.dispatchTouchEvent(eventDown)
+                eventDown.recycle()
+
                 view.postDelayed({
                     if (!isPollingActive.get() || !view.isAttachedToWindow) return@postDelayed
-                    MotionEvent.obtain(
-                        downTime,
-                        SystemClock.uptimeMillis(),
-                        MotionEvent.ACTION_UP,
-                        tapPoint.first,
-                        tapPoint.second,
-                        0
-                    ).also { event ->
-                        view.dispatchTouchEvent(event)
-                        event.recycle()
-                    }
-                    Log.i(
-                        TAG,
-                        "[CF] toque Android no Turnstile x=${tapPoint.first.toInt()} y=${tapPoint.second.toInt()} | motivo=$reason"
+                    val moveTime = SystemClock.uptimeMillis()
+                    val coordsMove = arrayOf(
+                        MotionEvent.PointerCoords().apply {
+                            x = tapPoint.first + 0.5f
+                            y = tapPoint.second + 0.5f
+                            pressure = 0.80f
+                            size = 0.08f
+                        }
                     )
-                }, 80L)
+                    val eventMove = MotionEvent.obtain(
+                        downTime,
+                        moveTime,
+                        MotionEvent.ACTION_MOVE,
+                        1,
+                        properties,
+                        coordsMove,
+                        0,
+                        0,
+                        1.0f,
+                        1.0f,
+                        0,
+                        0,
+                        android.view.InputDevice.SOURCE_TOUCHSCREEN,
+                        0
+                    )
+                    view.dispatchTouchEvent(eventMove)
+                    eventMove.recycle()
+                }, 35L)
+
+                view.postDelayed({
+                    if (!isPollingActive.get() || !view.isAttachedToWindow) return@postDelayed
+                    val upTime = SystemClock.uptimeMillis()
+                    val coordsUp = arrayOf(
+                        MotionEvent.PointerCoords().apply {
+                            x = tapPoint.first + 0.8f
+                            y = tapPoint.second + 0.8f
+                            pressure = 0.0f
+                            size = 0.08f
+                        }
+                    )
+                    val eventUp = MotionEvent.obtain(
+                        downTime,
+                        upTime,
+                        MotionEvent.ACTION_UP,
+                        1,
+                        properties,
+                        coordsUp,
+                        0,
+                        0,
+                        1.0f,
+                        1.0f,
+                        0,
+                        0,
+                        android.view.InputDevice.SOURCE_TOUCHSCREEN,
+                        0
+                    )
+                    view.dispatchTouchEvent(eventUp)
+                    eventUp.recycle()
+                }, 85L)
+            }
+        }
+
+        fun fetchNext(cv: WebView?) {
+            if (!isPollingActive.get() || cv == null) {
+                isPollingActive.set(false)
+                htmlCaptureDone.complete(true)
+                return
+            }
+            val next = pendingExtras.firstOrNull()
+            if (next == null) {
+                isPollingActive.set(false)
+                htmlCaptureDone.complete(true)
+                return
+            }
+            pendingExtras.remove(next)
+            Log.i(TAG, "[CF] Buscando próxima URL do catálogo via fetch (mesma sessão TLS): $next")
+            val js = """
+                (function() {
+                    window.__pendingFetchResult = null;
+                    fetch('$next', {credentials: 'include'})
+                        .then(function(r) { return r.text(); })
+                        .then(function(t) { window.__pendingFetchResult = t; })
+                        .catch(function(e) { window.__pendingFetchResult = 'FETCH_ERROR:' + e; });
+                })();
+            """.trimIndent()
+            cv.evaluateJavascript(js) {
+                fun pollFetchResult(attempt: Int) {
+                    if (!isPollingActive.get() || cv.isAttachedToWindow != true || attempt > 40) {
+                        fetchNext(cv)
+                        return
+                    }
+                    cv.evaluateJavascript("(function() { return window.__pendingFetchResult; })();") { res ->
+                        val decoded = res?.trim()?.removeSurrounding("\"")
+                            ?.replace("\\u003C", "<")
+                            ?.replace("\\u003E", ">")
+                            ?.replace("\\\"", "\"")
+                            ?.replace("\\n", "\n")
+                            ?.replace("\\r", "\r")
+                        if (decoded != null && decoded != "null") {
+                            val ok = !decoded.startsWith("FETCH_ERROR") &&
+                                (decoded.contains("pm-video-thumb") || decoded.contains("pm-li-video") || decoded.contains("video-thumb") || decoded.contains("entry-title")) &&
+                                !isChallengeContent(decoded) &&
+                                decoded.length > 1000
+                            if (ok) {
+                                capturedHtmlByUrl[next] = decoded
+                                runCatching { persistCapturedHtmlToDisk() }
+                                Log.i(TAG, "[CF] HTML extra via fetch: len=${decoded.length} | url=$next")
+                            } else {
+                                Log.w(TAG, "[CF] fetch sem cards (len=${decoded.length}) para: $next")
+                            }
+                            fetchNext(cv)
+                        } else {
+                            cv.postDelayed({ pollFetchResult(attempt + 1) }, 200L)
+                        }
+                    }
+                }
+                cv.postDelayed({ pollFetchResult(1) }, 250L)
+            }
+        }
+
+        fun pollAndCapture(cv: WebView?) {
+            isPollScheduled = false
+            if (!isPollingActive.get() || cv == null || isPollRunning) return
+            isPollRunning = true
+            cv.evaluateJavascript(
+                """(function() {
+                    var cards = document.querySelectorAll('.pm-video-thumb, .pm-li-video, .video-thumb, article, div[class*="video-thumb"], .entry-item, li.video-item').length;
+                    var hasPlayer = (document.querySelector('.entry-title, #video, iframe[src*="server"], iframe[src*="play"], .player-wrapper, #pm-video-description') ? 1 : 0);
+                    var links = document.querySelectorAll('a[href]').length;
+                    var title = (document.title || '').replace(/[|\"']/g, ' ');
+                    var htmlLen = (document.documentElement ? document.documentElement.outerHTML.length : 0);
+                    var bodySnip = '';
+                    try { bodySnip = (document.body ? document.body.innerText.substring(0, 500) : '').replace(/[|]/g, ' '); } catch(e) {}
+                    var isChal = /Just a moment|Checking your browser|challenge-platform|cf-turnstile|Um momento|Aguarde|Verificando|security verification|security service|not a bot/i.test(title + ' ' + bodySnip);
+                    
+                    if (!isChal && (cards > 0 || hasPlayer > 0 || (links >= 5 && htmlLen >= 3000 && (title.indexOf('RedeCanais') !== -1 || bodySnip.indexOf('redecanais') !== -1)))) {
+                        if (window.HTMLOUT && typeof window.HTMLOUT.onHtmlCaptured === 'function') {
+                            window.HTMLOUT.onHtmlCaptured(location.href, document.documentElement ? document.documentElement.outerHTML : '');
+                        }
+                    }
+                    return cards + '|' + links + '|' + title + '|' + htmlLen + '|' + (isChal ? '1' : '0') + '|' + hasPlayer;
+                })();"""
+            ) { diagRaw ->
+                isPollRunning = false
+                if (!isPollingActive.get()) return@evaluateJavascript
+                val clean = diagRaw?.trim()?.removeSurrounding("\"") ?: "0|0||0|0|0"
+                val parts = clean.split("|")
+                val cardCount = parts.getOrNull(0)?.toIntOrNull() ?: 0
+                val linkCount = parts.getOrNull(1)?.toIntOrNull() ?: 0
+                val title = parts.getOrNull(2) ?: ""
+                val htmlLen = parts.getOrNull(3)?.toIntOrNull() ?: 0
+                val isChalFlag = parts.getOrNull(4) == "1"
+                val hasPlayer = parts.getOrNull(5) == "1"
+                val isChallenge = isChalFlag || isChallengeContent(title)
+                pollAttempts++
+                Log.d(TAG, "[CF] polling cards=$cardCount links=$linkCount isChallenge=$isChallenge (tentativa $pollAttempts) | url=$currentUrl")
+
+                val c1 = CookieManager.getInstance().getCookie(currentUrl) ?: ""
+                val c2 = CookieManager.getInstance().getCookie(url) ?: ""
+                val c3 = CookieManager.getInstance().getCookie("https://redecanais.af") ?: ""
+                val cookies = "$c1; $c2; $c3"
+                val hasClearance = cookies.contains("cf_clearance")
+                if (hasClearance && !hasTriggeredPostClearanceLoad && (isChallenge || (cardCount == 0 && !hasPlayer))) {
+                    if (clearanceDetectedAt == 0L) {
+                        clearanceDetectedAt = SystemClock.uptimeMillis()
+                    } else if (SystemClock.uptimeMillis() - clearanceDetectedAt >= 800L) {
+                        hasTriggeredPostClearanceLoad = true
+                        Log.i(TAG, "[CF] cf_clearance obtido! Recarregando página alvo: $url")
+                        cv.loadUrl(url)
+                    }
+                }
+
+                if (isChallenge && isPollingActive.get()) {
+                    val now = SystemClock.uptimeMillis()
+                    val cooldown = if (lastTapType == "button_rect") 2500L else 15000L
+                    if (pollAttempts >= 4 && (now - lastTurnstileTapAt >= cooldown)) {
+                        tryTapTurnstile(cv, "poll_$pollAttempts")
+                    }
+                }
+
+                val isResolved = !isChallenge && (cardCount > 0 || hasPlayer || (linkCount >= 5 && htmlLen >= 3000))
+                if (isResolved) {
+                    cv.evaluateJavascript(
+                        "(function() { return (document.documentElement ? document.documentElement.outerHTML : ''); })();"
+                    ) { html ->
+                        if (!isPollingActive.get()) return@evaluateJavascript
+                        if (!html.isNullOrBlank() && html != "null") {
+                            val decoded = html.removeSurrounding("\"")
+                                .replace("\\u003C", "<")
+                                .replace("\\u003E", ">")
+                                .replace("\\\"", "\"")
+                                .replace("\\n", "\n")
+                                .replace("\\r", "\r")
+                            lastSolvedHtml = decoded
+                            capturedHtmlByUrl[currentUrl] = decoded
+                            capturedHtmlByUrl[url] = decoded
+                            targetLoaded.set(true)
+                            Log.i(TAG, "[CF] HTML alvo capturado (BG): len=${decoded.length} | cards=$cardCount | url=$currentUrl")
+                            Log.i(TAG, "[CF] Resolvido! clearance_present=true | target_page_loaded=true")
+                            runCatching { persistCapturedHtmlToDisk() }
+                        }
+                        fetchNext(cv)
+                    }
+                } else {
+                    if (pollAttempts >= 180 || !isPollingActive.get()) {
+                        Log.w(TAG, "[CF] polling limite atingido (90s) | isChallenge=$isChallenge")
+                        isPollingActive.set(false)
+                        htmlCaptureDone.complete(false)
+                    } else {
+                        if (isPollingActive.get() && !isPollScheduled) {
+                            isPollScheduled = true
+                            cv.postDelayed({ pollAndCapture(cv) }, 500)
+                        }
+                    }
+                }
+            }
+        }
+
+        fun triggerPoll(cv: WebView?) {
+            if (cv == null || !isPollingActive.get()) return
+            if (!isPollScheduled && !isPollRunning) {
+                isPollScheduled = true
+                cv.postDelayed({ pollAndCapture(cv) }, 200)
             }
         }
 
@@ -555,28 +951,64 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                 val wv = WebView(activity).apply {
                     visibility = android.view.View.VISIBLE
                     alpha = 1.0f
+                    setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
                     layoutParams = FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
+                    
+                    bringToFront()
+                    requestFocus()
                     cookieManager.setAcceptThirdPartyCookies(this, true)
+
                     settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
                         databaseEnabled = true
+                        allowFileAccess = true
+                        allowContentAccess = true
+                        cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
                         lastUserAgent?.takeIf { it.isNotBlank() }?.let { userAgentString = it }
-                        // v140: Turnstile pode depender de recursos gráficos/preloads para finalizar a prova.
-                        // Mantém imagens habilitadas no WebView interativo; a otimização fica fora do challenge.
                         blockNetworkImage = false
                         loadsImagesAutomatically = true
                         useWideViewPort = true
                         loadWithOverviewMode = true
                         javaScriptCanOpenWindowsAutomatically = true
                         mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                        setSupportMultipleWindows(false)
                     }
-                    lastUserAgent = settings.userAgentString
-                    Log.i(TAG, "[CF] WebView BG User-Agent: $lastUserAgent")
+                    val defaultUA = android.webkit.WebSettings.getDefaultUserAgent(activity)
+                    val desktopUA = challengeUserAgent(defaultUA)
+                    lastUserAgent = desktopUA
+                    settings.userAgentString = desktopUA
+                    Log.i(TAG, "[CF] WebView BG User-Agent: $desktopUA")
+                    webChromeClient = object : WebChromeClient() {
+                        override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                            val msg = consoleMessage?.message() ?: ""
+                            if (msg.contains("cf", true) || msg.contains("turnstile", true) || msg.contains("challenge", true)) {
+                                Log.d(TAG, "[CF_JS_CONSOLE] $msg")
+                            }
+                            return true
+                        }
+                        override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                            super.onProgressChanged(view, newProgress)
+                            view?.evaluateJavascript(ANTI_DETECTION_JS, null)
+                        }
+                    }
                     webViewClient = object : WebViewClient() {
+                        
+                        override fun onReceivedSslError(view: WebView?, handler: android.webkit.SslErrorHandler?, error: android.net.http.SslError?) {
+                            Log.w(TAG, "[CF_SSL] Ignorando erro SSL no proxy móvel: ${error?.primaryError}")
+                            handler?.proceed()
+                        }
+
+                        override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: android.webkit.WebResourceError?) {
+                            super.onReceivedError(view, request, error)
+                            if (request?.isForMainFrame == true) {
+                                Log.w(TAG, "[CF_ERR] Erro no main frame: ${error?.errorCode} - ${error?.description}")
+                            }
+                        }
+
                         override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
                             Log.w(TAG, "[CF_WV] onRenderProcessGone seguro acionado (didCrash=${detail?.didCrash()})")
                             try {
@@ -595,6 +1027,15 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                             }
                             return super.shouldInterceptRequest(view, request)
                         }
+
+                        override fun onPageStarted(view: WebView?, startedUrl: String?, favicon: android.graphics.Bitmap?) {
+                            super.onPageStarted(view, startedUrl, favicon)
+                            view?.evaluateJavascript(ANTI_DETECTION_JS, null)
+                            if (startedUrl != null && startedUrl != "about:blank") {
+                                currentUrl = startedUrl
+                            }
+                        }
+
                         override fun onPageFinished(view: WebView?, finishedUrl: String?) {
                             super.onPageFinished(view, finishedUrl)
                             CookieManager.getInstance().flush()
@@ -604,175 +1045,54 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                                     !finishedUrl.contains("challenge-platform") &&
                                     finishedUrl != "about:blank"
 
+                            if (finishedUrl != null && finishedUrl != "about:blank") {
+                                currentUrl = finishedUrl
+                            }
+
                             Log.d(TAG, "[CF] onPageFinished url=$finishedUrl | clearance=$hasClearance | target_url=$isTargetUrl")
-
-                            // v132: auto-click no checkbox Turnstile dentro do iframe via JS.
-                            // Tenta o input direto no document principal e também via iframe.contentDocument.
-                            view?.evaluateJavascript("""
-                                (function() {
-                                    try {
-                                        // Direto no documento (alguns layouts)
-                                        var cb = document.querySelector('input[type="checkbox"], .ctp-checkbox-label, [id*="turnstile"] input');
-                                        if (cb) { cb.click(); return 'clicked_direct'; }
-                                        // Dentro dos iframes (Turnstile managed)
-                                        var frames = document.querySelectorAll('iframe');
-                                        for (var i = 0; i < frames.length; i++) {
-                                            try {
-                                                var doc = frames[i].contentDocument || frames[i].contentWindow.document;
-                                                if (!doc) continue;
-                                                var icb = doc.querySelector('input[type="checkbox"], .ctp-checkbox-label, [class*="checkbox"]');
-                                                if (icb) { icb.click(); return 'clicked_iframe_' + i; }
-                                            } catch(e2) {}
-                                        }
-                                        return 'no_checkbox';
-                                    } catch(e) { return 'error:' + e.message; }
-                                })();
-                            """.trimIndent()) { result ->
-                                Log.d(TAG, "[CF] auto-click resultado=$result | url=$finishedUrl")
-                            }
-                            view?.let { tryTapTurnstile(it, "page_finished") }
-
-                            if (isTargetUrl) {
-                                currentUrl = finishedUrl ?: url
-                                var pollAttempts = 0
-                                fun fetchNext(cv: WebView?) {
-                                    if (!isPollingActive.get() || cv == null) {
-                                        isPollingActive.set(false)
-                                        htmlCaptureDone.complete(true)
-                                        return
-                                    }
-                                    val next = pendingExtras.firstOrNull()
-                                    if (next == null) {
-                                        isPollingActive.set(false)
-                                        htmlCaptureDone.complete(true)
-                                        return
-                                    }
-                                    pendingExtras.remove(next)
-                                    Log.i(TAG, "[CF] Buscando próxima URL do catálogo via fetch (mesma sessão TLS): $next")
-                                    cv.evaluateJavascript(
-                                        "(function(){return fetch('$next',{credentials:'include'}).then(function(r){return r.text();}).then(function(t){return t;}).catch(function(e){return 'FETCH_ERROR';});})();"
-                                    ) { htmlOrErr ->
-                                        if (!isPollingActive.get()) return@evaluateJavascript
-                                        val raw = htmlOrErr?.trim()?.removeSurrounding("\"")
-                                            ?.replace("\\u003C", "<")
-                                            ?.replace("\\u003E", ">")
-                                            ?.replace("\\\"", "\"") ?: ""
-                                        val ok = !raw.startsWith("FETCH_ERROR") &&
-                                            raw.contains("pm-video-thumb") &&
-                                            !isChallengeContent(raw) &&
-                                            raw.length > 1000
-                                        if (ok) {
-                                            lastSolvedHtml = raw
-                                            capturedHtmlByUrl[next] = raw
+                            if (hasClearance && isTargetUrl) {
+                                view?.evaluateJavascript(
+                                    "(function() { return (document.documentElement ? document.documentElement.outerHTML : ''); })();"
+                                ) { html ->
+                                    if (!html.isNullOrBlank() && html != "null") {
+                                        val decoded = html.removeSurrounding("\"")
+                                            .replace("\\u003C", "<")
+                                            .replace("\\u003E", ">")
+                                            .replace("\\\"", "\"")
+                                            .replace("\\n", "\n")
+                                            .replace("\\r", "\r")
+                                        if (!isChallengeContent(decoded) && decoded.length > 2000) {
+                                            lastSolvedHtml = decoded
+                                            capturedHtmlByUrl[finishedUrl ?: currentUrl] = decoded
+                                            targetLoaded.set(true)
+                                            Log.i(TAG, "[CF] HTML capturado no onPageFinished! len=${decoded.length} | url=$finishedUrl")
                                             runCatching { persistCapturedHtmlToDisk() }
-                                            Log.i(TAG, "[CF] HTML extra via fetch: len=${raw.length} | url=$next")
-                                            fetchNext(cv)
-                                        } else {
-                                            Log.w(TAG, "[CF] fetch sem cards (len=${raw.length}) — fallback loadUrl: $next")
-                                            cv.loadUrl(next)
-                                        }
-                                    }
-                                }
-
-                                fun pollAndCapture(cv: WebView?) {
-                                    if (!isPollingActive.get() || cv == null) return
-                                    cv.evaluateJavascript(
-                                        "(function() { var c = document.querySelector('.pm-video-thumb, .pm-li-video, .video-thumb, article, div[class*=\"video-thumb\"]'); var cards = document.querySelectorAll('.pm-video-thumb, .pm-li-video, .video-thumb, article, div[class*=\"video-thumb\"]').length; var links = document.querySelectorAll('a[href]').length; return JSON.stringify({cards: cards, links: links, title: document.title || '', firstCard: (c ? c.outerHTML.substring(0, 400) : ''), body: (document.body ? document.body.innerText : '').substring(0, 120)}); })();"
-                                    ) { diagJson ->
-                                        if (!isPollingActive.get()) return@evaluateJavascript
-                                        val diag = diagJson?.trim()?.removeSurrounding("\"")?.replace("\\\"", "\"") ?: "{}"
-                                        pollAttempts++
-                                        val cardCount = Regex("\"cards\":(\\d+)").find(diag)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                                        val linkCount = Regex("\"links\":(\\d+)").find(diag)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                                        val title = Regex("\"title\":\"([^\"]*)\"").find(diag)?.groupValues?.get(1) ?: ""
-                                        val isChallenge = isChallengeContent("$title $diag")
-                                        Log.d(TAG, "[CF] polling cards=$cardCount links=$linkCount isChallenge=$isChallenge (tentativa $pollAttempts) | url=$currentUrl")
-
-                                        // Re-dispara auto-click periodicamente enquanto o challenge estiver na tela
-                                        if (isChallenge && pollAttempts % 3 == 0 && isPollingActive.get()) {
-                                            cv.evaluateJavascript("""
-                                                (function() {
-                                                    try {
-                                                        var cb = document.querySelector('input[type="checkbox"], .ctp-checkbox-label, [id*="turnstile"] input');
-                                                        if (cb) { cb.click(); return 'reclick_direct'; }
-                                                        var frames = document.querySelectorAll('iframe');
-                                                        for (var i = 0; i < frames.length; i++) {
-                                                            try {
-                                                                var doc = frames[i].contentDocument || frames[i].contentWindow.document;
-                                                                if (!doc) continue;
-                                                                var icb = doc.querySelector('input[type="checkbox"], .ctp-checkbox-label, [class*="checkbox"]');
-                                                                if (icb) { icb.click(); return 'reclick_iframe_' + i; }
-                                                            } catch(e2) {}
-                                                        }
-                                                        return 'no_cb';
-                                                    } catch(e) { return 'err'; }
-                                                })();
-                                            """.trimIndent()) { r ->
-                                                Log.d(TAG, "[CF] repolling auto-click: $r")
-                                            }
-                                            tryTapTurnstile(cv, "poll_$pollAttempts")
-                                        }
-
-                                        if (cardCount > 0 || (linkCount >= 10 && !isChallenge)) {
-                                            cv.evaluateJavascript(
-                                                "(function() { return document.getElementsByTagName('html')[0].outerHTML; })();"
-                                            ) { html ->
-                                                if (!isPollingActive.get()) return@evaluateJavascript
-                                                if (!html.isNullOrBlank() && html != "null") {
-                                                    val decoded = html.removeSurrounding("\"")
-                                                        .replace("\\u003C", "<")
-                                                        .replace("\\u003E", ">")
-                                                        .replace("\\\"", "\"")
-                                                        .replace("\\n", "\n")
-                                                        .replace("\\r", "\r")
-                                                    lastSolvedHtml = decoded
-                                                    capturedHtmlByUrl[currentUrl] = decoded
-                                                    targetLoaded.set(true)
-                                                    Log.i(TAG, "[CF] HTML alvo capturado (BG): len=${decoded.length} | cards=$cardCount | url=$currentUrl")
-                                                    Log.i(TAG, "[CF] Resolvido! clearance_present=$hasClearance | target_page_loaded=true")
-                                                    runCatching { persistCapturedHtmlToDisk() }
-                                                }
-                                                fetchNext(cv)
-                                            }
-                                        } else if (pollAttempts >= 60 || !isPollingActive.get()) {
-                                            Log.w(TAG, "[CF] polling limite atingido (30s) sem cards reais | isChallenge=$isChallenge")
-                                            isPollingActive.set(false)
-                                            htmlCaptureDone.complete(false)
-                                        } else {
                                             if (isPollingActive.get()) {
-                                                cv.postDelayed({ pollAndCapture(cv) }, 500)
+                                                view.post { fetchNext(view) }
                                             }
                                         }
                                     }
                                 }
-                                pollAndCapture(view)
                             }
+                            triggerPoll(view)
                         }
                     }
                 }
                 interactiveWebView = wv
 
-                // v141: a WebView precisa estar visível e receber foco para permitir interação manual.
+                // v141/v208: a WebView fica com alpha baixo para não sobrepor a UI do app enquanto resolve o desafio
                 wv.visibility = android.view.View.VISIBLE
                 wv.alpha = 0.01f
-                wv.translationX = -50000f
-                wv.translationY = -50000f
                 wv.layoutParams = FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT,
                     FrameLayout.LayoutParams.MATCH_PARENT
                 )
+                // Adiciona no topo do rootLayout para ter foco total, aceleração gráfica e receber toques diretamente
                 rootLayout.addView(wv)
-                Log.i(TAG, "[CF] WebView 100% HEADLESS (invisível) acoplada em background | url=$url")
+                wv.bringToFront()
+                wv.requestFocus()
+                Log.i(TAG, "[CF] WebView acoplada no topo | url=$url")
                 wv.loadUrl(url)
-
-                // O widget costuma estar pronto antes de onPageFinished, que pode aguardar por
-                // sub-recursos do challenge por dezenas de segundos. Sonda o alvo durante a carga.
-                fun probeTurnstileWhileLoading(attempt: Int) {
-                    if (!isPollingActive.get() || attempt > 30) return
-                    tryTapTurnstile(wv, "loading_$attempt")
-                    wv.postDelayed({ probeTurnstileWhileLoading(attempt + 1) }, 1000L)
-                }
-                wv.postDelayed({ probeTurnstileWhileLoading(1) }, 1000L)
 
                 Log.i(TAG, "[CF] WebView interativa carregando url=$url")
             } catch (e: Throwable) {
@@ -808,362 +1128,16 @@ private const val TURNSTILE_TAP_PROBE_JS = """
         val captured = capturedHtmlByUrl[url]
         return when {
             !captured.isNullOrBlank() && !isChallengeContent(captured) -> captured
-            finalClearance -> ""
-            else -> null
+            !lastSolvedHtml.isNullOrBlank() && !isChallengeContent(lastSolvedHtml!!) -> lastSolvedHtml
+            else -> captured
         }
     }
 
     suspend fun solveAndGetHtml(url: String, timeoutMs: Long = 15000L): String? {
-        val activity: Activity? = CommonActivity.activity
-        if (activity == null || activity.isFinishing || activity.isDestroyed) {
-            Log.w(TAG, "[CF_HTML] Activity não disponível para extração via WebView")
-            return null
+        val captured = capturedHtmlByUrl[url]
+        if (!captured.isNullOrBlank() && !isChallengeContent(captured)) {
+            return captured
         }
-
-        Log.i(TAG, "[CF_HTML] Iniciando extração de HTML via WebView para $url")
-        var resultHtml: String? = null
-        val isDone = AtomicBoolean(false)
-        var wvVar: WebView? = null
-        val rootLayout = activity.findViewById<ViewGroup>(android.R.id.content)
-
-        withContext(Dispatchers.Main) {
-            try {
-                val cookieManager = CookieManager.getInstance()
-                cookieManager.setAcceptCookie(true)
-
-                val wv = WebView(activity).apply {
-                    visibility = android.view.View.INVISIBLE
-                    // v121: viewport REAL (720x1280) posicionado FORA da tela — o Turnstile managed de
-                    // redecanaistv.af não renderiza o widget em viewport 1x1 (TURNSTILE NODES: 0 confirmado
-                    // via harness). Chrome desktop com viewport 1920x1080 emitiu cf_clearance em ~1min.
-                    val density = resources.displayMetrics.density
-                    val wvW = (720 * density).toInt()
-                    val wvH = (1280 * density).toInt()
-                    layoutParams = FrameLayout.LayoutParams(wvW, wvH).apply {
-                        leftMargin = -(wvW + 100)
-                        topMargin = -(wvH + 100)
-                    }
-
-                    cookieManager.setAcceptThirdPartyCookies(this, true)
-                        settings.apply {
-                            javaScriptEnabled = true
-                            domStorageEnabled = true
-                            databaseEnabled = true
-                            lastUserAgent?.takeIf { it.isNotBlank() }?.let { userAgentString = it }
-                                // v109: imagens habilitadas para (a) o widget Turnstile completar o
-                                // challenge e (b) as capas serem baixadas e embutidas como data-cs-poster
-                                blockNetworkImage = false
-                                loadsImagesAutomatically = true
-                                useWideViewPort = true
-                                loadWithOverviewMode = true
-                                javaScriptCanOpenWindowsAutomatically = true
-                                mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                            }
-                    addJavascriptInterface(object {
-                        @android.webkit.JavascriptInterface
-                        fun processHTML(html: String) {
-                            val embeddedPosters = Regex("data-cs-poster=", RegexOption.IGNORE_CASE)
-                                .findAll(html).count()
-                            Log.i(TAG, "[CF_HTML] HTML capturado via JS interface: len=${html.length} | capasIncorporadas=$embeddedPosters")
-                            resultHtml = html
-                            isDone.set(true)
-                        }
-                    }, "HTMLOUT")
-
-                    webViewClient = object : WebViewClient() {
-                        override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
-                            Log.w(TAG, "[CF_WV] onRenderProcessGone seguro acionado (didCrash=${detail?.didCrash()})")
-                            try {
-                                (view?.parent as? ViewGroup)?.removeView(view)
-                                view?.destroy()
-                            } catch (_: Throwable) {}
-                            return true
-                        }
-
-                        private var extractionAttempts = 0
-                        private var extractionStarted = false
-                        private var challengeReloads = 0
-
-                        private fun extractWhenPageIsReady(view: WebView?) {
-                            // v121: cap maior (300 x 400ms ~= 120s) — Turnstile managed de redecanaistv.af
-                            // com viewport real pode levar 30-90s para completar sem interação visível
-                            if (view == null || isDone.get() || extractionAttempts++ >= 300) return
-
-                            view.evaluateJavascript(
-                                """(function() {
-                                    const title = document.title || '';
-                                    const bodyText = document.body ? document.body.innerText : '';
-                                    const isChallenge = /Just a moment|Um momento|Aguarde|Verificando|challenge-platform|cf-chl-|Checking your browser|Attention Required|Cloudflare|Error code 520|Error code 522|Error code 524|Web server is returning/i.test(title) ||
-                                                        /challenge-platform|cf-turnstile|cf-challenge|cf-error-details/i.test(document.documentElement.outerHTML.substring(0, 3000));
-                                    if (isChallenge) return '';
-
-                                    // v119: página de player (server.php/player3) — detecta antes do filtro de links,
-                                    // pois o player pode ter poucos <a> mas o <video src> dinâmico é o alvo real
-                                    const isPlayerPage = !!document.querySelector('video, .jwplayer, #jwplayer, .video-js, iframe[src*="server.php"]') ||
-                                                         /server\.php|player3|player\.php|embed\.php|play\.php/i.test(location.href);
-                                    if (isPlayerPage) return 'player';
-
-                                    const linksCount = document.querySelectorAll('a[href]').length;
-                                    if (linksCount < 15) return '';
-
-                                    const catalogCount = document.querySelectorAll('.pm-video-thumb, .pm-li-video').length;
-                                    const hasDetailElements = !!document.querySelector("h1.entry-title, h1.pm-video-attr-title, .pm-video-title, .pm-video-watch-wrap, .pm-video-description, #pm-video-description");
-
-                                    if (catalogCount > 0) return 'catalog';
-                                    if (hasDetailElements) return 'detail';
-                                    return '';
-                                })();""".trimIndent()
-                            ) { pageTypeJson ->
-                                if (isDone.get()) return@evaluateJavascript
-
-                                val pageType = pageTypeJson.orEmpty().removeSurrounding("\"")
-                                if (pageType.isNotBlank() && pageType != "null" && !extractionStarted) {
-                                    extractionStarted = true
-                                    Log.i(TAG, "[CF_HTML] página pronta cedo: tipo=$pageType | tentativas=$extractionAttempts")
-                                    // v109: SEMPRE tenta incorporar as capas como data-cs-poster
-                                    // (catálogo E detalhe) — o Coil não consegue baixar do Cloudflare (JA3)
-                                    if (pageType == "detail" || url.contains("server.php") || url.contains("player") || url.contains(".html")) {
-                                        val isPlayerPage = url.contains("server.php") || url.contains("player3") || url.contains("player.php") || url.contains("embed.php") || url.contains("play.php")
-                                        if (isPlayerPage) {
-                                            // v119: página de player — espera o src do vídeo aparecer (injetado pelo video.js após dt.api)
-                                            view.evaluateJavascript(
-                                                """(function() {
-                                                    const waitForVideo = async () => {
-                                                        const deadline = Date.now() + 8000; // até 8s para o dt.api responder
-                                                        while (Date.now() < deadline) {
-                                                            let src = '';
-                                                            try {
-                                                                const v = document.querySelector('video');
-                                                                if (v) src = v.currentSrc || v.src || '';
-                                                                if (!src && window.jwplayer) {
-                                                                    try {
-                                                                        const pl = jwplayer().getPlaylist();
-                                                                        if (pl && pl[0] && pl[0].file) src = pl[0].file;
-                                                                    } catch (_) {}
-                                                                }
-                                                            } catch (_) {}
-                                                            if (src && /^https?:/.test(src)) {
-                                                                document.documentElement.setAttribute('data-cs-video-src', src);
-                                                                break;
-                                                            }
-                                                            // tenta buscar no outerHTML também (__RC__/proxy)
-                                                            const html = document.documentElement.outerHTML;
-                                                            if (html.includes('__RC__/proxy') || html.includes('p12-common-sign')) {
-                                                                break;
-                                                            }
-                                                            await new Promise(r => setTimeout(r, 400));
-                                                        }
-                                                        HTMLOUT.processHTML(document.documentElement.outerHTML);
-                                                    };
-                                                    // inicia async — não bloqueia o WebView
-                                                    waitForVideo();
-                                                    // fallback timeout de segurança: captura após 8s mesmo sem vídeo
-                                                    setTimeout(() => {
-                                                        HTMLOUT.processHTML(document.documentElement.outerHTML);
-                                                    }, 8500);
-                                                })();""".trimIndent(),
-                                                null
-                                            )
-                                        } else {
-                                            // v116: detalhe/catálogo — capas com timeout curto
-                                            view.evaluateJavascript(
-                                                """(function() {
-                                                    const toDataUrl = async (el, attempt) => {
-                                                        let src = el.tagName === 'META' ? el.getAttribute('content') : (el.getAttribute('data-echo') || el.getAttribute('data-src') || el.getAttribute('src'));
-                                                        if (!src || src.startsWith('data:') || /echo-lzld|blank\.gif|pixel\.gif/i.test(src)) return;
-                                                        try {
-                                                            const absolute = new URL(src, location.href).href;
-                                                            const response = await fetch(absolute, { credentials: 'include', cache: 'force-cache' });
-                                                            if (!response.ok) return;
-                                                            const blob = await response.blob();
-                                                            if (!blob.type.startsWith('image/') || blob.size > 5000000) return;
-                                                            const dataUrl = await new Promise((resolve, reject) => {
-                                                                const reader = new FileReader();
-                                                                reader.onload = () => resolve(reader.result);
-                                                                reader.onerror = reject;
-                                                                reader.readAsDataURL(blob);
-                                                            });
-                                                            el.setAttribute('data-cs-poster', dataUrl);
-                                                        } catch (_) {
-                                                            if ((attempt || 0) === 0) toDataUrl(el, 1);
-                                                        }
-                                                    };
-                                                    const targets = Array.from(document.querySelectorAll('.pm-video-thumb img, meta[property="og:image"], .pm-video-watch-wrap img, article img, img[data-echo]')).slice(0, 40);
-                                                    const done = Promise.allSettled(targets.map(el => toDataUrl(el)));
-                                                    const timeout = new Promise(resolve => setTimeout(resolve, 2000));
-                                                    Promise.race([done, timeout]).then(() => HTMLOUT.processHTML(document.documentElement.outerHTML));
-                                                })();""".trimIndent(),
-                                                null
-                                            )
-                                        }
-                                    } else {
-                                        view.evaluateJavascript(
-                                            """(function() {
-                                                const toDataUrl = async (el, attempt) => {
-                                                    let src = el.tagName === 'META' ? el.getAttribute('content') : (el.getAttribute('data-echo') || el.getAttribute('data-src') || el.getAttribute('src'));
-                                                    if (!src || src.startsWith('data:') || /echo-lzld|blank\.gif|pixel\.gif/i.test(src)) return;
-                                                    try {
-                                                        const absolute = new URL(src, location.href).href;
-                                                        const response = await fetch(absolute, { credentials: 'include', cache: 'force-cache' });
-                                                        if (!response.ok) return;
-                                                        const blob = await response.blob();
-                                                        if (!blob.type.startsWith('image/') || blob.size > 5000000) return;
-                                                        const dataUrl = await new Promise((resolve, reject) => {
-                                                            const reader = new FileReader();
-                                                            reader.onload = () => resolve(reader.result);
-                                                            reader.onerror = reject;
-                                                            reader.readAsDataURL(blob);
-                                                        });
-                                                        el.setAttribute('data-cs-poster', dataUrl);
-                                                    } catch (_) {
-                                                        // v111: retry 1x se o fetch falhar (rede instável)
-                                                        if ((attempt || 0) === 0) toDataUrl(el, 1);
-                                                    }
-                                                };
-                                                const targets = Array.from(document.querySelectorAll('.pm-video-thumb img, meta[property="og:image"], .pm-video-watch-wrap img, article img, img[data-echo]')).slice(0, 40);
-                                                const done = Promise.allSettled(targets.map(el => toDataUrl(el)));
-                                                // v116: timeout curto — o conteúdo aparece rápido (~5s); capas entram se derem tempo
-                                                const timeout = new Promise(resolve => setTimeout(resolve, 2000));
-                                                Promise.race([done, timeout]).then(() => HTMLOUT.processHTML(document.documentElement.outerHTML));
-                                            })();""".trimIndent(),
-                                            null
-                                        )
-                                    }
-                                } else if (!isDone.get()) {
-                                    view.postDelayed({ extractWhenPageIsReady(view) }, 400)
-                                }
-                            }
-                        }
-                        override fun shouldInterceptRequest(
-                            view: WebView?,
-                            request: WebResourceRequest
-                        ): WebResourceResponse? {
-                            if (shouldBlockResource(request)) {
-                                Log.d(TAG, "[CF_HTML] recurso externo bloqueado: ${request.url.host}")
-                                return emptyResource()
-                            }
-                            return super.shouldInterceptRequest(view, request)
-                        }
-
-                        override fun onPageStarted(view: WebView?, startedUrl: String?, favicon: android.graphics.Bitmap?) {
-                            super.onPageStarted(view, startedUrl, favicon)
-                            // v120: reseta tentativas a cada nova página (Turnstile de redecanaistv.af pode levar >30s)
-                            extractionAttempts = 0
-                            extractionStarted = false
-                            view?.postDelayed({ extractWhenPageIsReady(view) }, 750)
-                        }
-
-                        override fun onPageFinished(view: WebView?, finishedUrl: String?) {
-                            super.onPageFinished(view, finishedUrl)
-                            CookieManager.getInstance().flush()
-                            Log.d(TAG, "[CF_HTML] onPageFinished finishedUrl=$finishedUrl")
-                            // Se a captura antecipada já iniciou, aguarda a tentativa curta
-                            // de incorporar capas em vez de sobrescrever o DOM imediatamente.
-                            if (extractionStarted && !isDone.get()) return
-                            // Injeta JS para extrair o HTML desofuscado pelo motor V8 do Chromium
-                            view?.evaluateJavascript(
-                                "(function() { return document.getElementsByTagName('html')[0].outerHTML; })();"
-                            ) { html ->
-                                if (!html.isNullOrBlank() && html != "null") {
-                                    val unquoted = html.removeSurrounding("\"")
-                                        .replace("\\u003C", "<")
-                                        .replace("\\u003E", ">")
-                                        .replace("\\\"", "\"")
-                                        .replace("\\n", "\n")
-                                        .replace("\\r", "\r")
-                                    
-                                    val isChallenge = isChallengeContent(unquoted) ||
-                                                      unquoted.contains("cf-browser-verification", true) ||
-                                                      unquoted.contains("cf-error-details", true)
-                                     
-                                     val hasValidStructure = unquoted.contains("pm-video", true) || 
-                                                             unquoted.contains("pm-video-description", true) ||
-                                                             unquoted.contains("pm-video-thumb", true) ||
-                                                             unquoted.contains("entry-title", true) ||
-                                                             // v119: página de player (server.php) — não tem pm-video/entry-title
-                                                             unquoted.contains("jwplayer", true) ||
-                                                             unquoted.contains("<video", true) ||
-                                                             unquoted.contains("__RC__/proxy", true) ||
-                                                             unquoted.contains("server.php", true) ||
-                                                             unquoted.contains("player3", true)
-                                     
-        // v120: o player migrou para redecanaistv.af (Turnstile PRÓPRIO — cf_clearance de redecanais.af não vale).
-        // Se o WebView navegou para um domínio de player QUE NÃO É redecanais.af, NÃO recarregar em loop:
-        // o reload impede o Turnstile de completar a prova. Deixa o challenge resolver naturalmente (timeout 40s).
-        val isForeignPlayerDomain = finishedUrl?.let { url ->
-            url.contains("redecanaistv", true) || (
-                (url.contains("server.php", true) || url.contains("player", true) || url.contains("dt.api", true)) &&
-                !url.contains("redecanais.af", true)
-            )
-        } == true
-
-        Log.i(TAG, "[CF_HTML] JS OuterHTML extraído: len=${unquoted.length} | isChallenge=$isChallenge | validStruct=$hasValidStructure | foreignPlayer=$isForeignPlayerDomain")
-        
-        if (!isChallenge && hasValidStructure && unquoted.length > 5000) {
-            resultHtml = unquoted
-            isDone.set(true)
-        } else if (isChallenge && !isForeignPlayerDomain) {
-            // v122: reload LIMITADO (máx 2x) — reload em loop infinito impede o Turnstile de completar
-            // a prova (cada reload reinicia o challenge). Após 2 tentativas, aguarda resolver sozinho
-            // (Turnstile managed de redecanais.af completa em ~30-90s com viewport real) e o requestDoc
-            // cai no fallback solveInteractive (diálogo) se ainda falhar.
-            if (challengeReloads < 2) {
-                challengeReloads++
-                view?.postDelayed({
-                    if (!isDone.get()) {
-                        Log.w(TAG, "[CF_HTML] Erro 520 ou challenge detectado (reload #$challengeReloads) -> recarregando página")
-                        view.reload()
-                    }
-                }, 1500)
-            } else {
-                Log.i(TAG, "[CF_HTML] Challenge persistente após $challengeReloads reloads -> aguardando Turnstile resolver (sem reload em loop)")
-            }
-        } else if (isChallenge && isForeignPlayerDomain) {
-            // v120: domínio de player externo com Turnstile próprio -> aguarda resolver, sem reload em loop.
-            Log.i(TAG, "[CF_HTML] Domínio de player externo ($finishedUrl) com challenge próprio -> aguardando Turnstile resolver (sem reload)")
-        }
-                                }
-                            }
-                        }
-                    }
-                }
-                wvVar = wv
-                wv.visibility = android.view.View.VISIBLE
-                wv.alpha = 0.01f
-                wv.translationX = -50000f
-                wv.translationY = -50000f
-                wv.layoutParams = FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT
-                )
-                rootLayout.addView(wv)
-                wv.loadUrl(url)
-            } catch (e: Throwable) {
-                Log.e(TAG, "[CF_HTML] Erro na extração via WebView: ${e.message}")
-            }
-        }
-
-        try {
-            withTimeoutOrNull(timeoutMs) {
-                while (!isDone.get()) {
-                    delay(300)
-                }
-                true
-            }
-        } finally {
-            withContext(NonCancellable + Dispatchers.Main) {
-                try {
-                    wvVar?.let {
-                        it.stopLoading()
-                        rootLayout.removeView(it)
-                        it.destroy()
-                    }
-                    wvVar = null
-                    Log.d(TAG, "[CF_HTML] WebView removido e destruído")
-                } catch (_: Throwable) {}
-            }
-        }
-
-        return resultHtml
+        return solveInteractive(url, timeoutMs = timeoutMs)
     }
 }

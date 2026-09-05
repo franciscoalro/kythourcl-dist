@@ -10,6 +10,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import java.util.concurrent.TimeUnit
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 
@@ -436,7 +437,7 @@ internal class StreamResolver(
             val uaPresent = probeHeaders.containsKey("User-Agent")
             val cookiePresent = probeHeaders.containsKey("Cookie")
 
-            val res = app.get(url, headers = probeHeaders, timeout = 6)
+            val res = app.get(url, headers = probeHeaders, timeout = 6L)
             val status = res.code
             val contentType = res.headers["Content-Type"] ?: res.headers["content-type"] ?: ""
             val contentLength = res.headers["Content-Length"] ?: res.headers["content-length"] ?: ""

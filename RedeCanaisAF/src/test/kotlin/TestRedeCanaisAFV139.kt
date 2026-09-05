@@ -62,10 +62,10 @@ class TestRedeCanaisAFV139 {
     @Test
     fun normalizesEmbeddedWebViewUserAgentForCloudflare() {
         val raw = "Mozilla/5.0 (Linux; Android 14; sdk_gphone64_x86_64 Build/UE1A.230829.050; wv) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/152.0.7977.54 Mobile Safari/537.36"
+            "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/125.0.6422.113 Mobile Safari/537.36"
         assertEquals(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/152.0.7977.54 Safari/537.36",
+            "Mozilla/5.0 (Linux; Android 14; sdk_gphone64_x86_64 Build/UE1A.230829.050) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Mobile Safari/537.36",
             CloudflareSolver.challengeUserAgent(raw)
         )
         assertEquals("custom-agent", CloudflareSolver.challengeUserAgent("custom-agent"))

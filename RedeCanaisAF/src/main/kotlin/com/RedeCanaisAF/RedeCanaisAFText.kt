@@ -1,6 +1,31 @@
 package com.RedeCanaisAF
 
+import com.lagradost.cloudstream3.TvType
+
 internal object RedeCanaisAFText {
+    val PLACEHOLDER_PATTERNS = listOf(
+        "echo-lzld",
+        "blank.gif",
+        "pixel.gif",
+        "no-thumbnail",
+        "default-thumbnail",
+        "lazy.png",
+        "1x1",
+        "data:image/gif;base64,R0lGOD"
+    )
+
+    val SERIES_URL_KEYWORDS = listOf(
+        "lista-de-episodios", "todas-as-temporadas", "temporada", "temporadas",
+        "serie", "series", "animes", "anime", "desenhos", "desenho",
+        "episodio", "episodios", "completo-dublado", "temp"
+    )
+
+    val SERIES_TITLE_KEYWORDS = listOf(
+        "Temporada", "Temp", "Episódio", "Episodio", "Ep.", "Ep ",
+        "Completo Dublado", "Lista de Episódios", "Todas as Temporadas",
+        "1ª", "2ª", "3ª", "4ª", "5ª", "6ª", "7ª", "8ª", "9ª"
+    )
+
     fun isJunkText(text: String): Boolean {
         val lower = text.lowercase()
         val junk = listOf(
@@ -33,6 +58,20 @@ internal object RedeCanaisAFText {
         return title
     }
 
+    fun cleanPlotText(text: String): String {
+        return text
+            .replace(Regex("""(?i)^\s*Sinopse\s*:\s*"""), "")
+            .replace(Regex("""(?i)\s*Rede\s*Canais.*$"""), "")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+    }
+
+    fun isSeriesUrlOrTitle(url: String, title: String): Boolean {
+        val urlLower = url.lowercase()
+        if (SERIES_URL_KEYWORDS.any { urlLower.contains(it) }) return true
+        return SERIES_TITLE_KEYWORDS.any { title.contains(it, ignoreCase = true) }
+    }
+
     fun extractSeasonHeaderNumber(text: String): Int? {
         val match = Regex("""(?i)(?:^|[^\w])(\d+)[ªaºo°]?\s*(?:temp|temporada|season)\b""").find(text)
             ?: Regex("""(?i)\b(?:temporada|temp|season)\s*(\d+)\b""").find(text)
@@ -61,6 +100,18 @@ internal object RedeCanaisAFText {
                 ?.groupValues?.getOrNull(1)?.toIntOrNull()
     }
 
+    fun extractSeasonAndEpisode(text: String, url: String, fallbackSeason: Int = 1): Pair<Int, Int> {
+        val season = extractSeasonNumber(text)
+            ?: extractSeasonNumber(url)
+            ?: fallbackSeason
+
+        val epNum = extractEpisodeNumber(text)
+            ?: extractEpisodeNumber(url)
+            ?: 1
+
+        return Pair(season, epNum)
+    }
+
     fun cleanEpisodeTitle(raw: String, episodeNumber: Int): String {
         val cleaned = raw
             .replace(Regex("""(?i)\s*[-|]\s*Rede\s*Canais.*$"""), "")
@@ -78,5 +129,120 @@ internal object RedeCanaisAFText {
         } else {
             cleaned
         }
+    }
+
+    fun isPlaceholderImage(url: String): Boolean {
+        if (url.isBlank()) return true
+        if (url.startsWith("data:image/", ignoreCase = true)) {
+            return url.startsWith("data:image/svg+xml", ignoreCase = true) && url.length < 200
+        }
+        if (url.startsWith("data:image/svg+xml", ignoreCase = true) && url.length < 200) return true
+        return PLACEHOLDER_PATTERNS.any { url.contains(it, ignoreCase = true) }
+    }
+
+    fun parseSrcset(srcset: String, fixUrl: (String) -> String = { it }): String {
+        if (srcset.isBlank()) return ""
+        val candidates = srcset.split(",").mapNotNull { raw ->
+            val entry = raw.trim()
+            if (entry.isEmpty()) return@mapNotNull null
+            val descriptorMatch = Regex("""^(.*?)[\s]+(\d+(?:\.\d+)?[wx]|\d+(?:\.\d+)?)$""", RegexOption.IGNORE_CASE)
+                .matchEntire(entry)
+            val urlRaw: String
+            val descriptor: String
+            if (descriptorMatch != null) {
+                urlRaw = descriptorMatch.groupValues[1].trim()
+                descriptor = descriptorMatch.groupValues[2]
+            } else {
+                urlRaw = entry
+                descriptor = ""
+            }
+            if (urlRaw.isEmpty()) return@mapNotNull null
+            val urlFixed = urlRaw.replace("%20", " ")
+            val w = Regex("""^(\d+)w$""", RegexOption.IGNORE_CASE).matchEntire(descriptor)?.groupValues?.get(1)?.toIntOrNull()
+            val d = if (w == null) {
+                Regex("""^([\d.]+)x$""", RegexOption.IGNORE_CASE).matchEntire(descriptor)?.groupValues?.get(1)?.toFloatOrNull() ?: 1.0f
+            } else 1.0f
+            val normalized = optimizePosterUrl(urlFixed, fixUrl)
+            if (normalized.isBlank() || isPlaceholderImage(normalized)) return@mapNotNull null
+            Triple(normalized, w ?: -1, d)
+        }
+        val best = candidates.maxWithOrNull(
+            compareBy<Triple<String, Int, Float>> { it.second }
+                .thenBy { it.third }
+                .thenBy { -it.first.length }
+        )
+        return best?.first ?: ""
+    }
+
+    fun optimizePosterUrl(url: String, fixUrl: (String) -> String = { it }): String {
+        val trimmed = url.trim()
+        if (trimmed.isBlank() || isPlaceholderImage(trimmed)) return ""
+        if (trimmed.startsWith("data:image/", ignoreCase = true)) return trimmed
+
+        val absoluteUrl = fixUrl(trimmed)
+        return absoluteUrl.replace(" ", "%20")
+    }
+
+    fun extractDurationMinutes(durText: String): Int? {
+        if (durText.isBlank()) return null
+
+        val isoH = Regex("""(?i)(\d+)H""").find(durText)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+        val isoM = Regex("""(?i)(\d+)M""").find(durText)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+        if (isoH > 0 || isoM > 0) return isoH * 60 + isoM
+
+        val hours = Regex("""(?i)(\d+)\s*(?:h|hora|horas)""").find(durText)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+        val minutes = Regex("""(?i)(\d+)\s*(?:min|m|minuto|minutos)""").find(durText)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+        if (hours > 0 || minutes > 0) return hours * 60 + minutes
+
+        val plainMin = Regex("""\b(\d{2,3})\b""").find(durText)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        if (plainMin != null && plainMin in 1..600) return plainMin
+
+        return null
+    }
+
+    fun extractYearFromTitleOrText(rawTitle: String, fallbackText: String? = null): Int? {
+        val fromTitle = Regex("""\b(19\d{2}|20\d{2})\b""").find(rawTitle)?.value?.toIntOrNull()
+        if (fromTitle != null) return fromTitle
+
+        if (!fallbackText.isNullOrBlank()) {
+            val fromFallback = Regex("""\b(19\d{2}|20\d{2})\b""").find(fallbackText)?.value?.toIntOrNull()
+            if (fromFallback != null) return fromFallback
+        }
+
+        return null
+    }
+
+    fun extractYear(text: String): Int? = extractYearFromTitleOrText(text)
+
+    fun determineTvType(url: String, tags: List<String> = emptyList(), isSeries: Boolean = false): TvType {
+        val lowerUrl = url.lowercase()
+        val allTags = tags.joinToString(" ").lowercase()
+        if (lowerUrl.contains("anime") || allTags.contains("anime")) return TvType.Anime
+        if (lowerUrl.contains("desenho") || allTags.contains("desenho") || allTags.contains("animação") || allTags.contains("animacao")) return TvType.Cartoon
+        if (isSeries || lowerUrl.contains("serie") || allTags.contains("série") || allTags.contains("serie")) return TvType.TvSeries
+        return TvType.Movie
+    }
+
+    private fun normalizeForSearch(text: String): String {
+        val decomposed = java.text.Normalizer.normalize(text.lowercase().trim(), java.text.Normalizer.Form.NFD)
+        return Regex("\\p{InCombiningDiacriticalMarks}+").replace(decomposed, "")
+    }
+
+    fun isRelevantSearchTitle(itemTitle: String, query: String): Boolean {
+        if (query.isBlank()) return true
+        val normTitle = normalizeForSearch(itemTitle)
+        val normQuery = normalizeForSearch(query)
+        if (normTitle.contains(normQuery)) return true
+        val tokens = normQuery.split(" ").filter { it.isNotBlank() }
+        return tokens.isNotEmpty() && tokens.all { normTitle.contains(it) }
+    }
+
+    fun isValidEpisodeLink(url: String): Boolean {
+        if (url.isBlank()) return false
+        val lower = url.lowercase()
+        if (lower.contains("browse-") || lower.contains("category") || lower.contains("#") || lower.contains("javascript")) {
+            return false
+        }
+        return lower.contains(".html")
     }
 }
