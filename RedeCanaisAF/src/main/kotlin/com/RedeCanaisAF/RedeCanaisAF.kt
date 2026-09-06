@@ -110,6 +110,13 @@ class RedeCanaisAF : MainAPI() {
         val fixedUrl = fixUrl(url)
         Log.i(TAG, "[REQ#$reqId] Fetching url=$fixedUrl referer=$referer")
 
+        // 1. Verificação ultra-rápida de cache RAM e Disco (0ms)
+        val cached = CloudflareSolver.capturedHtml(fixedUrl) ?: CloudflareSolver.getDiskCachedHtml(fixedUrl)
+        if (!cached.isNullOrBlank() && !CloudflareSolver.isChallengeContent(cached)) {
+            Log.i(TAG, "[REQ#$reqId] HTML retornado instantaneamente do cache! len=${cached.length} url=$fixedUrl")
+            return Jsoup.parse(cached, fixedUrl)
+        }
+
         logCookieState("BEFORE_REQ", fixedUrl, reqId)
 
         val cookie = runCatching {

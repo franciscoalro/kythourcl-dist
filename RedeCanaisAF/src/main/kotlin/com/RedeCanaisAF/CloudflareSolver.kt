@@ -993,6 +993,18 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                     lastUserAgent = desktopUA
                     settings.userAgentString = desktopUA
                     Log.i(TAG, "[CF] WebView BG User-Agent: $desktopUA")
+
+                    addJavascriptInterface(object {
+                        @android.webkit.JavascriptInterface
+                        fun onHtmlCaptured(pageUrl: String, html: String) {
+                            if (html.isNotBlank() && !isChallengeContent(html) && html.length > 2000) {
+                                val clean = cleanHtmlForCache(html)
+                                capturedHtmlByUrl[pageUrl] = clean
+                                Log.i(TAG, "[CF_JS_INTERFACE] HTML capturado via fetch assíncrono: len=${clean.length} url=$pageUrl")
+                                runCatching { persistCapturedHtmlToDisk() }
+                            }
+                        }
+                    }, "HTMLOUT")
                     webChromeClient = object : WebChromeClient() {
                         override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
                             val msg = consoleMessage?.message() ?: ""
@@ -1079,6 +1091,36 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                                             targetLoaded.set(true)
                                             Log.i(TAG, "[CF] HTML capturado no onPageFinished! len=${decoded.length} | url=$finishedUrl")
                                             runCatching { persistCapturedHtmlToDisk() }
+
+                                            val prefetchJs = """
+                                                (function() {
+                                                    var catalog = [
+                                                        'https://redecanais.af/browse-filmes-videos-1-date.html',
+                                                        'https://redecanais.af/browse-series-videos-1-date.html',
+                                                        'https://redecanais.af/browse-animes-videos-1-date.html',
+                                                        'https://redecanais.af/browse-desenhos-videos-1-date.html',
+                                                        'https://redecanais.af/browse-filmes-videos-1-views.html',
+                                                        'https://redecanais.af/topvideos.html'
+                                                    ];
+                                                    for (var i = 0; i < catalog.length; i++) {
+                                                        var u = catalog[i];
+                                                        if (u !== location.href) {
+                                                            (function(targetUrl) {
+                                                                fetch(targetUrl, {credentials: 'include'})
+                                                                    .then(function(res) { return res.text(); })
+                                                                    .then(function(html) {
+                                                                        if (window.HTMLOUT && typeof window.HTMLOUT.onHtmlCaptured === 'function') {
+                                                                            window.HTMLOUT.onHtmlCaptured(targetUrl, html);
+                                                                        }
+                                                                    })
+                                                                    .catch(function(err) {});
+                                                            })(u);
+                                                        }
+                                                    }
+                                                })();
+                                            """.trimIndent()
+                                            view?.evaluateJavascript(prefetchJs, null)
+
                                             isPollingActive.set(false)
                                             htmlCaptureDone.complete(true)
                                         }
