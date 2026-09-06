@@ -90,24 +90,20 @@ internal class StreamResolver(
                 // via browser-harness). O WebView captura o recap e serve a URL local 127.0.0.1 ao
                 // ExoPlayer, que consome via proxy.
                 if (embedUrl.contains("server.php", true) && embedUrl.contains("vid=", true)) {
-                    var localProxyUrl = WebViewStreamProxy.captureAndServe(embedUrl)
-                    // v125/v126/v127: o iframe pode apontar p/ servidor morto (RCServer27 NXDOMAIN)
-                    // ou ineficiente p/ WebView (RCServer01/videos nunca montou em 2 ciclos de 120s
-                    // no v125 — click ok mas __RC__/proxy nunca veio). O harness provou que
-                    // server=RCFServer2/ondemand monta __RC__/proxy p/ qualquer vid (206).
-                    // v126: timeout cortado p/ 45s/captura — 2 tentativas cabem em ~90s dentro do
-                    // deadline de 120s do CloudStream e o fallback realmente roda.
-                    // v127: força subfolder=ondemand no fallback (series usam videos; só ondemand foi
-                    // provado via browser-harness — NAOIDNTFCA -> 206 ftypisom).
-                    if (localProxyUrl == null && !embedUrl.contains("server=RCFServer2", true)) {
-                        var fixedUrl = embedUrl.replace(Regex("server=[^&]+", RegexOption.IGNORE_CASE), "server=RCFServer2")
-                        fixedUrl = if (fixedUrl.contains("subfolder=", true)) {
-                            fixedUrl.replace(Regex("subfolder=[^&]+", RegexOption.IGNORE_CASE), "subfolder=ondemand")
+                    // Otimização de ultra-velocidade: RCFServer2/ondemand é o único CDN ativo que responde imediatamente (206)
+                    val fastServerUrl = if (!embedUrl.contains("server=RCFServer2", true)) {
+                        var f = embedUrl.replace(Regex("server=[^&]+", RegexOption.IGNORE_CASE), "server=RCFServer2")
+                        if (f.contains("subfolder=", true)) {
+                            f.replace(Regex("subfolder=[^&]+", RegexOption.IGNORE_CASE), "subfolder=ondemand")
                         } else {
-                            if (fixedUrl.contains("?")) "$fixedUrl&subfolder=ondemand" else "$fixedUrl?subfolder=ondemand"
+                            if (f.contains("?")) "$f&subfolder=ondemand" else "$f?subfolder=ondemand"
                         }
-                        Log.i(TAG, "[PROXY_LINK] servidor original falhou — tentando RCFServer2/ondemand: $fixedUrl")
-                        localProxyUrl = WebViewStreamProxy.captureAndServe(fixedUrl)
+                    } else embedUrl
+
+                    var localProxyUrl = WebViewStreamProxy.captureAndServe(fastServerUrl)
+                    if (localProxyUrl == null && fastServerUrl != embedUrl) {
+                        Log.i(TAG, "[PROXY_LINK] RCFServer2 falhou — tentando servidor original: $embedUrl")
+                        localProxyUrl = WebViewStreamProxy.captureAndServe(embedUrl)
                     }
                     if (localProxyUrl != null) {
                         Log.i(TAG, "[PROXY_LINK] emitindo proxy local: $localProxyUrl")
