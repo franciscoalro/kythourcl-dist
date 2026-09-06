@@ -43,7 +43,7 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 213
+        const val BUILD_VERSION = 219
         private const val TAG = "RedeCanaisAF-Trace"
         private const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/AP1A.240505.005) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Mobile Safari/537.36"
 
@@ -318,7 +318,7 @@ class RedeCanaisAF : MainAPI() {
             if (clean.isBlank() || clean.equals("Watch Later", true)) return@forEach
 
             val img = el.selectFirst("img") ?: a.selectFirst("img")
-            val poster = img?.let { RedeCanaisAFText.optimizePosterUrl(it.attr("data-echo").ifBlank { it.attr("src") }) }
+            val poster = img?.let { RedeCanaisAFText.optimizePosterUrl(it.attr("data-echo").ifBlank { it.attr("src") }, ::fixUrl) }
 
             val isSeries = RedeCanaisAFText.isSeriesUrlOrTitle(fullUrl, title)
             val type = RedeCanaisAFText.determineTvType(fullUrl, emptyList(), isSeries)
@@ -382,14 +382,42 @@ class RedeCanaisAF : MainAPI() {
                 val clean = RedeCanaisAFText.cleanMediaTitle(rawTitle)
                 val isSeries = RedeCanaisAFText.isSeriesUrlOrTitle(fullUrl, rawTitle)
                 val type = RedeCanaisAFText.determineTvType(fullUrl, emptyList(), isSeries)
+
+                val img = div.selectFirst("img") ?: a.selectFirst("img")
+                val rawPoster = img?.attr("data-echo")
+                    ?.ifBlank { img.attr("data-src") }
+                    ?.ifBlank { img.attr("src") }
+                    .orEmpty()
+
+                var poster = if (rawPoster.isNotBlank()) {
+                    RedeCanaisAFText.optimizePosterUrl(rawPoster, ::fixUrl)
+                } else {
+                    val folder = when (type) {
+                        TvType.Anime, TvType.AnimeMovie -> "Animes"
+                        TvType.Cartoon -> "Desenhos"
+                        TvType.TvSeries -> "Series"
+                        else -> "Filmes"
+                    }
+                    RedeCanaisAFText.optimizePosterUrl("$mainUrl/imgs-videos/$folder/$clean.jpg", ::fixUrl)
+                }
+
                 if (seen.add(fullUrl)) {
-                    results.add(
-                        if (isSeries) {
-                            newTvSeriesSearchResponse(clean, fullUrl, type)
-                        } else {
-                            newMovieSearchResponse(clean, fullUrl, type)
+                    val item = if (isSeries) {
+                        newTvSeriesSearchResponse(clean, fullUrl, type) {
+                            if (poster.isNotBlank() && !RedeCanaisAFText.isPlaceholderImage(poster)) {
+                                this.posterUrl = poster
+                                this.posterHeaders = posterHeaders()
+                            }
                         }
-                    )
+                    } else {
+                        newMovieSearchResponse(clean, fullUrl, type) {
+                            if (poster.isNotBlank() && !RedeCanaisAFText.isPlaceholderImage(poster)) {
+                                this.posterUrl = poster
+                                this.posterHeaders = posterHeaders()
+                            }
+                        }
+                    }
+                    results.add(item)
                 }
             }
         }
@@ -405,14 +433,30 @@ class RedeCanaisAF : MainAPI() {
                     val clean = RedeCanaisAFText.cleanMediaTitle(text)
                     val isSeries = RedeCanaisAFText.isSeriesUrlOrTitle(fullUrl, text)
                     val type = RedeCanaisAFText.determineTvType(fullUrl, emptyList(), isSeries)
+                    val folder = when (type) {
+                        TvType.Anime, TvType.AnimeMovie -> "Animes"
+                        TvType.Cartoon -> "Desenhos"
+                        TvType.TvSeries -> "Series"
+                        else -> "Filmes"
+                    }
+                    val poster = RedeCanaisAFText.optimizePosterUrl("$mainUrl/imgs-videos/$folder/$clean.jpg", ::fixUrl)
                     if (seen.add(fullUrl)) {
-                        results.add(
-                            if (isSeries) {
-                                newTvSeriesSearchResponse(clean, fullUrl, type)
-                            } else {
-                                newMovieSearchResponse(clean, fullUrl, type)
+                        val item = if (isSeries) {
+                            newTvSeriesSearchResponse(clean, fullUrl, type) {
+                                if (poster.isNotBlank() && !RedeCanaisAFText.isPlaceholderImage(poster)) {
+                                    this.posterUrl = poster
+                                    this.posterHeaders = posterHeaders()
+                                }
                             }
-                        )
+                        } else {
+                            newMovieSearchResponse(clean, fullUrl, type) {
+                                if (poster.isNotBlank() && !RedeCanaisAFText.isPlaceholderImage(poster)) {
+                                    this.posterUrl = poster
+                                    this.posterHeaders = posterHeaders()
+                                }
+                            }
+                        }
+                        results.add(item)
                     }
                 }
             }
@@ -469,9 +513,19 @@ class RedeCanaisAF : MainAPI() {
             ?.ifBlank { img.attr("src") }
             .orEmpty()
 
-        val posterUrl = RedeCanaisAFText.optimizePosterUrl(rawPoster, ::fixUrl)
         val isSeries = RedeCanaisAFText.isSeriesUrlOrTitle(fullUrl, rawTitle)
         val tvType = RedeCanaisAFText.determineTvType(fullUrl, emptyList(), isSeries)
+
+        var posterUrl = RedeCanaisAFText.optimizePosterUrl(rawPoster, ::fixUrl)
+        if (posterUrl.isBlank() || RedeCanaisAFText.isPlaceholderImage(posterUrl)) {
+            val folder = when (tvType) {
+                TvType.Anime, TvType.AnimeMovie -> "Animes"
+                TvType.Cartoon -> "Desenhos"
+                TvType.TvSeries -> "Series"
+                else -> "Filmes"
+            }
+            posterUrl = RedeCanaisAFText.optimizePosterUrl("$mainUrl/imgs-videos/$folder/$title.jpg", ::fixUrl)
+        }
 
         return if (isSeries) {
             newTvSeriesSearchResponse(title, fullUrl, tvType) {
@@ -574,13 +628,18 @@ class RedeCanaisAF : MainAPI() {
         doc.selectFirst("meta[name='twitter:image']")?.attr("content")?.let { candidates.add(it) }
         doc.selectFirst("link[rel='image_src']")?.attr("href")?.let { candidates.add(it) }
 
+        doc.selectFirst(".pm-category-description img")?.let { img ->
+            val src = img.attr("data-echo").ifBlank { img.attr("data-src") }.ifBlank { img.attr("src") }
+            candidates.add(src)
+        }
+
         doc.selectFirst("img[data-echo*='/imgs-videos/']")?.attr("data-echo")?.let { candidates.add(it) }
         doc.selectFirst("img[src*='/imgs-videos/']")?.let { img ->
             val src = img.attr("data-echo").ifBlank { img.attr("data-src") }.ifBlank { img.attr("src") }
             candidates.add(src)
         }
 
-        doc.selectFirst(".pm-video-watch-wrap img, .pm-video-thumb img, article img, .pm-video-img img, .poster img, img[itemprop='thumbnailUrl']")?.let { img ->
+        doc.selectFirst(".pm-video-watch-wrap img, .pm-video-thumb img, article img, .pm-video-img img, .poster img, img[itemprop='thumbnailUrl'], .entry-content img, .description img")?.let { img ->
             val src = img.attr("data-echo")
                 .ifBlank { img.attr("data-src") }
                 .ifBlank { img.attr("src") }
@@ -588,7 +647,7 @@ class RedeCanaisAF : MainAPI() {
         }
 
         val validImages = candidates
-            .map { RedeCanaisAFText.optimizePosterUrl(it) }
+            .map { RedeCanaisAFText.optimizePosterUrl(it, ::fixUrl) }
             .filter { it.isNotBlank() && !RedeCanaisAFText.isPlaceholderImage(it) && !it.startsWith("data:image/gif;base64,R0lGOD", true) }
             .distinct()
 

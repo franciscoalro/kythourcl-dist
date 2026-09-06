@@ -179,8 +179,26 @@ internal object RedeCanaisAFText {
         if (trimmed.isBlank() || isPlaceholderImage(trimmed)) return ""
         if (trimmed.startsWith("data:image/", ignoreCase = true)) return trimmed
 
-        val absoluteUrl = fixUrl(trimmed)
-        return absoluteUrl.replace(" ", "%20")
+        val resolved = if (trimmed.startsWith("/")) {
+            val base = fixUrl("").ifBlank { "https://redecanais.af" }.trimEnd('/')
+            "$base$trimmed"
+        } else {
+            fixUrl(trimmed)
+        }
+
+        val absoluteUrl = if (!resolved.startsWith("http://") && !resolved.startsWith("https://")) {
+            val base = fixUrl("").ifBlank { "https://redecanais.af" }.trimEnd('/')
+            "$base/${resolved.trimStart('/')}"
+        } else {
+            resolved
+        }
+
+        val rawUrl = absoluteUrl.replace(" ", "%20")
+        return if (rawUrl.contains("redecanais.af") || rawUrl.contains("/imgs-videos/")) {
+            LocalImageProxy.wrapUrl(rawUrl)
+        } else {
+            rawUrl
+        }
     }
 
     fun extractDurationMinutes(durText: String): Int? {
