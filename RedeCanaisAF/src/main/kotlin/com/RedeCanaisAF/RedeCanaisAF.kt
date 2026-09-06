@@ -43,7 +43,7 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 212
+        const val BUILD_VERSION = 213
         private const val TAG = "RedeCanaisAF-Trace"
         private const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/AP1A.240505.005) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Mobile Safari/537.36"
 
@@ -359,6 +359,38 @@ class RedeCanaisAF : MainAPI() {
             val card = parseCard(el) ?: continue
             if (RedeCanaisAFText.isRelevantSearchTitle(card.name, query) && seen.add(card.url)) {
                 results.add(card)
+            }
+        }
+
+        // Suporte a resultados em lista (.listagem div) do RedeCanais
+        doc.select(".listagem div, .listagem > div, .lista-filmes div, section div.listagem div").forEach { div ->
+            val a = div.selectFirst("a[href*='.html']") ?: return@forEach
+            val href = a.attr("href")
+            if (href.isBlank() || href.startsWith("#") || href.startsWith("javascript:") ||
+                href.contains("category") || href.contains("login") || href.contains("contact")
+            ) return@forEach
+
+            val rawTitle = div.selectFirst("span, strong, b")?.text()?.trim()
+                ?.ifBlank { null }
+                ?: div.ownText().replace("Acessar", "").replace("-", "").trim()
+                ?: a.attr("title").ifBlank { a.text().trim() }
+
+            if (rawTitle.isBlank() || rawTitle.equals("Acessar", true)) return@forEach
+
+            if (RedeCanaisAFText.isRelevantSearchTitle(rawTitle, query)) {
+                val fullUrl = fixUrl(href)
+                val clean = RedeCanaisAFText.cleanMediaTitle(rawTitle)
+                val isSeries = RedeCanaisAFText.isSeriesUrlOrTitle(fullUrl, rawTitle)
+                val type = RedeCanaisAFText.determineTvType(fullUrl, emptyList(), isSeries)
+                if (seen.add(fullUrl)) {
+                    results.add(
+                        if (isSeries) {
+                            newTvSeriesSearchResponse(clean, fullUrl, type)
+                        } else {
+                            newMovieSearchResponse(clean, fullUrl, type)
+                        }
+                    )
+                }
             }
         }
 
