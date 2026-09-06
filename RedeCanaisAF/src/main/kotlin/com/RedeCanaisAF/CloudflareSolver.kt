@@ -584,7 +584,7 @@ private const val TURNSTILE_TAP_PROBE_JS = """
             return it
         }
 
-        val interactiveHtml = solveInteractive(url, timeoutMs = 75000L, force = false)
+        val interactiveHtml = solveInteractive(url, timeoutMs = 25000L, force = false)
         if (!interactiveHtml.isNullOrBlank() && !isChallengeContent(interactiveHtml)) {
             return interactiveHtml
         }
@@ -595,7 +595,7 @@ private const val TURNSTILE_TAP_PROBE_JS = """
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    suspend fun solveInteractive(url: String, timeoutMs: Long = 75000L, force: Boolean = false): String? {
+    suspend fun solveInteractive(url: String, timeoutMs: Long = 25000L, force: Boolean = false): String? {
         capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() && !isChallengeContent(it) }?.let {
             Log.i(TAG, "[CF] HTML do cache da sessão (outro REQ capturou) url=$url len=${it.length}")
             return it

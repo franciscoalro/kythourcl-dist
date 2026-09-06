@@ -47,18 +47,15 @@ object WebViewStreamProxy {
     // v123: 512KB por fetch (era 256KB) — decode via FileReader.readAsDataURL é nativo e rápido,
     // então chunks maiores reduzem round-trips sem custo de CPU no JS
     private const val CHUNK_SIZE = 512 * 1024
-    private const val CAPTURE_TIMEOUT_MS = 45000L
-    private const val CHUNK_FETCH_TIMEOUT_S = 25L
-    // v123: setup mais rápido — poll 200ms, click no DOM pronto, fallbacks por tempo real
+    private const val CAPTURE_TIMEOUT_MS = 20000L
+    private const val CHUNK_FETCH_TIMEOUT_S = 20L
     private const val POLL_INTERVAL_MS = 200L
-    private const val CLICK_RETRY_MS = 600L
-    private const val DIRECT_FALLBACK_MS = 3000L
-    private const val RELOAD_FIRST_MS = 12000L
-    private const val RELOAD_INTERVAL_MS = 6000L
-    private const val MAX_RELOADS = 4
-    // v124: se o click foi efetivo mas o player não montou em 15s, é click "dud"
-    // (RCIP/RCSESS velho / IP rotacionou) — reset e reload para sessão fresca
-    private const val DUD_CLICK_MS = 15000L
+    private const val CLICK_RETRY_MS = 500L
+    private const val DIRECT_FALLBACK_MS = 2500L
+    private const val RELOAD_FIRST_MS = 8000L
+    private const val RELOAD_INTERVAL_MS = 4000L
+    private const val MAX_RELOADS = 3
+    private const val DUD_CLICK_MS = 9000L
     private val MOBILE_UA =
         "Mozilla/5.0 (Linux; Android 14; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Mobile Safari/537.36"
 
