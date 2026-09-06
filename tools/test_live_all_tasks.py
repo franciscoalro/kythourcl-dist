@@ -11,7 +11,7 @@ import json
 import subprocess
 import re
 
-ADB_SERIAL = "emulator-5554"
+ADB_SERIAL = "127.0.0.1:5555"
 PACKAGE = "com.lagradost.cloudstream3.prerelease"
 MAIN_ACTIVITY = f"{PACKAGE}/com.lagradost.cloudstream3.ui.account.AccountSelectActivity"
 TAG = "RedeCanaisAF-Trace"

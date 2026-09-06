@@ -48,18 +48,20 @@ def main():
     # 3. Verificar status do emulador Redroid
     print("\n2. Verificando emulador Android (Redroid)...")
     res_adb = run("adb devices", check=False)
-    if "emulator-5554" in res_adb.stdout:
-        print("✅ Emulador Redroid conectado e pronto (emulator-5554)")
-    else:
+    dev = "127.0.0.1:5555" if "127.0.0.1:5555" in res_adb.stdout else "emulator-5554"
+    if "127.0.0.1:5555" not in res_adb.stdout and "emulator-5554" not in res_adb.stdout:
         print("Tentando reconectar ADB no redroid...")
         run("adb connect 127.0.0.1:5555", check=False)
+        dev = "127.0.0.1:5555"
+
+    print(f"✅ Usando dispositivo ADB: {dev}")
 
     # 3.1 Instalar plugin no diretório do CloudStream
     if os.path.exists(cs3_path):
         dest_path = f"/sdcard/Cloudstream3/plugins/{plugin}.cs3"
         print(f"\nInstalando plugin no emulador: {dest_path}...")
-        run(f"adb -s emulator-5554 shell mkdir -p /sdcard/Cloudstream3/plugins", check=False)
-        run(f"adb -s emulator-5554 push {cs3_path} {dest_path}", check=False)
+        run(f"adb -s {dev} shell mkdir -p /sdcard/Cloudstream3/plugins", check=False)
+        run(f"adb -s {dev} push {cs3_path} {dest_path}", check=False)
         run(f"docker exec redroid rm -rf /data/media/0/Android/data/com.lagradost.cloudstream3.prerelease/files/plugins/{plugin}.cs3", check=False)
 
     # 4. Iniciar CloudStream no emulador
@@ -69,7 +71,7 @@ def main():
     # 5. Coletar Logcat recente
     print("\n4. Coletando Logcat recente...")
     time.sleep(2)
-    log_res = run("adb -s emulator-5554 logcat -d -t 100 -s RedeCanaisAF:V CloudStream:V", check=False, timeout=5)
+    log_res = run(f"adb -s {dev} logcat -d -t 100 -s RedeCanaisAF-Trace:V CloudStream:V ExoPlayer:V", check=False, timeout=5)
     
     print("\n=== VERIFICAÇÃO CONCLUÍDA COM SUCESSO! ===")
 

@@ -126,12 +126,15 @@ class RedeCanaisAF : MainAPI() {
             headers["Cookie"] = cookie
         }
 
+        val hasClearance = cookie.contains("cf_clearance")
+        val initialTimeout = if (hasClearance) 10L else 5L
+
         val res = try {
             cleanClient.get(
                 fixedUrl,
                 headers = headers,
                 referer = referer,
-                timeout = 15L
+                timeout = initialTimeout
             )
         } catch (e: Throwable) {
             Log.w(TAG, "[REQ#$reqId] cleanClient.get falhou ($e) — tentando CloudflareSolver")

@@ -16,6 +16,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import com.lagradost.cloudstream3.CommonActivity
+import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.network.WebViewResolver
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -33,6 +34,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 object CloudflareSolver {
     private val catalogMutex = kotlinx.coroutines.sync.Mutex()
     private const val TAG = "RedeCanaisAF-Trace"
+    private const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/AP1A.240505.005) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Mobile Safari/537.36"
     // v158: static.cloudflareinsights.com e acscdn.com REMOVIDOS — são infraestrutura
     // Cloudflare. Bloqueá-los impede o Turnstile managed de injetar o iframe (beacon.min.js
     // é sinal de verificação). emptyResource() retornava 200/0-bytes silenciosamente.
@@ -182,6 +184,47 @@ object CloudflareSolver {
         File(ctx.filesDir, DISK_HTML_FILE)
     }.getOrNull()
 
+    fun cleanHtmlForCache(html: String): String {
+        if (html.length < 50000) return html
+        return try {
+            html.replace(Regex("""<script\b[^>]*>([\s\S]*?)</script>""", RegexOption.IGNORE_CASE)) { mr ->
+                val body = mr.groupValues.getOrNull(1).orEmpty()
+                if (body.length > 2000 && !body.contains("video", true) && !body.contains("player", true) && !body.contains("file", true)) {
+                    "<script>// stripped large ad/tracking script</script>"
+                } else {
+                    mr.value
+                }
+            }
+        } catch (_: Throwable) {
+            html
+        }
+    }
+
+    suspend fun tryFastHttpGet(url: String, cookies: String): String? {
+        return withContext(Dispatchers.IO) {
+            try {
+                val headers = mutableMapOf(
+                    "User-Agent" to (lastUserAgent ?: WebViewResolver.webViewUserAgent ?: DEFAULT_USER_AGENT),
+                    "Referer" to "https://redecanais.af/",
+                    "Accept-Language" to "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                )
+                if (cookies.isNotBlank()) {
+                    headers["Cookie"] = cookies
+                }
+                val res = app.get(url, headers = headers, timeout = 6L)
+                val body = res.text
+                if (res.code in 200..299 && body.isNotBlank() && !isChallengeContent(body)) {
+                    cleanHtmlForCache(body)
+                } else {
+                    null
+                }
+            } catch (_: Throwable) {
+                null
+            }
+        }
+    }
+
     fun persistCapturedHtmlToDisk() {
         try {
             val f = diskCacheFile() ?: return
@@ -193,15 +236,16 @@ object CloudflareSolver {
                 val ts = diskHtmlTsByUrl[url] ?: now
                 val entry = org.json.JSONObject()
                 entry.put("ts", ts)
-                entry.put("html", html)
+                entry.put("html", cleanHtmlForCache(html))
                 obj.put(url, entry)
             }
             // escreve atômico
             val tmp = File(f.parent, "${f.name}.tmp")
-            tmp.writeText(obj.toString())
+            val serialized = obj.toString()
+            tmp.writeText(serialized)
             if (f.exists()) f.delete()
             tmp.renameTo(f)
-            Log.i(TAG, "[CF_DISK] HTML cache salvo em disco: ${capturedHtmlByUrl.size} URLs, file=${f.absolutePath} len=${obj.toString().length}")
+            Log.i(TAG, "[CF_DISK] HTML cache salvo em disco: ${capturedHtmlByUrl.size} URLs, file=${f.absolutePath} len=${serialized.length}")
         } catch (e: Throwable) {
             Log.w(TAG, "[CF_DISK] falha ao salvar cache em disco: ${e.message}")
         }
@@ -584,6 +628,17 @@ private const val TURNSTILE_TAP_PROBE_JS = """
             return it
         }
 
+        // Fast-path 1: se já temos cf_clearance no CookieManager, tenta GET direto sem travar no mutex
+        val existingCookies = runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull().orEmpty()
+        if (existingCookies.contains("cf_clearance")) {
+            val fast = tryFastHttpGet(url, existingCookies)
+            if (!fast.isNullOrBlank()) {
+                Log.i(TAG, "[CF] Fast HTTP GET sem WebView teve sucesso para $url (len=${fast.length})")
+                capturedHtmlByUrl[url] = fast
+                return fast
+            }
+        }
+
         val interactiveHtml = solveInteractive(url, timeoutMs = 25000L, force = false)
         if (!interactiveHtml.isNullOrBlank() && !isChallengeContent(interactiveHtml)) {
             return interactiveHtml
@@ -605,6 +660,16 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                 Log.i(TAG, "[CF] HTML do cache dentro do lock url=$url len=${it.length}")
                 return@withLock it
             }
+            // Fast-path 2: dentro do lock, verifica se o CookieManager recebeu cf_clearance enquanto aguardava
+            val cookiesInLock = runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull().orEmpty()
+            if (cookiesInLock.contains("cf_clearance")) {
+                val fast = tryFastHttpGet(url, cookiesInLock)
+                if (!fast.isNullOrBlank()) {
+                    Log.i(TAG, "[CF] Fast HTTP GET dentro do lock teve sucesso para $url (len=${fast.length})")
+                    capturedHtmlByUrl[url] = fast
+                    return@withLock fast
+                }
+            }
             val result = solveInteractiveLocked(url, timeoutMs, force)
             if (result == null || result.isBlank() || isChallengeContent(result)) {
                 capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() && !isChallengeContent(it) }?.let { return@withLock it }
@@ -619,6 +684,15 @@ private const val TURNSTILE_TAP_PROBE_JS = """
         val initialClearance = Regex("""cf_clearance=([^;]+)""").find(initialCookies)?.groupValues?.get(1).orEmpty()
         val hasClearanceBefore = initialClearance.isNotBlank()
         Log.d(TAG, "[CF] clearance_present=$hasClearanceBefore (before interactive)")
+
+        if (hasClearanceBefore) {
+            val fast = tryFastHttpGet(url, initialCookies)
+            if (!fast.isNullOrBlank()) {
+                Log.i(TAG, "[CF] Fast HTTP GET pré-WebView teve sucesso para $url (len=${fast.length})")
+                capturedHtmlByUrl[url] = fast
+                return fast
+            }
+        }
 
         val activity: Activity? = CommonActivity.activity
         if (activity == null || activity.isFinishing || activity.isDestroyed) {

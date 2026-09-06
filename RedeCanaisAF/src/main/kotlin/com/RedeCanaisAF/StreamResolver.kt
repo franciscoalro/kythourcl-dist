@@ -148,6 +148,18 @@ internal class StreamResolver(
         return foundAny
     }
 
+    private fun isNonVideoUrl(url: String): Boolean {
+        val l = url.lowercase()
+        return l.contains("chatango.com") || l.contains("disqus.com") ||
+            l.contains("facebook.com") || l.contains("twitter.com") ||
+            l.contains("googletagmanager") || l.contains("google-analytics") ||
+            l.contains("recaptcha") || l.contains("turnstile") ||
+            l.contains("doubleclick") || l.contains("adsystem") ||
+            l.contains("histats") || l.contains("whos.amung.us") ||
+            l.contains("sharethis") || l.contains("addthis") ||
+            l.contains("cloudflare.com") || l.contains("challenge-platform")
+    }
+
     /**
      * Resolução recursiva de embeds, iframes intermediários, extratores e links diretos.
      */
@@ -160,7 +172,7 @@ internal class StreamResolver(
         visitedUrls: MutableSet<String>,
         depth: Int = 0
     ): Boolean {
-        if (depth > 3 || !visitedUrls.add(url)) {
+        if (depth > 3 || isNonVideoUrl(url) || !visitedUrls.add(url)) {
             return false
         }
 
@@ -243,7 +255,7 @@ internal class StreamResolver(
                         .ifBlank { iframe.attr("data-lazy-src") }
                         .ifBlank { iframe.attr("src") }
 
-                    if (innerSrc.isNotBlank() && !innerSrc.contains("about:blank", true) && !innerSrc.contains("recaptcha", true)) {
+                    if (innerSrc.isNotBlank() && !isNonVideoUrl(innerSrc) && !innerSrc.contains("about:blank", true) && !innerSrc.contains("recaptcha", true)) {
                         val nestedUrl = fixUrl(innerSrc)
                         if (resolveStreamOrExtractor(nestedUrl, "$serverLabel -> Aninhado", url, subtitleCallback, callback, visitedUrls, depth + 1)) {
                             success = true

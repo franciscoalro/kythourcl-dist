@@ -146,14 +146,16 @@ object WebViewStreamProxy {
                             request: WebResourceRequest
                         ): WebResourceResponse? {
                             val u = request.url.toString()
-                            // v122: captura a URL real do vídeo que o player usa (initiator video)
-                            if (u.contains("__RC__/proxy", true) || u.contains("/proxy?src=", true)) {
-                                if (!captured.get()) {
-                                    streamUrl = u
-                                    captured.set(true)
-                                    captureHolder.set(true)
-                                    Log.i(TAG, "[PROXY] __RC__/proxy capturado via shouldInterceptRequest: ${u.take(180)}")
-                                }
+                            val isMediaStream = (u.contains("__RC__/proxy", true) || u.contains("/proxy?src=", true) ||
+                                (u.contains(".mp4", true) && !u.contains(".jpg") && !u.contains(".png")) ||
+                                u.contains(".m3u8", true) || u.contains("/ondemand/", true) || u.contains("/videos/", true)) &&
+                                !u.contains("disqus", true) && !u.contains("chatango", true) && !u.contains("google", true)
+
+                            if (isMediaStream && !captured.get()) {
+                                streamUrl = u
+                                captured.set(true)
+                                captureHolder.set(true)
+                                Log.i(TAG, "[PROXY] Stream capturado via shouldInterceptRequest: ${u.take(180)}")
                             }
                             return super.shouldInterceptRequest(view, request)
                         }
@@ -287,11 +289,9 @@ object WebViewStreamProxy {
                     }
                 }
 
-                // 3) Poll via performance entries (fallback se shouldInterceptRequest falhar)
+                // 3) Poll via performance entries & DOM vídeo (fallback não-bloqueante)
                 if (!captured.get()) {
-                    val found = withContext(Dispatchers.Main) {
-                        var result: String? = null
-                        val future = CompletableFuture<String?>()
+                    withContext(Dispatchers.Main) {
                         try {
                             wvNow.evaluateJavascript(
                                 """(function() {
@@ -299,38 +299,36 @@ object WebViewStreamProxy {
                                         const entries = performance.getEntriesByType('resource');
                                         for (let i = entries.length - 1; i >= 0; i--) {
                                             const n = entries[i].name;
-                                            if (n.indexOf('__RC__/proxy') >= 0 || n.indexOf('/proxy?src=') >= 0) return n;
+                                            if (n.indexOf('__RC__/proxy') >= 0 || n.indexOf('/proxy?src=') >= 0 ||
+                                                n.indexOf('.mp4') >= 0 || n.indexOf('.m3u8') >= 0 ||
+                                                n.indexOf('/ondemand/') >= 0 || n.indexOf('/videos/') >= 0) {
+                                                if (n.indexOf('disqus') < 0 && n.indexOf('chatango') < 0 && n.indexOf('google') < 0) {
+                                                    return n;
+                                                }
+                                            }
                                         }
                                     } catch (_) {}
                                     const v = document.querySelector('video');
                                     if (v) {
                                         const s = v.currentSrc || v.src || '';
-                                        if (s.indexOf('__RC__') >= 0 || s.indexOf('/proxy?src=') >= 0) return s;
+                                        if (s && s.indexOf('blob:') < 0 && s.indexOf('disqus') < 0) return s;
                                     }
                                     return '';
                                 })();""".trimIndent()
-                            ) { res -> future.complete(res?.removeSurrounding("\"")) }
-                            result = future.get(4, TimeUnit.SECONDS)
+                            ) { res ->
+                                val found = res?.removeSurrounding("\"").orEmpty()
+                                if (found.isNotBlank() && found != "null" && !captured.get()) {
+                                    streamUrl = found
+                                    captured.set(true)
+                                    captureHolder.set(true)
+                                    Log.i(TAG, "[PROXY] Stream capturado via evaluateJavascript: ${found.take(180)}")
+                                }
+                            }
                         } catch (_: Throwable) {}
-                        result
-                    }
-                    if (!found.isNullOrBlank() && !captured.get()) {
-                        streamUrl = found
-                        captured.set(true)
-                        captureHolder.set(true)
-                        Log.i(TAG, "[PROXY] __RC__/proxy capturado via performance entries: ${found.take(180)}")
                     }
                 }
 
-                // 4) Retry com reload se a página não montou o player (RCIP stale / shell 921KB)
-                // v124: NUNCA recarregar logo após um click efetivo — o botão .captcha_button some
-                // do DOM quando o player começa a montar (hasCaptcha=false), e reload aí mata o fluxo
-                // serverforms.api -> __RC__/proxy antes de capturar (era o bug do v123: reload #1 aos
-                // 8s pós-click matou o player em montagem).
-                // - Se NUNCA clicou e não há captcha -> reload (renova RCIP/RCSESS até 4x).
-                // - Se clicou mas nada capturou em DUD_CLICK_MS -> click dud (sessão velha/IP mudou):
-                //   reset clickDone + reload para sessão fresca.
-                // 1ª checagem aos 12s, depois a cada 6s.
+                // 4) Retry com reload se a página não montou o player
                 val clickAge = if (clickDoneAtMs == 0L) Long.MAX_VALUE else now - clickDoneAtMs
                 val neverClicked = clickDoneAtMs == 0L
                 val dudClick = clickDone.get() && clickAge >= DUD_CLICK_MS
@@ -341,32 +339,28 @@ object WebViewStreamProxy {
                     reloadCount < MAX_RELOADS
                 ) {
                     lastReloadCheckMs = now
-                    val hasCaptcha = withContext(Dispatchers.Main) {
-                        var ok = false
-                        val future = CompletableFuture<Boolean>()
+                    withContext(Dispatchers.Main) {
                         try {
                             wvNow.evaluateJavascript(
                                 """(function() {
                                     return document.querySelectorAll('.captcha_button, #submit').length > 0
-                                        && typeof window.rcPreloadPlayer === 'function';
+                                        || typeof window.rcPreloadPlayer === 'function';
                                 })();""".trimIndent()
-                            ) { res -> future.complete(res?.contains("true") == true) }
-                            ok = future.get(4, TimeUnit.SECONDS)
+                            ) { res ->
+                                val hasCaptcha = res?.contains("true") == true
+                                if (dudClick || !hasCaptcha) {
+                                    reloadCount++
+                                    if (dudClick) {
+                                        Log.i(TAG, "[PROXY] click dud -> reload #$reloadCount p/ sessão fresca")
+                                    } else {
+                                        Log.i(TAG, "[PROXY] captcha ausente -> reload #$reloadCount para renovar RCIP/RCSESS")
+                                    }
+                                    clickDone.set(false)
+                                    clickDoneAtMs = 0L
+                                    try { wvNow.reload() } catch (_: Throwable) {}
+                                }
+                            }
                         } catch (_: Throwable) {}
-                        ok
-                    }
-                    if (dudClick || !hasCaptcha) {
-                        reloadCount++
-                        if (dudClick) {
-                            Log.i(TAG, "[PROXY] click dud (player não montou em ${DUD_CLICK_MS / 1000}s) -> reload #$reloadCount p/ sessão fresca")
-                        } else {
-                            Log.i(TAG, "[PROXY] captcha ausente (shell?) -> reload #$reloadCount para renovar RCIP/RCSESS")
-                        }
-                        clickDone.set(false)
-                        clickDoneAtMs = 0L
-                        withContext(Dispatchers.Main) {
-                            try { wvNow.reload() } catch (_: Throwable) {}
-                        }
                     }
                 }
             }
