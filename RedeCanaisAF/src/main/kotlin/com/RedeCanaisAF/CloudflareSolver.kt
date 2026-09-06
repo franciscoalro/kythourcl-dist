@@ -605,8 +605,7 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                 Log.i(TAG, "[CF] HTML do cache dentro do lock url=$url len=${it.length}")
                 return@withLock it
             }
-            val extras = catalogUrls.filter { it != url && capturedHtmlByUrl[it] == null }
-            val result = solveInteractiveLocked(url, timeoutMs, force, extras)
+            val result = solveInteractiveLocked(url, timeoutMs, force)
             if (result == null || result.isBlank() || isChallengeContent(result)) {
                 capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() && !isChallengeContent(it) }?.let { return@withLock it }
             }
@@ -615,7 +614,7 @@ private const val TURNSTILE_TAP_PROBE_JS = """
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun solveInteractiveLocked(url: String, timeoutMs: Long, force: Boolean, extraUrls: List<String> = emptyList()): String? {
+    private suspend fun solveInteractiveLocked(url: String, timeoutMs: Long, force: Boolean): String? {
         val initialCookies = CookieManager.getInstance().getCookie(url) ?: ""
         val initialClearance = Regex("""cf_clearance=([^;]+)""").find(initialCookies)?.groupValues?.get(1).orEmpty()
         val hasClearanceBefore = initialClearance.isNotBlank()
@@ -627,16 +626,10 @@ private const val TURNSTILE_TAP_PROBE_JS = """
             return null
         }
 
-        Log.i(TAG, "[CF] challenge_started url=$url | extras=${extraUrls.size}")
+        Log.i(TAG, "[CF] challenge_started url=$url")
         val targetLoaded = AtomicBoolean(false)
-        // v128: sinaliza que o HTML da página alvo foi capturado (ou falhou) — o poller aguarda
-        // antes de destruir o WebView, senão o callback do evaluateJavascript nunca roda.
         val htmlCaptureDone = CompletableDeferred<Boolean>()
-        // v130: o primeiro diálogo a resolver navega o MESMO WebView (sessão TLS que resolveu o
-        // Turnstile) pelas demais URLs do catálogo — sem re-challenge, ~2-5s por página. A URL da
-        // captura atual acompanha o onPageFinished (o challenge serve a URL alvo no finishedUrl).
         var currentUrl = url
-        val pendingExtras = extraUrls.toMutableList()
         val isPollingActive = AtomicBoolean(true)
         // v141: mantém uma única WebView interativa visível durante o challenge.
         var interactiveWebView: WebView? = null
@@ -777,64 +770,6 @@ private const val TURNSTILE_TAP_PROBE_JS = """
             }
         }
 
-        fun fetchNext(cv: WebView?) {
-            if (!isPollingActive.get() || cv == null) {
-                isPollingActive.set(false)
-                htmlCaptureDone.complete(true)
-                return
-            }
-            val next = pendingExtras.firstOrNull()
-            if (next == null) {
-                isPollingActive.set(false)
-                htmlCaptureDone.complete(true)
-                return
-            }
-            pendingExtras.remove(next)
-            Log.i(TAG, "[CF] Buscando próxima URL do catálogo via fetch (mesma sessão TLS): $next")
-            val js = """
-                (function() {
-                    window.__pendingFetchResult = null;
-                    fetch('$next', {credentials: 'include'})
-                        .then(function(r) { return r.text(); })
-                        .then(function(t) { window.__pendingFetchResult = t; })
-                        .catch(function(e) { window.__pendingFetchResult = 'FETCH_ERROR:' + e; });
-                })();
-            """.trimIndent()
-            cv.evaluateJavascript(js) {
-                fun pollFetchResult(attempt: Int) {
-                    if (!isPollingActive.get() || cv.isAttachedToWindow != true || attempt > 40) {
-                        fetchNext(cv)
-                        return
-                    }
-                    cv.evaluateJavascript("(function() { return window.__pendingFetchResult; })();") { res ->
-                        val decoded = res?.trim()?.removeSurrounding("\"")
-                            ?.replace("\\u003C", "<")
-                            ?.replace("\\u003E", ">")
-                            ?.replace("\\\"", "\"")
-                            ?.replace("\\n", "\n")
-                            ?.replace("\\r", "\r")
-                        if (decoded != null && decoded != "null") {
-                            val ok = !decoded.startsWith("FETCH_ERROR") &&
-                                (decoded.contains("pm-video-thumb") || decoded.contains("pm-li-video") || decoded.contains("video-thumb") || decoded.contains("entry-title")) &&
-                                !isChallengeContent(decoded) &&
-                                decoded.length > 1000
-                            if (ok) {
-                                capturedHtmlByUrl[next] = decoded
-                                runCatching { persistCapturedHtmlToDisk() }
-                                Log.i(TAG, "[CF] HTML extra via fetch: len=${decoded.length} | url=$next")
-                            } else {
-                                Log.w(TAG, "[CF] fetch sem cards (len=${decoded.length}) para: $next")
-                            }
-                            fetchNext(cv)
-                        } else {
-                            cv.postDelayed({ pollFetchResult(attempt + 1) }, 200L)
-                        }
-                    }
-                }
-                cv.postDelayed({ pollFetchResult(1) }, 250L)
-            }
-        }
-
         fun pollAndCapture(cv: WebView?) {
             isPollScheduled = false
             if (!isPollingActive.get() || cv == null || isPollRunning) return
@@ -915,8 +850,9 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                             Log.i(TAG, "[CF] HTML alvo capturado (BG): len=${decoded.length} | cards=$cardCount | url=$currentUrl")
                             Log.i(TAG, "[CF] Resolvido! clearance_present=true | target_page_loaded=true")
                             runCatching { persistCapturedHtmlToDisk() }
+                            isPollingActive.set(false)
+                            htmlCaptureDone.complete(true)
                         }
-                        fetchNext(cv)
                     }
                 } else {
                     if (pollAttempts >= 180 || !isPollingActive.get()) {
@@ -1065,12 +1001,12 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                                         if (!isChallengeContent(decoded) && decoded.length > 2000) {
                                             lastSolvedHtml = decoded
                                             capturedHtmlByUrl[finishedUrl ?: currentUrl] = decoded
+                                            capturedHtmlByUrl[url] = decoded
                                             targetLoaded.set(true)
                                             Log.i(TAG, "[CF] HTML capturado no onPageFinished! len=${decoded.length} | url=$finishedUrl")
                                             runCatching { persistCapturedHtmlToDisk() }
-                                            if (isPollingActive.get()) {
-                                                view.post { fetchNext(view) }
-                                            }
+                                            isPollingActive.set(false)
+                                            htmlCaptureDone.complete(true)
                                         }
                                     }
                                 }
