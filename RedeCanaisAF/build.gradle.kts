@@ -1,7 +1,6 @@
 // Minimal build file
 
-// v221 — persist merge (evita regressão 6→1) + TTL 12h para teste longo
+// v224-harness — RCIP/RCSESS persist + xn--/tos-alisg proxy + 45s capture (HAR 2026-09-07 neosoro)
 cloudstream {
-    version = 221
+    version = 224
 }
-

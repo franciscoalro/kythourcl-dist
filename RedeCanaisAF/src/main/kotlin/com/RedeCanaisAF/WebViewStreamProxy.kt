@@ -47,7 +47,7 @@ object WebViewStreamProxy {
     // v123: 512KB por fetch (era 256KB) — decode via FileReader.readAsDataURL é nativo e rápido,
     // então chunks maiores reduzem round-trips sem custo de CPU no JS
     private const val CHUNK_SIZE = 512 * 1024
-    private const val CAPTURE_TIMEOUT_MS = 15000L
+    private const val CAPTURE_TIMEOUT_MS = 45000L
     private const val CHUNK_FETCH_TIMEOUT_S = 20L
     private const val POLL_INTERVAL_MS = 100L
     private const val CLICK_RETRY_MS = 250L
@@ -146,7 +146,10 @@ object WebViewStreamProxy {
                             request: WebResourceRequest
                         ): WebResourceResponse? {
                             val u = request.url.toString()
-                            val isMediaStream = (u.contains("__RC__/proxy", true) || u.contains("/proxy?src=", true) ||
+                                   val isMediaStream = (u.contains("__RC__/proxy", true) || u.contains("/proxy?src=", true) ||
+                                u.contains("p12-common-sign", true) || u.contains("xn--l", true) ||
+                                u.contains("neosoro.gq", true) || u.contains("tos-alisg", true) ||
+                                u.contains("/proxy?container=", true) || u.contains("container=videos", true) ||
                                 (u.contains(".mp4", true) && !u.contains(".jpg") && !u.contains(".png")) ||
                                 u.contains(".m3u8", true) || u.contains("/ondemand/", true) || u.contains("/videos/", true)) &&
                                 !u.contains("disqus", true) && !u.contains("chatango", true) && !u.contains("google", true)
@@ -156,6 +159,10 @@ object WebViewStreamProxy {
                                 captured.set(true)
                                 captureHolder.set(true)
                                 Log.i(TAG, "[PROXY] Stream capturado via shouldInterceptRequest: ${u.take(180)}")
+                                try {
+                                    val ctx2 = com.lagradost.cloudstream3.CommonActivity.activity ?: CommonActivity.activity?.applicationContext
+                                    ctx2?.let { c -> java.io.File(c.filesDir, "redecanais_af_last_stream_url.txt").writeText(u) }
+                                } catch (_: Throwable) {}
                             }
                             return super.shouldInterceptRequest(view, request)
                         }
@@ -300,6 +307,8 @@ object WebViewStreamProxy {
                                         for (let i = entries.length - 1; i >= 0; i--) {
                                             const n = entries[i].name;
                                             if (n.indexOf('__RC__/proxy') >= 0 || n.indexOf('/proxy?src=') >= 0 ||
+                                                n.indexOf('tos-alisg') >= 0 || n.indexOf('xn--l') >= 0 ||
+                                                n.indexOf('neosoro.gq') >= 0 || n.indexOf('container=videos') >= 0 ||
                                                 n.indexOf('.mp4') >= 0 || n.indexOf('.m3u8') >= 0 ||
                                                 n.indexOf('/ondemand/') >= 0 || n.indexOf('/videos/') >= 0) {
                                                 if (n.indexOf('disqus') < 0 && n.indexOf('chatango') < 0 && n.indexOf('google') < 0) {
@@ -322,6 +331,10 @@ object WebViewStreamProxy {
                                     captured.set(true)
                                     captureHolder.set(true)
                                     Log.i(TAG, "[PROXY] Stream capturado via evaluateJavascript: ${found.take(180)}")
+                                    try {
+                                        val ctx3 = com.lagradost.cloudstream3.CommonActivity.activity ?: CommonActivity.activity?.applicationContext
+                                        ctx3?.let { c -> java.io.File(c.filesDir, "redecanais_af_last_stream_url.txt").writeText(found) }
+                                    } catch (_: Throwable) {}
                                 }
                             }
                         } catch (_: Throwable) {}
@@ -385,6 +398,11 @@ object WebViewStreamProxy {
         }
 
         Log.i(TAG, "[PROXY] Captura OK: $finalUrl")
+        try {
+            val ctx4 = com.lagradost.cloudstream3.CommonActivity.activity ?: CommonActivity.activity?.applicationContext
+            ctx4?.let { c -> java.io.File(c.filesDir, "redecanais_af_last_stream_url.txt").writeText(finalUrl) }
+            java.io.File("/sdcard/redecanais_af_last_stream_url.txt").writeText(finalUrl)
+        } catch (_: Throwable) {}
         return startLocalServer(finalUrl)
     }
 

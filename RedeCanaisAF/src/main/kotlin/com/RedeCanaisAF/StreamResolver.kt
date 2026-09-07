@@ -36,6 +36,26 @@ internal class StreamResolver(
         try {
             val doc = fetchDocument(cleanUrl, "$mainUrl/")
             val html = doc.html()
+            // v222-verify: dump + trace
+            try {
+                val ctx = com.lagradost.cloudstream3.CommonActivity.activity
+                ctx?.let {
+                    val f = java.io.File(it.filesDir, "redecanais_af_last_stream_detail.html")
+                    f.writeText(html.take(2_000_000))
+                }
+                val dbg = listOf("pm-video-watch-wrap" to doc.select(".pm-video-watch-wrap").size,
+                    ".pm-video-watch-wrap iframe" to doc.select(".pm-video-watch-wrap iframe").size,
+                    "#player iframe" to doc.select("#player iframe").size,
+                    "iframe[src*='server.php']" to doc.select("iframe[src*='server.php']").size,
+                    "iframe[src*='player']" to doc.select("iframe[src*='player']").size,
+                    "all iframe" to doc.select("iframe").size,
+                    "a[href*='server.php']" to doc.select("a[href*='server.php']").size,
+                    "bundle.js" to html.contains("bundle.js"),
+                    "__RC__/proxy" to html.contains("__RC__/proxy")
+                ).joinToString(" | ") { "${it.first}=${it.second}" }
+                val iframeSrcs = doc.select("iframe").map { it.attr("src").take(90) + "|" + it.attr("data-src").take(40) }.take(3)
+                Log.i(TAG, "[VERIFY_STREAM_DETAIL] url=$cleanUrl len=${html.length} sel=[$dbg] iframes=$iframeSrcs head=${html.take(900).replace("\n"," ")}")
+            } catch (_: Throwable) {}
 
             // 1. Coleta de todos os Iframes e Embeds do DOM
             // 1. Coleta focada de Iframes legítimos de vídeo (ignora Disqus, Ads, etc.)
@@ -273,11 +293,15 @@ internal class StreamResolver(
         val decodedLower = try { java.net.URLDecoder.decode(url, "UTF-8").lowercase() } catch (_: Throwable) { fullLower }
         val decodedClean = try { java.net.URLDecoder.decode(clean, "UTF-8").lowercase() } catch (_: Throwable) { clean }
 
-        // 0. Fast-path proxy __RC__/proxy capturado via browser-harness mesma sessao (206 provado)
-        if (fullLower.contains("__rc__/proxy") || fullLower.contains("/proxy?src=") || fullLower.contains("p12-common-sign")) {
+        // 0. Fast-path proxy __RC__/proxy + novo punycode xn--/tos-alisg/neoso capturado via browser-harness (206 provado)
+        if (fullLower.contains("__rc__/proxy") || fullLower.contains("/proxy?src=") || fullLower.contains("p12-common-sign") ||
+            fullLower.contains("tos-alisg") || fullLower.contains("xn--l") || fullLower.contains("neosoro.gq") ||
+            fullLower.contains("container=videos") || fullLower.contains("/proxy?container=")) {
             if (decodedLower.contains(".mp4") || decodedLower.contains(".m3u8") || decodedLower.contains(".mkv") || decodedLower.contains(".mpd") || decodedLower.contains(".webm")) {
                 return true
             }
+            // proxy encapsulado já é stream mesmo sem extensão decodificada no path outer
+            if (fullLower.contains("tos-alisg") || fullLower.contains("xn--l")) return true
         }
 
         // 1. Rejeicao de assets estaticos
@@ -304,7 +328,7 @@ internal class StreamResolver(
             return false
         }
 
-        // 3. Whitelist streams (raw + decoded)
+        // 3. Whitelist streams (raw + decoded) — inclui novo proxy punycode xn--/tos-alisg (HAR 2026-09-07)
         val isDirectMediaExt = clean.endsWith(".mp4") || clean.endsWith(".m3u8") ||
             clean.endsWith(".mpd") || clean.endsWith(".mkv") || clean.endsWith(".webm") ||
             decodedClean.endsWith(".mp4") || decodedClean.endsWith(".m3u8") ||
@@ -315,6 +339,10 @@ internal class StreamResolver(
             fullLower.contains("/hls/") || fullLower.contains("/ondemand/") ||
             decodedLower.contains("/hls/") || decodedLower.contains("/ondemand/") ||
             fullLower.contains("/stream/") || decodedLower.contains("/stream/") ||
+            fullLower.contains("/proxy?container=") || decodedLower.contains("/proxy?container=") ||
+            fullLower.contains("container=videos") || decodedLower.contains("container=videos") ||
+            fullLower.contains("tos-alisg") || decodedLower.contains("tos-alisg") ||
+            fullLower.contains("xn--l") || decodedLower.contains("xn--l") ||
             fullLower.contains("googlevideo.com") || decodedLower.contains("googlevideo.com") ||
             (fullLower.contains("storage.googleapis.com") && !clean.endsWith(".jpg")) ||
             (decodedLower.contains("storage.googleapis.com") && !decodedClean.endsWith(".jpg")) ||
@@ -332,7 +360,11 @@ internal class StreamResolver(
     ): Boolean {
         var found = false
         // v105: Regex direto solicitado na missão + padrões existentes (jwplayer/file/source/src/hls)
+        // + HAR 2026-09-07: https://xn--l---...null-null.shop/tos-alisg-avt-.../proxy?container=videos&...&url=https://neosoro.gq/V/RCFServer2/ondemand/xxx.mp4
         val streamPatterns = listOf(
+            Regex("""https?://[^\s"'"'"]+tos-alisg[^\s"'"'"]+""", RegexOption.IGNORE_CASE),
+            Regex("""https?://[^\s"'"'"]+xn--l[^\s"'"'"]+""", RegexOption.IGNORE_CASE),
+            Regex("""https?://[^\s"'"'"]+/proxy\?container=[^\s"'"'"]+""", RegexOption.IGNORE_CASE),
             Regex("""https?://[^\s"'"'"]+/__RC__/proxy\?src=[^\s"'"'"]+""", RegexOption.IGNORE_CASE),
             Regex("""https?://[^\s"']+\.(?:m3u8|mp4)[^\s"']*""", RegexOption.IGNORE_CASE),
             Regex("""["'](https?://[^\s"'\\]+\.(?:m3u8|mp4)(?:\?[^\s"'\\]*)?)["']""", RegexOption.IGNORE_CASE),

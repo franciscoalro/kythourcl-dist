@@ -43,7 +43,7 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 221
+        const val BUILD_VERSION = 224
         private const val TAG = "RedeCanaisAF-Trace"
         private const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/AP1A.240505.005) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Mobile Safari/537.36"
 
@@ -568,6 +568,24 @@ class RedeCanaisAF : MainAPI() {
 
         val doc = requestDoc(cleanUrl)
 
+        // v222-verify: dump raw detail HTML for offline inspection — full without truncation
+        try {
+            val ctx = com.lagradost.cloudstream3.CommonActivity.activity ?: com.lagradost.cloudstream3.CommonActivity.activity?.applicationContext
+            ctx?.let {
+                val full = doc.html()
+                val f = java.io.File(it.filesDir, "redecanais_af_last_detail.html")
+                // write full (may be 6-9MB)
+                f.writeText(full)
+                // also write body slice for quick pull
+                val bodyIdx = full.indexOf("<body")
+                val slice = if (bodyIdx >= 0) full.substring(bodyIdx, minOf(bodyIdx + 800_000, full.length)) else full.take(800_000)
+                java.io.File(it.filesDir, "redecanais_af_last_detail_body.html").writeText(slice)
+                Log.i(TAG, "[VERIFY_DETAIL] dumped len=${full.length} bodyAt=$bodyIdx to ${f.absolutePath}")
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "[VERIFY_DETAIL] dump failed: ${e.message}")
+        }
+
         val rawTitle = doc.selectFirst("h1.entry-title, h1.pm-video-title, h1, meta[property='og:title']")?.let {
             if (it.tagName() == "meta") it.attr("content") else it.text()
         }?.trim().orEmpty()
@@ -575,12 +593,37 @@ class RedeCanaisAF : MainAPI() {
         val title = RedeCanaisAFText.cleanMediaTitle(rawTitle).ifBlank { "Sem Título" }
         val (posterUrl, backdropUrl) = extractDetailImages(doc)
 
-        val plot = doc.selectFirst(
+        val plotRaw = doc.selectFirst(
             "meta[property='og:description'], meta[name='description'], " +
             "#pm-video-description, .pm-video-description, .entry-content, .description, p.plot"
         )?.let {
             if (it.tagName() == "meta") it.attr("content") else it.text()
         }?.trim()
+        val plot = plotRaw?.let { RedeCanaisAFText.cleanPlotText(it) }?.takeIf { it.isNotBlank() } ?: plotRaw
+
+        // v222-verify: trace selectors (poster / plot / meta)
+        try {
+            val selCounts = listOf(
+                "h1.entry-title" to doc.select("h1.entry-title").size,
+                "h1.pm-video-title" to doc.select("h1.pm-video-title").size,
+                "meta[og:title]" to doc.select("meta[property='og:title']").size,
+                "meta[og:image]" to doc.select("meta[property='og:image']").size,
+                "meta[og:description]" to doc.select("meta[property='og:description']").size,
+                "#pm-video-description" to doc.select("#pm-video-description").size,
+                ".pm-video-description" to doc.select(".pm-video-description").size,
+                "pm-category-description" to doc.select(".pm-category-description").size,
+                "imgs-videos" to doc.select("img[src*='imgs-videos']").size,
+                "data-echo imgs-videos" to doc.select("img[data-echo*='imgs-videos']").size,
+                "pm-video-watch-wrap iframe" to doc.select(".pm-video-watch-wrap iframe").size,
+                "server.php iframe" to doc.select("iframe[src*='server.php']").size,
+                "all iframes" to doc.select("iframe").size,
+                "player buttons" to doc.select("a[href*='player'], a[href*='server.php']").size
+            ).joinToString(" | ") { "${it.first}=${it.second}" }
+            val candidatesDbg = doc.select("meta[property='og:image'], meta[name='twitter:image'], link[rel='image_src'], img[data-echo*='imgs-videos'], img[src*='imgs-videos']").map {
+                (if (it.tagName()=="meta") it.attr("content") else it.attr("data-echo").ifBlank { it.attr("src") }).take(80)
+            }.take(4)
+            Log.i(TAG, "[VERIFY_DETAIL] title raw='${rawTitle.take(90)}' clean='${title.take(60)}' poster='${posterUrl?.take(90)}' plot_len=${plot?.length ?: 0} plot_head='${plot?.take(120)}' sel=[$selCounts] cands=$candidatesDbg")
+        } catch (_: Throwable) {}
 
         val tags = doc.select("meta[property='article:tag'], .pm-video-tags a, .tags a, .genres a")
             .map { it.text().trim() }

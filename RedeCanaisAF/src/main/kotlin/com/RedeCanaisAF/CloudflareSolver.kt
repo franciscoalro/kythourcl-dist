@@ -46,8 +46,11 @@ object CloudflareSolver {
     private const val PREF_NAME = "redecanais_af_cf"
     private const val KEY_CF_CLEARANCE = "cf_clearance"
     private const val KEY_CF_BM = "cf_bm"
+    private const val KEY_RCIPE = "rcip"
+    private const val KEY_RCSESS = "rcsess"
     private const val KEY_SAVED_AT = "saved_at"
     private const val CLEARANCE_TTL_MS = 12 * 60 * 60 * 1000L
+    private const val RCSESS_TTL_MS = 25 * 60 * 1000L
     @Volatile private var persistenceRestoreDone = false
 
     private fun prefs() = runCatching {
@@ -57,16 +60,23 @@ object CloudflareSolver {
     fun saveClearanceFromCookieManager(url: String) {
         try {
             val raw = CookieManager.getInstance().getCookie(url) ?: return
-            val clearance = Regex("cf_clearance=([^;]+)").find(raw)?.groupValues?.get(1) ?: return
-            if (clearance.isBlank()) return
+            val clearance = Regex("cf_clearance=([^;]+)").find(raw)?.groupValues?.get(1)
             val cfBm = Regex("__cf_bm=([^;]+)").find(raw)?.groupValues?.get(1)
+            val rcip = Regex("RCIP=([^;]+)").find(raw)?.groupValues?.get(1)
+            val rcsess = Regex("RCSESS=([^;]+)").find(raw)?.groupValues?.get(1)
+            if (clearance.isNullOrBlank() && rcip.isNullOrBlank() && rcsess.isNullOrBlank()) return
             val now = System.currentTimeMillis()
-            prefs()?.edit()
-                ?.putString(KEY_CF_CLEARANCE, clearance)
-                ?.putString(KEY_CF_BM, cfBm)
-                ?.putLong(KEY_SAVED_AT, now)
-                ?.apply()
-            Log.i(TAG, "[CF_PERSIST] cf_clearance salvo (${clearance.take(12)}...) cf_bm=${cfBm != null} age=0ms")
+            val ed = prefs()?.edit()
+            if (!clearance.isNullOrBlank()) ed?.putString(KEY_CF_CLEARANCE, clearance)
+            if (!cfBm.isNullOrBlank()) ed?.putString(KEY_CF_BM, cfBm) else if (cfBm == null) { /* keep previous */ }
+            if (!rcip.isNullOrBlank()) ed?.putString(KEY_RCIPE, rcip)
+            if (!rcsess.isNullOrBlank()) ed?.putString(KEY_RCSESS, rcsess)
+            // always update saved_at when we have anything new (keeps RCSESS TTL fresh)
+            if (!clearance.isNullOrBlank() || !rcip.isNullOrBlank() || !rcsess.isNullOrBlank()) {
+                ed?.putLong(KEY_SAVED_AT, now)
+            }
+            ed?.apply()
+            Log.i(TAG, "[CF_PERSIST] save clearance=${!clearance.isNullOrBlank()} cf_bm=${cfBm != null} rcip=${rcip != null} rcsess=${rcsess != null} age=0ms")
         } catch (e: Throwable) {
             Log.w(TAG, "[CF_PERSIST] falha ao salvar clearance: ${e.message}")
         }
@@ -89,21 +99,32 @@ object CloudflareSolver {
                 persistenceRestoreDone = true
                 return false
             }
-            val clearance = p.getString(KEY_CF_CLEARANCE, null) ?: return false
-            if (clearance.isBlank()) return false
+            val clearance = p.getString(KEY_CF_CLEARANCE, null)
             val cfBm = p.getString(KEY_CF_BM, null)
+            val rcip = p.getString(KEY_RCIPE, null)
+            val rcsess = p.getString(KEY_RCSESS, null)
+            val hasRcsessValid = !rcsess.isNullOrBlank() && age < RCSESS_TTL_MS
+            if (clearance.isNullOrBlank() && rcip.isNullOrBlank() && rcsess.isNullOrBlank()) return false
             val cm = CookieManager.getInstance()
             // restaura no CookieManager para o host canônico e para redecanaistv (player)
             fun setFor(url: String) {
-                cm.setCookie(url, "cf_clearance=$clearance; Path=/; Domain=.redecanais.af; Secure; SameSite=None")
+                if (!clearance.isNullOrBlank()) cm.setCookie(url, "cf_clearance=$clearance; Path=/; Domain=.redecanais.af; Secure; SameSite=None")
                 if (!cfBm.isNullOrBlank()) cm.setCookie(url, "__cf_bm=$cfBm; Path=/; Domain=.redecanais.af; Secure; SameSite=None")
+                if (!rcip.isNullOrBlank() && hasRcsessValid) cm.setCookie(url, "RCIP=$rcip; Path=/; Domain=.redecanais.af; Secure; HttpOnly; SameSite=None")
+                if (!rcsess.isNullOrBlank() && hasRcsessValid) cm.setCookie(url, "RCSESS=$rcsess; Path=/; Domain=.redecanais.af; Secure; HttpOnly; SameSite=None")
+                // flags de player que evitam modal/ads bloqueando o captcha_button
+                cm.setCookie(url, "adsCompleted=1; Path=/; Domain=.redecanais.af")
+                cm.setCookie(url, "modalVisited=true; Path=/; Domain=.redecanais.af")
+                cm.setCookie(url, "pm_elastic_player=normal; Path=/; Domain=.redecanais.af")
             }
             setFor(mainUrl)
             setFor("https://redecanaistv.af/")
+            // também para domínio do player atual e neosoro (evita 520)
+            setFor("https://redecanais.af/")
             cm.flush()
             persistenceRestoreDone = true
-            Log.i(TAG, "[CF_PERSIST] cf_clearance restaurado age=${age / 1000}s (${clearance.take(12)}...) cf_bm=${cfBm != null}")
-            return true
+            Log.i(TAG, "[CF_PERSIST] cf_clearance restaurado age=${age / 1000}s clr=${!clearance.isNullOrBlank()} cf_bm=${cfBm != null} rcip=${rcip != null} rcsess=${hasRcsessValid} (rawAge=${age/1000}s)")
+            return !clearance.isNullOrBlank()
         } catch (e: Throwable) {
             Log.w(TAG, "[CF_PERSIST] falha ao restaurar clearance: ${e.message}")
             return false
