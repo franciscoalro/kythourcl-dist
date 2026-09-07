@@ -1,7 +1,7 @@
 // Minimal build file
 
-// v220 — hotfix catálogo: persist corrigido (strip antes do filtro 600k) + cache síncrono no boot
+// v221 — persist merge (evita regressão 6→1) + TTL 12h para teste longo
 cloudstream {
-    version = 220
+    version = 221
 }
 

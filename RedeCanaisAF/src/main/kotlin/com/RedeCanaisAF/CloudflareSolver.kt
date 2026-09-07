@@ -172,11 +172,11 @@ object CloudflareSolver {
     @Volatile
     private var catalogUrls: List<String> = emptyList()
 
-    // v146: cache de disco (6h) — HtmlGate.fetch retorna em <500ms mesmo após cold start com 403.
+    // v146: cache de disco (12h) — HtmlGate.fetch retorna em <500ms mesmo após cold start com 403.
     // O HTML capturado do WebView é serializado em filesDir/redecanais_af_html_cache.json com ts por URL.
-    // TTL 6h acompanha janela útil do cf_clearance e evita expiração prematura do catálogo.
+    // TTL 12h acompanha janela útil do cf_clearance e evita expiração prematura do catálogo em testes longos.
     private const val DISK_HTML_FILE = "redecanais_af_html_cache.json"
-    private const val DISK_CACHE_TTL_MS = 6 * 60 * 60 * 1000L
+    private const val DISK_CACHE_TTL_MS = 12 * 60 * 60 * 1000L
     @Volatile private var diskCacheRestored = false
     private val diskHtmlTsByUrl = ConcurrentHashMap<String, Long>()
 
@@ -234,46 +234,90 @@ object CloudflareSolver {
         }
     }
 
+    private val persistLock = Any()
+
     fun persistCapturedHtmlToDisk() {
         Thread {
-            try {
-                val f = diskCacheFile() ?: return@Thread
-                val now = System.currentTimeMillis()
-                // Só persiste URLs do catálogo (6 browse) — evita salvar páginas de episódios de 2-3MB
-                // que inflacionam o JSON para 4MB+ e deixam restore lento. FIX: clean ANTES do filtro
-                // de tamanho — HTML cru do WebView tem 4MB+ e após strip cai para ~140k.
-                val catalogSet = catalogUrls.toSet()
-                val toPersist = if (catalogSet.isNotEmpty()) {
-                    capturedHtmlByUrl.entries.filter { it.key in catalogSet }
-                } else {
-                    // fallback antes de catalogUrls ser setado — pega só entradas pequenas já limpas
-                    capturedHtmlByUrl.entries.filter { it.value.length < 650_000 }
+            synchronized(persistLock) {
+                try {
+                    val f = diskCacheFile() ?: return@synchronized
+                    val now = System.currentTimeMillis()
+                    val catalogSet = catalogUrls.toSet()
+
+                    // Merge com o que já está em disco — evita regressão para 1 chave
+                    // quando o primeiro WebView salva antes dos outros 5 terminarem.
+                    val merged = org.json.JSONObject()
+                    var existingCount = 0
+                    if (f.exists() && f.length() in 1 until 2_000_000) {
+                        try {
+                            val raw = f.readText()
+                            if (raw.isNotBlank()) {
+                                val existing = org.json.JSONObject(raw)
+                                val it = existing.keys()
+                                while (it.hasNext()) {
+                                    val k = it.next()
+                                    val e = existing.optJSONObject(k) ?: continue
+                                    // só mantém catálogo; descarta episódios legados
+                                    if (catalogSet.isNotEmpty() && k !in catalogSet) continue
+                                    val h = e.optString("html", "")
+                                    if (h.isBlank() || h.length > 600_000 || isChallengeContent(h)) continue
+                                    merged.put(k, e)
+                                    // hidrata RAM se ainda não tem (caso app reiniciei sem restore)
+                                    if (!capturedHtmlByUrl.containsKey(k)) {
+                                        capturedHtmlByUrl[k] = h
+                                        diskHtmlTsByUrl[k] = e.optLong("ts", now)
+                                    }
+                                    existingCount++
+                                }
+                            }
+                        } catch (_: Throwable) {}
+                    }
+
+                    // Sobrescreve/atualiza com o conteúdo fresco da RAM (captured é autoritativo)
+                    val toPersist = if (catalogSet.isNotEmpty()) {
+                        capturedHtmlByUrl.entries.filter { it.key in catalogSet }
+                    } else {
+                        capturedHtmlByUrl.entries.filter { it.value.length < 650_000 }
+                    }
+                    var added = 0
+                    for ((url, html) in toPersist) {
+                        if (html.isBlank()) continue
+                        val cleaned = cleanHtmlForCache(html)
+                        if (cleaned.isBlank() || cleaned.length > 600_000 || isChallengeContent(cleaned)) continue
+                        val ts = diskHtmlTsByUrl[url] ?: now
+                        val entry = org.json.JSONObject()
+                        entry.put("ts", ts)
+                        entry.put("html", cleaned)
+                        merged.put(url, entry)
+                        added++
+                    }
+
+                    // Cap: mantém só os 8 mais recentes por ts quando extrapola (6 catálogo + folga)
+                    if (merged.length() > 8) {
+                        val entries = mutableListOf<Pair<String, Long>>()
+                        val it2 = merged.keys()
+                        while (it2.hasNext()) {
+                            val k = it2.next()
+                            entries.add(k to merged.optJSONObject(k)?.optLong("ts", 0L)!!)
+                        }
+                        entries.sortBy { it.second }
+                        val toRemove = entries.take(merged.length() - 8).map { it.first }
+                        for (k in toRemove) merged.remove(k)
+                    }
+
+                    if (merged.length() == 0) {
+                        Log.w(TAG, "[CF_DISK] nada para persistir (captured=${capturedHtmlByUrl.size} catalog=${catalogUrls.size} existing=$existingCount)")
+                        return@synchronized
+                    }
+                    val tmp = File(f.parent, "${f.name}.tmp")
+                    val serialized = merged.toString()
+                    tmp.writeText(serialized)
+                    if (f.exists()) f.delete()
+                    tmp.renameTo(f)
+                    Log.i(TAG, "[CF_DISK] HTML cache salvo em disco: ${merged.length()} URLs (fresh=$added existing=$existingCount) file=${f.absolutePath} len=${serialized.length}")
+                } catch (e: Throwable) {
+                    Log.w(TAG, "[CF_DISK] falha ao salvar cache em disco: ${e.message}")
                 }
-                val obj = org.json.JSONObject()
-                var added = 0
-                for ((url, html) in toPersist.takeLast(8)) {
-                    if (html.isBlank()) continue
-                    val cleaned = cleanHtmlForCache(html)
-                    if (cleaned.isBlank() || cleaned.length > 600_000 || isChallengeContent(cleaned)) continue
-                    val ts = diskHtmlTsByUrl[url] ?: now
-                    val entry = org.json.JSONObject()
-                    entry.put("ts", ts)
-                    entry.put("html", cleaned)
-                    obj.put(url, entry)
-                    added++
-                }
-                if (obj.length() == 0) {
-                    Log.w(TAG, "[CF_DISK] nada para persistir (captured=${capturedHtmlByUrl.size} catalog=${catalogUrls.size})")
-                    return@Thread
-                }
-                val tmp = File(f.parent, "${f.name}.tmp")
-                val serialized = obj.toString()
-                tmp.writeText(serialized)
-                if (f.exists()) f.delete()
-                tmp.renameTo(f)
-                Log.i(TAG, "[CF_DISK] HTML cache salvo em disco: $added URLs, file=${f.absolutePath} len=${serialized.length}")
-            } catch (e: Throwable) {
-                Log.w(TAG, "[CF_DISK] falha ao salvar cache em disco: ${e.message}")
             }
         }.start()
     }
