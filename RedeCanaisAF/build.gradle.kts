@@ -1,7 +1,7 @@
 // Minimal build file
 
-// v130 — primeiro diálogo navega o MESMO WebView por todas as URLs do catálogo (sessão TLS resolvida)
+// v220 — hotfix catálogo: persist corrigido (strip antes do filtro 600k) + cache síncrono no boot
 cloudstream {
-    version = 219
+    version = 220
 }
 

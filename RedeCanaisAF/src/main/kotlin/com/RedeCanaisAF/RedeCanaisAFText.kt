@@ -17,7 +17,7 @@ internal object RedeCanaisAFText {
     val SERIES_URL_KEYWORDS = listOf(
         "lista-de-episodios", "todas-as-temporadas", "temporada", "temporadas",
         "serie", "series", "animes", "anime", "desenhos", "desenho",
-        "episodio", "episodios", "completo-dublado", "temp"
+        "episodio", "episodios", "completo-dublado", "temp", "browse-"
     )
 
     val SERIES_TITLE_KEYWORDS = listOf(
@@ -258,9 +258,11 @@ internal object RedeCanaisAFText {
     fun isValidEpisodeLink(url: String): Boolean {
         if (url.isBlank()) return false
         val lower = url.lowercase()
-        if (lower.contains("browse-") || lower.contains("category") || lower.contains("#") || lower.contains("javascript")) {
+        if (lower.contains("browse-") || lower.contains("category") || lower.contains("#") || 
+            lower.contains("javascript") || lower.contains("lista-de-episodios") || 
+            lower.contains("facebook.com") || lower.contains("twitter.com") || lower.contains("whatsapp")) {
             return false
         }
-        return lower.contains(".html")
+        return lower.contains(".html") || lower.contains("vid=") || lower.contains("video.php") || lower.contains("watch.php")
     }
 }

@@ -48,6 +48,7 @@ object LocalImageProxy {
             .readTimeout(8, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
+            .proxy(java.net.Proxy.NO_PROXY)
             .build()
     }
 

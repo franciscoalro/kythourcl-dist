@@ -172,17 +172,21 @@ object CloudflareSolver {
     @Volatile
     private var catalogUrls: List<String> = emptyList()
 
-    // v146: cache de disco (30min) — HtmlGate.fetch retorna em <500ms mesmo após cold start com 403.
+    // v146: cache de disco (6h) — HtmlGate.fetch retorna em <500ms mesmo após cold start com 403.
     // O HTML capturado do WebView é serializado em filesDir/redecanais_af_html_cache.json com ts por URL.
+    // TTL 6h acompanha janela útil do cf_clearance e evita expiração prematura do catálogo.
     private const val DISK_HTML_FILE = "redecanais_af_html_cache.json"
-    private const val DISK_CACHE_TTL_MS = 30 * 60 * 1000L
+    private const val DISK_CACHE_TTL_MS = 6 * 60 * 60 * 1000L
     @Volatile private var diskCacheRestored = false
     private val diskHtmlTsByUrl = ConcurrentHashMap<String, Long>()
 
-    private fun diskCacheFile(): File? = runCatching {
-        val ctx = CommonActivity.activity ?: return null
-        File(ctx.filesDir, DISK_HTML_FILE)
-    }.getOrNull()
+    @Volatile private var appContext: android.content.Context? = null
+    fun setAppContext(ctx: android.content.Context) { appContext = ctx.applicationContext }
+
+    private fun diskCacheFile(): File? {
+        val ctx = appContext ?: CommonActivity.activity ?: CommonActivity.activity?.applicationContext ?: return null
+        return try { File(ctx.filesDir, DISK_HTML_FILE) } catch (_: Throwable) { null }
+    }
 
     fun cleanHtmlForCache(html: String): String {
         if (html.length < 50000) return html
@@ -212,9 +216,14 @@ object CloudflareSolver {
                 if (cookies.isNotBlank()) {
                     headers["Cookie"] = cookies
                 }
-                val res = app.get(url, headers = headers, timeout = 6L)
-                val body = res.text
-                if (res.code in 200..299 && body.isNotBlank() && !isChallengeContent(body)) {
+                // Usa baseClient sem proxy herdado (18080 emulado envs travam o NiceHttp)
+                val client = app.baseClient.newBuilder().proxy(java.net.Proxy.NO_PROXY).build()
+                val req = okhttp3.Request.Builder().url(url).apply {
+                    headers.forEach { (k, v) -> header(k, v) }
+                }.build()
+                val resp = client.newCall(req).execute()
+                val body = resp.body?.string().orEmpty()
+                if (resp.code in 200..299 && body.isNotBlank() && !isChallengeContent(body)) {
                     cleanHtmlForCache(body)
                 } else {
                     null
@@ -226,29 +235,47 @@ object CloudflareSolver {
     }
 
     fun persistCapturedHtmlToDisk() {
-        try {
-            val f = diskCacheFile() ?: return
-            val now = System.currentTimeMillis()
-            // atualiza timestamps das entradas atuais
-            capturedHtmlByUrl.keys.forEach { diskHtmlTsByUrl[it] = now }
-            val obj = org.json.JSONObject()
-            for ((url, html) in capturedHtmlByUrl) {
-                val ts = diskHtmlTsByUrl[url] ?: now
-                val entry = org.json.JSONObject()
-                entry.put("ts", ts)
-                entry.put("html", cleanHtmlForCache(html))
-                obj.put(url, entry)
+        Thread {
+            try {
+                val f = diskCacheFile() ?: return@Thread
+                val now = System.currentTimeMillis()
+                // Só persiste URLs do catálogo (6 browse) — evita salvar páginas de episódios de 2-3MB
+                // que inflacionam o JSON para 4MB+ e deixam restore lento. FIX: clean ANTES do filtro
+                // de tamanho — HTML cru do WebView tem 4MB+ e após strip cai para ~140k.
+                val catalogSet = catalogUrls.toSet()
+                val toPersist = if (catalogSet.isNotEmpty()) {
+                    capturedHtmlByUrl.entries.filter { it.key in catalogSet }
+                } else {
+                    // fallback antes de catalogUrls ser setado — pega só entradas pequenas já limpas
+                    capturedHtmlByUrl.entries.filter { it.value.length < 650_000 }
+                }
+                val obj = org.json.JSONObject()
+                var added = 0
+                for ((url, html) in toPersist.takeLast(8)) {
+                    if (html.isBlank()) continue
+                    val cleaned = cleanHtmlForCache(html)
+                    if (cleaned.isBlank() || cleaned.length > 600_000 || isChallengeContent(cleaned)) continue
+                    val ts = diskHtmlTsByUrl[url] ?: now
+                    val entry = org.json.JSONObject()
+                    entry.put("ts", ts)
+                    entry.put("html", cleaned)
+                    obj.put(url, entry)
+                    added++
+                }
+                if (obj.length() == 0) {
+                    Log.w(TAG, "[CF_DISK] nada para persistir (captured=${capturedHtmlByUrl.size} catalog=${catalogUrls.size})")
+                    return@Thread
+                }
+                val tmp = File(f.parent, "${f.name}.tmp")
+                val serialized = obj.toString()
+                tmp.writeText(serialized)
+                if (f.exists()) f.delete()
+                tmp.renameTo(f)
+                Log.i(TAG, "[CF_DISK] HTML cache salvo em disco: $added URLs, file=${f.absolutePath} len=${serialized.length}")
+            } catch (e: Throwable) {
+                Log.w(TAG, "[CF_DISK] falha ao salvar cache em disco: ${e.message}")
             }
-            // escreve atômico
-            val tmp = File(f.parent, "${f.name}.tmp")
-            val serialized = obj.toString()
-            tmp.writeText(serialized)
-            if (f.exists()) f.delete()
-            tmp.renameTo(f)
-            Log.i(TAG, "[CF_DISK] HTML cache salvo em disco: ${capturedHtmlByUrl.size} URLs, file=${f.absolutePath} len=${serialized.length}")
-        } catch (e: Throwable) {
-            Log.w(TAG, "[CF_DISK] falha ao salvar cache em disco: ${e.message}")
-        }
+        }.start()
     }
 
     fun restoreDiskCacheIfNeeded(): Boolean {
@@ -257,20 +284,28 @@ object CloudflareSolver {
         try {
             val f = diskCacheFile() ?: return false
             if (!f.exists() || f.length() == 0L) return false
+            // evita parse de cache gigante de v219 (4MB+ com páginas de episódios) bloqueando o boot
+            if (f.length() > 2_000_000L) {
+                Log.w(TAG, "[CF_DISK] cache muito grande (${f.length()} bytes) — limpando para priorizar catálogo")
+                runCatching { f.delete() }
+                return false
+            }
             val raw = f.readText()
             if (raw.isBlank()) return false
             val obj = org.json.JSONObject(raw)
             val now = System.currentTimeMillis()
             var restored = 0
             val it = obj.keys()
+            val allowedUrls = catalogUrls.toSet()
             while (it.hasNext()) {
                 val url = it.next()
+                // pós-v219 só mantemos URLs do catálogo (6) — descarta episódios que inchavam o JSON
+                if (allowedUrls.isNotEmpty() && url !in allowedUrls) continue
                 val entry = obj.optJSONObject(url) ?: continue
                 val ts = entry.optLong("ts", 0L)
                 if (ts == 0L || now - ts > DISK_CACHE_TTL_MS) continue
                 val html = entry.optString("html", "")
-                if (html.isBlank() || isChallengeContent(html)) continue
-                // só preenche se ainda não está em RAM (RAM tem prioridade — mais recente)
+                if (html.isBlank() || html.length > 600_000 || isChallengeContent(html)) continue
                 if (!capturedHtmlByUrl.containsKey(url)) {
                     capturedHtmlByUrl[url] = html
                     diskHtmlTsByUrl[url] = ts
@@ -314,6 +349,8 @@ object CloudflareSolver {
 
     fun capturedHtml(url: String): String? = capturedHtmlByUrl[url]
 
+    fun capturedCount(): Int = capturedHtmlByUrl.size
+
     // v128: HTML capturado do WebView do diálogo interativo (a página alvo carrega na MESMA sessão
     // TLS que resolveu o Turnstile). O Turnstile managed de redecanais.af resolve SEM emitir
     // cf_clearance no CookieManager — o token fica na sessão do WebView — então um WebView NOVO
@@ -334,7 +371,7 @@ object CloudflareSolver {
     // conteudo do iframe (SecurityError), mas pode ler o RETANGULO dele via getBoundingClientRect.
     // O toque Android real e disparado nas coordenadas do checkbox dentro desse retangulo.
     // Fallback legado: input[id^="cf-chl-widget-"][id$="_response"] no DOM principal.
-private const val TURNSTILE_TAP_PROBE_JS = """
+    internal const val TURNSTILE_TAP_PROBE_JS = """
         (function() {
             try {
                 function getRect(type, el) {
@@ -851,7 +888,7 @@ private const val TURNSTILE_TAP_PROBE_JS = """
             cv.evaluateJavascript(
                 """(function() {
                     var cards = document.querySelectorAll('.pm-video-thumb, .pm-li-video, .video-thumb, article, div[class*="video-thumb"], .entry-item, li.video-item').length;
-                    var hasPlayer = (document.querySelector('.entry-title, #video, iframe[src*="server"], iframe[src*="play"], .player-wrapper, #pm-video-description') ? 1 : 0);
+                    var hasPlayer = (document.querySelector('.entry-title, #video, iframe[src*="server"], iframe[src*="play"], .player-wrapper, #pm-video-description, #player, .captcha_button, #submit, button, form') || typeof window.rcPreloadPlayer === 'function' || location.pathname.indexOf('server.php') !== -1 || location.pathname.indexOf('play.php') !== -1) ? 1 : 0;
                     var links = document.querySelectorAll('a[href]').length;
                     var title = (document.title || '').replace(/[|\"']/g, ' ');
                     var htmlLen = (document.documentElement ? document.documentElement.outerHTML.length : 0);
@@ -859,7 +896,7 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                     try { bodySnip = (document.body ? document.body.innerText.substring(0, 500) : '').replace(/[|]/g, ' '); } catch(e) {}
                     var isChal = /Just a moment|Checking your browser|challenge-platform|cf-turnstile|Um momento|Aguarde|Verificando|security verification|security service|not a bot/i.test(title + ' ' + bodySnip);
                     
-                    if (!isChal && (cards > 0 || hasPlayer > 0 || (links >= 5 && htmlLen >= 3000 && (title.indexOf('RedeCanais') !== -1 || bodySnip.indexOf('redecanais') !== -1)))) {
+                    if (!isChal && (cards > 0 || hasPlayer > 0 || (links >= 5 && htmlLen >= 1000 && (title.indexOf('RedeCanais') !== -1 || bodySnip.indexOf('redecanais') !== -1)))) {
                         if (window.HTMLOUT && typeof window.HTMLOUT.onHtmlCaptured === 'function') {
                             window.HTMLOUT.onHtmlCaptured(location.href, document.documentElement ? document.documentElement.outerHTML : '');
                         }
@@ -898,13 +935,13 @@ private const val TURNSTILE_TAP_PROBE_JS = """
 
                 if (isChallenge && isPollingActive.get()) {
                     val now = SystemClock.uptimeMillis()
-                    val cooldown = if (lastTapType == "button_rect") 2500L else 15000L
-                    if (pollAttempts >= 4 && (now - lastTurnstileTapAt >= cooldown)) {
+                    val cooldown = if (lastTapType == "button_rect") 2500L else 8000L
+                    if (pollAttempts >= 3 && (now - lastTurnstileTapAt >= cooldown)) {
                         tryTapTurnstile(cv, "poll_$pollAttempts")
                     }
                 }
 
-                val isResolved = !isChallenge && (cardCount > 0 || hasPlayer || (linkCount >= 5 && htmlLen >= 3000))
+                val isResolved = !isChallenge && (cardCount > 0 || hasPlayer || (linkCount >= 5 && htmlLen >= 2000))
                 if (isResolved) {
                     cv.evaluateJavascript(
                         "(function() { return (document.documentElement ? document.documentElement.outerHTML : ''); })();"
@@ -936,7 +973,7 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                     } else {
                         if (isPollingActive.get() && !isPollScheduled) {
                             isPollScheduled = true
-                            cv.postDelayed({ pollAndCapture(cv) }, 500)
+                            cv.postDelayed({ pollAndCapture(cv) }, 350)
                         }
                     }
                 }
@@ -997,7 +1034,7 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                     addJavascriptInterface(object {
                         @android.webkit.JavascriptInterface
                         fun onHtmlCaptured(pageUrl: String, html: String) {
-                            if (html.isNotBlank() && !isChallengeContent(html) && html.length > 2000) {
+                            if (html.isNotBlank() && !isChallengeContent(html) && html.length > 300) {
                                 val clean = cleanHtmlForCache(html)
                                 capturedHtmlByUrl[pageUrl] = clean
                                 Log.i(TAG, "[CF_JS_INTERFACE] HTML capturado via fetch assíncrono: len=${clean.length} url=$pageUrl")
@@ -1084,42 +1121,40 @@ private const val TURNSTILE_TAP_PROBE_JS = """
                                             .replace("\\\"", "\"")
                                             .replace("\\n", "\n")
                                             .replace("\\r", "\r")
-                                        if (!isChallengeContent(decoded) && decoded.length > 2000) {
+                                        if (!isChallengeContent(decoded) && decoded.length > 300) {
                                             lastSolvedHtml = decoded
                                             capturedHtmlByUrl[finishedUrl ?: currentUrl] = decoded
                                             capturedHtmlByUrl[url] = decoded
+                                            val nowTs = System.currentTimeMillis()
+                                            diskHtmlTsByUrl[finishedUrl ?: currentUrl] = nowTs
+                                            diskHtmlTsByUrl[url] = nowTs
                                             targetLoaded.set(true)
                                             Log.i(TAG, "[CF] HTML capturado no onPageFinished! len=${decoded.length} | url=$finishedUrl")
                                             runCatching { persistCapturedHtmlToDisk() }
 
-                                            val prefetchJs = """
-                                                (function() {
-                                                    var catalog = [
-                                                        'https://redecanais.af/browse-filmes-videos-1-date.html',
-                                                        'https://redecanais.af/browse-series-videos-1-date.html',
-                                                        'https://redecanais.af/browse-animes-videos-1-date.html',
-                                                        'https://redecanais.af/browse-desenhos-videos-1-date.html',
-                                                        'https://redecanais.af/browse-filmes-videos-1-views.html',
-                                                        'https://redecanais.af/topvideos.html'
-                                                    ];
-                                                    for (var i = 0; i < catalog.length; i++) {
-                                                        var u = catalog[i];
-                                                        if (u !== location.href) {
-                                                            (function(targetUrl) {
-                                                                fetch(targetUrl, {credentials: 'include'})
-                                                                    .then(function(res) { return res.text(); })
-                                                                    .then(function(html) {
-                                                                        if (window.HTMLOUT && typeof window.HTMLOUT.onHtmlCaptured === 'function') {
-                                                                            window.HTMLOUT.onHtmlCaptured(targetUrl, html);
-                                                                        }
-                                                                    })
-                                                                    .catch(function(err) {});
-                                                            })(u);
-                                                        }
+                                            // Prefetch catálogo no MESMO WebView (sessão TLS já válida) — preenche as 5 URLs restantes
+                                            try {
+                                                val catalogForPrefetch = catalogUrls.ifEmpty {
+                                                    listOf(
+                                                        "https://redecanais.af/browse-filmes-videos-1-date.html",
+                                                        "https://redecanais.af/browse-series-videos-1-date.html",
+                                                        "https://redecanais.af/browse-animes-videos-1-date.html",
+                                                        "https://redecanais.af/browse-desenhos-videos-1-date.html",
+                                                        "https://redecanais.af/browse-filmes-videos-1-views.html",
+                                                        "https://redecanais.af/topvideos.html"
+                                                    )
+                                                }
+                                                val pending = catalogForPrefetch.filter { it != finishedUrl && it != url && !capturedHtmlByUrl.containsKey(it) }
+                                                if (pending.isNotEmpty()) {
+                                                    val prefetchJs = buildString {
+                                                        append("(function(){var targets=[")
+                                                        append(pending.joinToString(",") { "'$it'" })
+                                                        append("];targets.forEach(function(u,i){setTimeout(function(){fetch(u,{credentials:'include'}).then(function(r){return r.text();}).then(function(html){if(html&&window.HTMLOUT&&window.HTMLOUT.onHtmlCaptured)window.HTMLOUT.onHtmlCaptured(u,html);}).catch(function(){});},i*400);});})();")
                                                     }
-                                                })();
-                                            """.trimIndent()
-                                            view?.evaluateJavascript(prefetchJs, null)
+                                                    view?.evaluateJavascript(prefetchJs, null)
+                                                    Log.i(TAG, "[CF_PREFETCH] disparado para ${pending.size} URLs restantes")
+                                                }
+                                            } catch (_: Throwable) {}
 
                                             isPollingActive.set(false)
                                             htmlCaptureDone.complete(true)

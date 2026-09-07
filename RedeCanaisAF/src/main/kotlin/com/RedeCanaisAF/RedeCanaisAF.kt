@@ -43,7 +43,7 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 219
+        const val BUILD_VERSION = 220
         private const val TAG = "RedeCanaisAF-Trace"
         private const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/AP1A.240505.005) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Mobile Safari/537.36"
 
@@ -66,11 +66,12 @@ class RedeCanaisAF : MainAPI() {
 
     private val cleanClient by lazy {
         val baseBuilder = app.baseClient.newBuilder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
-            .writeTimeout(15, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .writeTimeout(10, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
+            .proxy(java.net.Proxy.NO_PROXY)
 
         baseBuilder.interceptors().removeAll {
             it.javaClass.simpleName.contains("Cloudflare", ignoreCase = true)
@@ -689,29 +690,27 @@ class RedeCanaisAF : MainAPI() {
 
         // 2. Links dentro de .pm-video-description com rastreamento contextual de temporada
         if (episodes.isEmpty()) {
-            val container = doc.selectFirst(".pm-video-description, #pm-video-description, .description, .episodios, .pm-video-episodes")
+            val container = doc.selectFirst(".pm-video-description, #pm-video-description, [itemprop='description'], .description, .episodios, .pm-video-episodes")
             if (container != null) {
                 var currentContextSeason = RedeCanaisAFText.extractSeasonNumber(seriesTitle) ?: 1
-
-                val nodes = container.select("h2, h3, h4, h5, strong, b, p, div, a")
-                for (node in nodes) {
-                    if (node.tagName() in listOf("h2", "h3", "h4", "h5", "strong", "b", "p")) {
-                        val text = node.ownText().ifBlank { node.text() }.trim()
-                        val sNum = RedeCanaisAFText.extractSeasonHeaderNumber(text)
-                        if (sNum != null) {
-                            currentContextSeason = sNum
-                        }
+                val lines = container.html().split(Regex("""(?i)<br\s*/?>|</p>|</div>"""))
+                for (line in lines) {
+                    val plain = line.replace(Regex("""<[^>]*>"""), " ").replace(Regex("""\s+"""), " ").trim()
+                    val sNum = RedeCanaisAFText.extractSeasonHeaderNumber(plain)
+                    if (sNum != null) {
+                        currentContextSeason = sNum
                     }
-
-                    if (node.tagName() == "a") {
-                        val href = node.attr("href")
-                        val rawName = node.text().trim()
+                    val aMatches = Regex("""(?i)<a[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>""").findAll(line)
+                    for (m in aMatches) {
+                        val href = m.groupValues[1]
+                        val linkText = m.groupValues[2].replace(Regex("""<[^>]*>"""), "").trim()
                         if (RedeCanaisAFText.isValidEpisodeLink(href)) {
                             val fullEpUrl = fixUrl(href)
-                            val (season, epNum) = RedeCanaisAFText.extractSeasonAndEpisode(rawName, fullEpUrl, currentContextSeason)
+                            val combinedText = if (plain.length > linkText.length + 3) plain else linkText
+                            val (season, epNum) = RedeCanaisAFText.extractSeasonAndEpisode(combinedText, fullEpUrl, currentContextSeason)
                             episodes.add(
                                 newEpisode(fullEpUrl) {
-                                    this.name = RedeCanaisAFText.cleanEpisodeTitle(rawName, epNum)
+                                    this.name = RedeCanaisAFText.cleanEpisodeTitle(combinedText, epNum)
                                     this.season = season
                                     this.episode = epNum
                                 }
@@ -722,12 +721,14 @@ class RedeCanaisAF : MainAPI() {
             }
         }
 
-        // 3. Fallback: Varredura de links de episódios no documento inteiro
+        // 3. Suporte a listagens de categoria / browse (.pm-category-browse / #pm-grid)
         if (episodes.isEmpty()) {
-            doc.select("a[href*='episodio'], a[href*='temporada'], a[href*='_']").forEach { a ->
+            val gridCards = doc.select("#pm-grid li, article.pm-video-item, .pm-category-browse li, li.pm-li-video, .video-item, .entry-item")
+            for (card in gridCards) {
+                val a = card.selectFirst("a[href*='video_'], a[href*='.html']") ?: continue
                 val href = a.attr("href")
-                val rawName = a.text().trim()
-                if (RedeCanaisAFText.isValidEpisodeLink(href) && (href.contains("episodio", true) || rawName.contains("Epis", true))) {
+                val rawName = a.attr("title").ifBlank { card.selectFirst(".pm-video-title, .entry-title, h3, h4, h2")?.text() }.orEmpty().ifBlank { a.text().trim() }
+                if (RedeCanaisAFText.isValidEpisodeLink(href)) {
                     val fullEpUrl = fixUrl(href)
                     val (season, epNum) = RedeCanaisAFText.extractSeasonAndEpisode(rawName, fullEpUrl, 1)
                     episodes.add(
@@ -741,7 +742,26 @@ class RedeCanaisAF : MainAPI() {
             }
         }
 
-        // 4. Fallback: Link de episódio individual aberto diretamente
+        // 4. Fallback: Varredura de links de episódios no documento inteiro
+        if (episodes.isEmpty()) {
+            doc.select("a[href*='episodio'], a[href*='temporada'], a[href*='_']").forEach { a ->
+                val href = a.attr("href")
+                val rawName = a.text().trim()
+                if (RedeCanaisAFText.isValidEpisodeLink(href) && (href.contains("episodio", true) || rawName.contains("Epis", true) || rawName.contains("Assistir", true))) {
+                    val fullEpUrl = fixUrl(href)
+                    val (season, epNum) = RedeCanaisAFText.extractSeasonAndEpisode(rawName, fullEpUrl, 1)
+                    episodes.add(
+                        newEpisode(fullEpUrl) {
+                            this.name = RedeCanaisAFText.cleanEpisodeTitle(rawName, epNum)
+                            this.season = season
+                            this.episode = epNum
+                        }
+                    )
+                }
+            }
+        }
+
+        // 5. Fallback: Link de episódio individual aberto diretamente
         if (episodes.isEmpty()) {
             val (season, epNum) = RedeCanaisAFText.extractSeasonAndEpisode(seriesTitle, pageUrl, 1)
             episodes.add(
