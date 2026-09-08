@@ -255,10 +255,8 @@ object CloudflareSolver {
             try {
                 val headers = stealthHeaders(if (url.contains("redecanais.af")) "https://redecanais.af/" else "https://redecanais.af/")
                 if (cookies.isNotBlank()) headers["Cookie"] = cookies
-                // manipulação indetectável: NO_PROXY + HTTP/2 + keep-alive + retryOnConnectionFailure
                 val client = app.baseClient.newBuilder()
-                    /* INTERCEPT.patch cliente->meio->servidor */
-            // .proxy(java.net.Proxy.NO_PROXY) // desabilitado: deixa OkHttp usar http_proxy do sistema -> mitmproxy/ZAP decifram TLS no meio
+                    .proxy(java.net.Proxy.NO_PROXY) // v227-dual: PRODUÇÃO (comente para análise mitmproxy/ZAP)
                     .retryOnConnectionFailure(true)
                     .followRedirects(true)
                     .followSslRedirects(true)
@@ -649,6 +647,11 @@ object CloudflareSolver {
     internal fun isChallengeContent(content: String): Boolean {
         if (content.isBlank()) return false
         if (isIpBannedContent(content)) return true
+        // v227: página "Offline ou Block!" é stale, não é challenge mas também não serve
+        if (content.contains("Offline ou Block", ignoreCase = true) ||
+            content.contains("RedeCanais - Offline", ignoreCase = true)) {
+            return true
+        }
         if (content.contains("pm-video-thumb") ||
             content.contains("pm-li-video") ||
             content.contains("pm-video-title") ||

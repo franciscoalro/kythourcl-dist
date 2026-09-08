@@ -43,7 +43,7 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 226
+        const val BUILD_VERSION = 227
         private const val TAG = "RedeCanaisAF-Trace"
         private const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/AP1A.240505.005) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Mobile Safari/537.36"
 
@@ -71,8 +71,10 @@ class RedeCanaisAF : MainAPI() {
             .writeTimeout(10, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
-            /* INTERCEPT.patch cliente->meio->servidor */
-            // .proxy(java.net.Proxy.NO_PROXY) // desabilitado: deixa OkHttp usar http_proxy do sistema -> mitmproxy/ZAP decifram TLS no meio
+            // v227-dual: PRODUÇÃO usa NO_PROXY (FAST_GET>80%), ANÁLISE descomente abaixo
+            // Para interceptar via mitmproxy/ZAP: comente a linha NO_PROXY e descomente o bloco INTERCEPT
+            .proxy(java.net.Proxy.NO_PROXY)
+            // INTERCEPT_ANALYSIS: deixe NO_PROXY comentado e use http_proxy=172.17.0.3:8080 (mitm->ZAP)
             .retryOnConnectionFailure(true)
             .protocols(listOf(okhttp3.Protocol.HTTP_2, okhttp3.Protocol.HTTP_1_1))
 
@@ -125,11 +127,19 @@ class RedeCanaisAF : MainAPI() {
         val fixedUrl = fixUrl(url)
         Log.i(TAG, "[REQ#$reqId] Fetching url=$fixedUrl referer=$referer")
 
-        // 1. Verificação ultra-rápida de cache RAM e Disco (0ms)
-        val cached = CloudflareSolver.capturedHtml(fixedUrl) ?: CloudflareSolver.getDiskCachedHtml(fixedUrl)
-        if (!cached.isNullOrBlank() && !CloudflareSolver.isChallengeContent(cached)) {
-            Log.i(TAG, "[REQ#$reqId] HTML retornado instantaneamente do cache! len=${cached.length} url=$fixedUrl")
-            return Jsoup.parse(cached, fixedUrl)
+        // 1. Verificação ultra-rápida de cache RAM e Disco (0ms) — v227: valida stale (found=0 / sem pm-grid)
+        val cachedRaw = CloudflareSolver.capturedHtml(fixedUrl) ?: CloudflareSolver.getDiskCachedHtml(fixedUrl)
+        if (!cachedRaw.isNullOrBlank() && !CloudflareSolver.isChallengeContent(cachedRaw)) {
+            val isStale = cachedRaw.length < 50000 && !cachedRaw.contains("pm-video-thumb") && !cachedRaw.contains("pm-li-video")
+            val missingGrid = !cachedRaw.contains("pm-grid") && !cachedRaw.contains("pm-category-browse") && !cachedRaw.contains("entry-title")
+            // só barra cache stale para páginas de listagem/browse, não detail
+            val isBrowse = fixedUrl.contains("browse-") || fixedUrl.contains("topvideos") || fixedUrl.contains("category")
+            if (isStale && missingGrid && isBrowse) {
+                Log.w(TAG, "[REQ#$reqId] Cache STALE len=${cachedRaw.length} url=$fixedUrl — forçando refresh via WebView")
+            } else {
+                Log.i(TAG, "[REQ#$reqId] HTML retornado instantaneamente do cache! len=${cachedRaw.length} url=$fixedUrl")
+                return Jsoup.parse(cachedRaw, fixedUrl)
+            }
         }
 
         logCookieState("BEFORE_REQ", fixedUrl, reqId)

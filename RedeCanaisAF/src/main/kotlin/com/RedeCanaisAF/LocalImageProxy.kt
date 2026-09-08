@@ -48,8 +48,7 @@ object LocalImageProxy {
             .readTimeout(8, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
-            /* INTERCEPT.patch cliente->meio->servidor */
-            // .proxy(java.net.Proxy.NO_PROXY) // desabilitado: deixa OkHttp usar http_proxy do sistema -> mitmproxy/ZAP decifram TLS no meio
+            .proxy(java.net.Proxy.NO_PROXY) // v227-dual: PRODUÇÃO (comente para análise mitmproxy/ZAP)
             .build()
     }
 

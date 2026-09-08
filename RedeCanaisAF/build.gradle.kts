@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v226-intercept — cliente->meio->servidor (mitmproxy/ZAP) via http_proxy + stealth headers + LocalImageProxy dt logging
+// v227-dual — produção NO_PROXY (FAST_GET>80%) + análise via flag + stealth headers + cache stale fix
 cloudstream {
-    version = 226
+    version = 227
 }
