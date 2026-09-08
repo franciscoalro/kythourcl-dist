@@ -43,7 +43,7 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 224
+        const val BUILD_VERSION = 226
         private const val TAG = "RedeCanaisAF-Trace"
         private const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/AP1A.240505.005) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Mobile Safari/537.36"
 
@@ -71,10 +71,24 @@ class RedeCanaisAF : MainAPI() {
             .writeTimeout(10, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
-            .proxy(java.net.Proxy.NO_PROXY)
+            /* INTERCEPT.patch cliente->meio->servidor */
+            // .proxy(java.net.Proxy.NO_PROXY) // desabilitado: deixa OkHttp usar http_proxy do sistema -> mitmproxy/ZAP decifram TLS no meio
+            .retryOnConnectionFailure(true)
+            .protocols(listOf(okhttp3.Protocol.HTTP_2, okhttp3.Protocol.HTTP_1_1))
 
         baseBuilder.interceptors().removeAll {
             it.javaClass.simpleName.contains("Cloudflare", ignoreCase = true)
+        }
+        // v225-stealth: injeta headers indetectáveis (Sec-CH-UA/Sec-Fetch/Accept) em TODA requisição OkHttp do plugin
+        baseBuilder.addInterceptor { chain ->
+            val orig = chain.request()
+            val stealth = CloudflareSolver.stealthHeaders(orig.header("Referer") ?: "$mainUrl/")
+            val b = orig.newBuilder()
+            for ((k, v) in stealth) {
+                if (orig.header(k) == null) b.header(k, v)
+            }
+            // preserva Cookie/User-Agent já setados por requestDoc
+            chain.proceed(b.build())
         }
         Requests(baseBuilder.build())
     }

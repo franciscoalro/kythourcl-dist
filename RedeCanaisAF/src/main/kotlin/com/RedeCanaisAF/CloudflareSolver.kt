@@ -225,31 +225,61 @@ object CloudflareSolver {
         }
     }
 
+    // v225-stealth: headers indetectáveis nivel browser real (Sec-CH-UA, Sec-Fetch-*, Accept com q-values)
+    internal fun stealthHeaders(referer: String): MutableMap<String, String> {
+        val ua = lastUserAgent ?: WebViewResolver.webViewUserAgent ?: DEFAULT_USER_AGENT
+        // deriva Sec-CH-UA do Chrome 125/133
+        val chromeMajor = Regex("""Chrome/(\d+)""").find(ua)?.groupValues?.getOrNull(1) ?: "125"
+        val isMobile = ua.contains("Mobile", true)
+        return mutableMapOf(
+            "User-Agent" to ua,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language" to "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Encoding" to "gzip, deflate, br",
+            "Referer" to referer,
+            "Sec-Ch-Ua" to "\"Chromium\";v=\"$chromeMajor\", \"Google Chrome\";v=\"$chromeMajor\", \"Not-A.Brand\";v=\"99\"",
+            "Sec-Ch-Ua-Mobile" to if (isMobile) "?1" else "?0",
+            "Sec-Ch-Ua-Platform" to "\"Android\"",
+            "Sec-Fetch-Dest" to "document",
+            "Sec-Fetch-Mode" to "navigate",
+            "Sec-Fetch-Site" to "same-origin",
+            "Sec-Fetch-User" to "?1",
+            "Upgrade-Insecure-Requests" to "1",
+            "Cache-Control" to "max-age=0",
+            "Priority" to "u=0, i"
+        )
+    }
+
     suspend fun tryFastHttpGet(url: String, cookies: String): String? {
         return withContext(Dispatchers.IO) {
             try {
-                val headers = mutableMapOf(
-                    "User-Agent" to (lastUserAgent ?: WebViewResolver.webViewUserAgent ?: DEFAULT_USER_AGENT),
-                    "Referer" to "https://redecanais.af/",
-                    "Accept-Language" to "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-                )
-                if (cookies.isNotBlank()) {
-                    headers["Cookie"] = cookies
-                }
-                // Usa baseClient sem proxy herdado (18080 emulado envs travam o NiceHttp)
-                val client = app.baseClient.newBuilder().proxy(java.net.Proxy.NO_PROXY).build()
+                val headers = stealthHeaders(if (url.contains("redecanais.af")) "https://redecanais.af/" else "https://redecanais.af/")
+                if (cookies.isNotBlank()) headers["Cookie"] = cookies
+                // manipulação indetectável: NO_PROXY + HTTP/2 + keep-alive + retryOnConnectionFailure
+                val client = app.baseClient.newBuilder()
+                    /* INTERCEPT.patch cliente->meio->servidor */
+            // .proxy(java.net.Proxy.NO_PROXY) // desabilitado: deixa OkHttp usar http_proxy do sistema -> mitmproxy/ZAP decifram TLS no meio
+                    .retryOnConnectionFailure(true)
+                    .followRedirects(true)
+                    .followSslRedirects(true)
+                    .protocols(listOf(okhttp3.Protocol.HTTP_2, okhttp3.Protocol.HTTP_1_1))
+                    .build()
+                val t0 = SystemClock.elapsedRealtime()
                 val req = okhttp3.Request.Builder().url(url).apply {
                     headers.forEach { (k, v) -> header(k, v) }
                 }.build()
                 val resp = client.newCall(req).execute()
                 val body = resp.body?.string().orEmpty()
+                val dt = SystemClock.elapsedRealtime() - t0
                 if (resp.code in 200..299 && body.isNotBlank() && !isChallengeContent(body)) {
+                    Log.d(TAG, "[FAST_GET_OK] url=$url dt=${dt}ms len=${body.length}")
                     cleanHtmlForCache(body)
                 } else {
+                    Log.d(TAG, "[FAST_GET_MISS] url=$url code=${resp.code} dt=${dt}ms chal=${isChallengeContent(body)} len=${body.length}")
                     null
                 }
-            } catch (_: Throwable) {
+            } catch (e: Throwable) {
+                Log.d(TAG, "[FAST_GET_ERR] url=$url err=${e.message}")
                 null
             }
         }

@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v224-harness — RCIP/RCSESS persist + xn--/tos-alisg proxy + 45s capture (HAR 2026-09-07 neosoro)
+// v226-intercept — cliente->meio->servidor (mitmproxy/ZAP) via http_proxy + stealth headers + LocalImageProxy dt logging
 cloudstream {
-    version = 224
+    version = 226
 }

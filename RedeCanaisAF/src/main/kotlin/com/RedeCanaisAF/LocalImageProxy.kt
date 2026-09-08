@@ -48,7 +48,8 @@ object LocalImageProxy {
             .readTimeout(8, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
-            .proxy(java.net.Proxy.NO_PROXY)
+            /* INTERCEPT.patch cliente->meio->servidor */
+            // .proxy(java.net.Proxy.NO_PROXY) // desabilitado: deixa OkHttp usar http_proxy do sistema -> mitmproxy/ZAP decifram TLS no meio
             .build()
     }
 
@@ -193,30 +194,27 @@ object LocalImageProxy {
             val cookies = runCatching {
                 CookieManager.getInstance().getCookie("https://redecanais.af")
             }.getOrNull().orEmpty()
-
-            val ua = CloudflareSolver.lastUserAgent
-                ?: WebViewResolver.webViewUserAgent
-                ?: DEFAULT_UA
-
-            val reqBuilder = Request.Builder()
-                .url(url)
-                .header("User-Agent", ua)
-                .header("Referer", "https://redecanais.af/")
-                .header("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
-
-            if (cookies.isNotBlank()) {
-                reqBuilder.header("Cookie", cookies)
+            val stealth = CloudflareSolver.stealthHeaders("https://redecanais.af/")
+            val reqBuilder = Request.Builder().url(url)
+            for ((k, v) in stealth) {
+                if (k != "Cookie") reqBuilder.header(k, v)
             }
-
+            // preserva cookies frescos + referer já no stealth
+            if (cookies.isNotBlank()) reqBuilder.header("Cookie", cookies)
+            val t0 = android.os.SystemClock.elapsedRealtime()
             val resp = directHttpClient.newCall(reqBuilder.build()).execute()
+            val dt = android.os.SystemClock.elapsedRealtime() - t0
             if (resp.isSuccessful) {
                 val bytes = resp.body?.bytes()
                 if (bytes != null && bytes.isNotEmpty() && !bytes.isHtmlResponse()) {
+                    Log.d(TAG, "[IMG_PROXY] OkHttp hit ${bytes.size}b in ${dt}ms for $url")
                     return bytes
                 }
             }
+            Log.d(TAG, "[IMG_PROXY] OkHttp miss code=${resp.code} dt=${dt}ms for $url")
             null
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            Log.d(TAG, "[IMG_PROXY] OkHttp err ${e.message} for $url")
             null
         }
     }
