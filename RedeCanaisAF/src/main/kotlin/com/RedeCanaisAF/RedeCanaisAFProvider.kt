@@ -2,12 +2,8 @@ package com.RedeCanaisAF
 
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
-import com.lagradost.cloudstream3.MainPageRequest
 import android.content.Context
 import android.util.Log
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 
 @CloudstreamPlugin
 class RedeCanaisAFProvider: Plugin() {
@@ -21,23 +17,10 @@ class RedeCanaisAFProvider: Plugin() {
             CloudflareSolver.restoreDiskCacheIfNeeded()
             CloudflareSolver.restoreClearanceIfValid(api.mainUrl)
         } catch (_: Throwable) {}
-        // Warm-up assíncrono: só loga e pré-aquece se realmente vazio (evita wave WebView duplicado)
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val now = System.currentTimeMillis()
-                val ramCount = CloudflareSolver.capturedCount()
-                val restored = ramCount > 0
-                if (restored) {
-                    Log.i("RedeCanaisAF-Trace", "[BOOT_WARMUP] disk RAM restored count=$ramCount — catálogo já em memória")
-                } else {
-                    Log.i("RedeCanaisAF-Trace", "[BOOT_WARMUP] no disk hit — cf_clearance restored check done")
-                    Log.i("RedeCanaisAF-Trace", "[BOOT_WARMUP] cache vazio — disparando getMainPage silencioso")
-                    api.getMainPage(1, MainPageRequest("Filmes Lançamentos", "${api.mainUrl}/browse-filmes-videos-1-date.html", false))
-                }
-                Log.i("RedeCanaisAF-Trace", "[BOOT_WARMUP] done in ${System.currentTimeMillis()-now}ms")
-            } catch (e: Throwable) {
-                Log.d("RedeCanaisAF-Trace", "[BOOT_WARMUP] warmup skip: ${e.message}")
-            }
-        }
+        // v228: SEM warm-up de rede no boot — o getMainPage silencioso duplicava o
+        // tráfego (6 REQs do framework + 1 do warmup disputando o mutex do solver =
+        // WebViews extras de 5MB cada). Com host em 91% RAM + LMK ativo, cada WebView
+        // extra aproxima o app do signal 9. O framework já busca as 6 categorias.
+        Log.i("RedeCanaisAF-Trace", "[BOOT_WARMUP] skip (v228) — framework busca as 6 categorias direto")
     }
 }

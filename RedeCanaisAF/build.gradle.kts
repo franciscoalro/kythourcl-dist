@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v227-dual — produção NO_PROXY (FAST_GET>80%) + análise via flag + stealth headers + cache stale fix
+// v228-player — corrige "sem fonte": resolve redirect.api?p=<base64> antes do proxy + normaliza redecanaistv.af + probe vira diagnóstico; catálogo: remove fast-retry duplicado no solver
 cloudstream {
-    version = 227
+    version = 228
 }

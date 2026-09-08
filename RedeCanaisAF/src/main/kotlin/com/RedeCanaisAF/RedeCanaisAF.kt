@@ -15,11 +15,25 @@ import org.jsoup.nodes.Element
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.withTimeoutOrNull
 
 class RedeCanaisAF : MainAPI() {
     override var mainUrl = "https://redecanais.af"
     override var name = "RedeCanais (AF)"
     override val hasMainPage = true
+    // v228: o conteúdo vem com latência variável (cf_clearance 520 + WebView de
+    // fallback). Timeouts longos por chamada evitam que o framework aborte a Home
+    // ("Timed out waiting for 120000 ms") quando uma categoria cai no WebView.
+    // v228: requests sequenciais com delay — o framework dispara as 6 categorias em
+    // paralelo; cada requestDoc() fora do cache abre um WebView de 5-8MB e o agregado
+    // estoura o LMK do redroid (signal 9, "Timed out waiting for 120000 ms" na UI).
+    // Sequencial: 1 WebView por vez, catálogo completo em ~6-10s, app vivo.
+    override var sequentialMainPage = true
+    override var sequentialMainPageDelay = 800L
+    override var getMainPageTimeoutMs: Long? = 180_000L
+    override var searchTimeoutMs: Long? = 120_000L
+    override var loadTimeoutMs: Long? = 120_000L
+    override var loadLinksTimeoutMs: Long? = 180_000L
     override var lang = "pt-br"
     override val hasQuickSearch = true
     override val supportedTypes = setOf(
@@ -43,7 +57,7 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 227
+        const val BUILD_VERSION = 228
         private const val TAG = "RedeCanaisAF-Trace"
         private const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/AP1A.240505.005) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Mobile Safari/537.36"
 
@@ -226,6 +240,9 @@ class RedeCanaisAF : MainAPI() {
         return Jsoup.parse(body.ifBlank { "<html><body></body></html>" }, fixedUrl)
     }
 
+    // v228: mainPageOf(url to nome) — confirmado pelo framework: request.data=URL,
+    // request.name=nome (o log 10:01 com "Cat=Filmes Lançamentos | url=https://..."
+    // estava correto; a inversão nome->URL quebrou tudo: data virou "Filmes...").
     override val mainPage = mainPageOf(
         "$mainUrl/browse-filmes-videos-1-date.html" to "Filmes Lançamentos",
         "$mainUrl/browse-series-videos-1-date.html" to "Séries Lançamentos",
@@ -257,6 +274,11 @@ class RedeCanaisAF : MainAPI() {
             }
         }
 
+        // v228: sem withTimeoutOrNull aqui — o requestDoc() já resolve via WebView
+        // quando precisa (é assim que as 6 categorias carregam em ~1s) e o timeout do
+        // framework foi elevado para 180s. Envolver em timeout de 6-45s só produzia
+        // "HOME_TIMEOUT_EMPTY" (lista vazia) ou cancelava o WebView no meio da
+        // captura — foi isso que gerou o "Timed out waiting for 120000 ms" na UI.
         val doc = requestDoc(url)
         val homeList = mutableListOf<SearchResponse>()
         val seenUrls = HashSet<String>()
@@ -592,15 +614,17 @@ class RedeCanaisAF : MainAPI() {
 
         val doc = requestDoc(cleanUrl)
 
-        // v222-verify: dump raw detail HTML for offline inspection — full without truncation
+        // v228: dumps de debug DESABILITADOS em produção — doc.html() de 5-6MB por
+        // chamada de load() era o maior alocador de memória do plugin (20MB+ LOS por
+        // boot, GC pausando 469ms) e o LMK matava o app logo após a Home (signal 9).
+        // Para reativar em análise, descomente o bloco abaixo.
+        /*
         try {
             val ctx = com.lagradost.cloudstream3.CommonActivity.activity ?: com.lagradost.cloudstream3.CommonActivity.activity?.applicationContext
             ctx?.let {
                 val full = doc.html()
                 val f = java.io.File(it.filesDir, "redecanais_af_last_detail.html")
-                // write full (may be 6-9MB)
                 f.writeText(full)
-                // also write body slice for quick pull
                 val bodyIdx = full.indexOf("<body")
                 val slice = if (bodyIdx >= 0) full.substring(bodyIdx, minOf(bodyIdx + 800_000, full.length)) else full.take(800_000)
                 java.io.File(it.filesDir, "redecanais_af_last_detail_body.html").writeText(slice)
@@ -609,6 +633,7 @@ class RedeCanaisAF : MainAPI() {
         } catch (e: Throwable) {
             Log.w(TAG, "[VERIFY_DETAIL] dump failed: ${e.message}")
         }
+        */
 
         val rawTitle = doc.selectFirst("h1.entry-title, h1.pm-video-title, h1, meta[property='og:title']")?.let {
             if (it.tagName() == "meta") it.attr("content") else it.text()
@@ -625,29 +650,9 @@ class RedeCanaisAF : MainAPI() {
         }?.trim()
         val plot = plotRaw?.let { RedeCanaisAFText.cleanPlotText(it) }?.takeIf { it.isNotBlank() } ?: plotRaw
 
-        // v222-verify: trace selectors (poster / plot / meta)
-        try {
-            val selCounts = listOf(
-                "h1.entry-title" to doc.select("h1.entry-title").size,
-                "h1.pm-video-title" to doc.select("h1.pm-video-title").size,
-                "meta[og:title]" to doc.select("meta[property='og:title']").size,
-                "meta[og:image]" to doc.select("meta[property='og:image']").size,
-                "meta[og:description]" to doc.select("meta[property='og:description']").size,
-                "#pm-video-description" to doc.select("#pm-video-description").size,
-                ".pm-video-description" to doc.select(".pm-video-description").size,
-                "pm-category-description" to doc.select(".pm-category-description").size,
-                "imgs-videos" to doc.select("img[src*='imgs-videos']").size,
-                "data-echo imgs-videos" to doc.select("img[data-echo*='imgs-videos']").size,
-                "pm-video-watch-wrap iframe" to doc.select(".pm-video-watch-wrap iframe").size,
-                "server.php iframe" to doc.select("iframe[src*='server.php']").size,
-                "all iframes" to doc.select("iframe").size,
-                "player buttons" to doc.select("a[href*='player'], a[href*='server.php']").size
-            ).joinToString(" | ") { "${it.first}=${it.second}" }
-            val candidatesDbg = doc.select("meta[property='og:image'], meta[name='twitter:image'], link[rel='image_src'], img[data-echo*='imgs-videos'], img[src*='imgs-videos']").map {
-                (if (it.tagName()=="meta") it.attr("content") else it.attr("data-echo").ifBlank { it.attr("src") }).take(80)
-            }.take(4)
-            Log.i(TAG, "[VERIFY_DETAIL] title raw='${rawTitle.take(90)}' clean='${title.take(60)}' poster='${posterUrl?.take(90)}' plot_len=${plot?.length ?: 0} plot_head='${plot?.take(120)}' sel=[$selCounts] cands=$candidatesDbg")
-        } catch (_: Throwable) {}
+        // v228: trace de 1 linha (14 doc.select() removidos — cada um percorre o DOM
+        // de 5MB; o agregado travava o GC e o LMK matava o app).
+        Log.i(TAG, "[VERIFY_DETAIL] title='${title.take(60)}' poster=${posterUrl?.take(60)} plot_len=${plot?.length ?: 0}")
 
         val tags = doc.select("meta[property='article:tag'], .pm-video-tags a, .tags a, .genres a")
             .map { it.text().trim() }

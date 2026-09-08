@@ -795,16 +795,8 @@ object CloudflareSolver {
                 Log.i(TAG, "[CF] HTML do cache dentro do lock url=$url len=${it.length}")
                 return@withLock it
             }
-            // Fast-path 2: dentro do lock, verifica se o CookieManager recebeu cf_clearance enquanto aguardava
-            val cookiesInLock = runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull().orEmpty()
-            if (cookiesInLock.contains("cf_clearance")) {
-                val fast = tryFastHttpGet(url, cookiesInLock)
-                if (!fast.isNullOrBlank()) {
-                    Log.i(TAG, "[CF] Fast HTTP GET dentro do lock teve sucesso para $url (len=${fast.length})")
-                    capturedHtmlByUrl[url] = fast
-                    return@withLock fast
-                }
-            }
+            // v228: sem 2º fast-retry dentro do lock — solve() já tentou tryFastHttpGet
+            // fora do lock; repetir aqui custava ~2s por MISS serializado no mutex.
             val result = solveInteractiveLocked(url, timeoutMs, force)
             if (result == null || result.isBlank() || isChallengeContent(result)) {
                 capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() && !isChallengeContent(it) }?.let { return@withLock it }
@@ -820,14 +812,8 @@ object CloudflareSolver {
         val hasClearanceBefore = initialClearance.isNotBlank()
         Log.d(TAG, "[CF] clearance_present=$hasClearanceBefore (before interactive)")
 
-        if (hasClearanceBefore) {
-            val fast = tryFastHttpGet(url, initialCookies)
-            if (!fast.isNullOrBlank()) {
-                Log.i(TAG, "[CF] Fast HTTP GET pré-WebView teve sucesso para $url (len=${fast.length})")
-                capturedHtmlByUrl[url] = fast
-                return fast
-            }
-        }
+        // v228: solve() já fez tryFastHttpGet fora do lock — não repetir aqui
+        // (cada repetição serializa ~100-200ms de MISS no mutex global).
 
         val activity: Activity? = CommonActivity.activity
         if (activity == null || activity.isFinishing || activity.isDestroyed) {
@@ -847,7 +833,6 @@ object CloudflareSolver {
         var pollAttempts = 0
         var isPollScheduled = false
         var isPollRunning = false
-        var clearanceDetectedAt = 0L
         var hasTriggeredPostClearanceLoad = false
         var lastTapType = ""
 
@@ -1022,13 +1007,12 @@ object CloudflareSolver {
                 val cookies = "$c1; $c2; $c3"
                 val hasClearance = cookies.contains("cf_clearance")
                 if (hasClearance && !hasTriggeredPostClearanceLoad && (isChallenge || (cardCount == 0 && !hasPlayer))) {
-                    if (clearanceDetectedAt == 0L) {
-                        clearanceDetectedAt = SystemClock.uptimeMillis()
-                    } else if (SystemClock.uptimeMillis() - clearanceDetectedAt >= 800L) {
-                        hasTriggeredPostClearanceLoad = true
-                        Log.i(TAG, "[CF] cf_clearance obtido! Recarregando página alvo: $url")
-                        cv.loadUrl(url)
-                    }
+                    // v228: reload imediato — o delay de 800ms custava 2 ciclos de poll (700ms)
+                    // por MISS serializado no mutex; a página alvo no WebView da mesma sessão
+                    // resolve em ~1 load (~4s) em vez de challenge+poll+reload.
+                    hasTriggeredPostClearanceLoad = true
+                    Log.i(TAG, "[CF] cf_clearance obtido! Recarregando página alvo: $url")
+                    cv.loadUrl(url)
                 }
 
                 if (isChallenge && isPollingActive.get()) {
@@ -1094,17 +1078,17 @@ object CloudflareSolver {
                 val rootLayout = activity.findViewById<ViewGroup>(android.R.id.content)
 
                 val wv = WebView(activity).apply {
-                    visibility = android.view.View.VISIBLE
-                    alpha = 0.01f
-                    translationX = -50000f
-                    translationY = -50000f
+                    // v228: GONE + 1x1 — VISIBLE+MATCH_PARENT com alpha 0.01 faz o
+                    // compositor alocar surface de tela cheia (720x1280 HW) por WebView;
+                    // 3 em paralelo (detalhes pós-Home) estouravam o LMK (signal 9).
+                    // GONE não participa do layout/composição mas executa JS/Turnstile.
+                    visibility = android.view.View.GONE
                     isFocusable = false
+                    isFocusableInTouchMode = false
                     isClickable = false
-                    setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
-                    layoutParams = FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
+                    isLongClickable = false
+                    setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
+                    layoutParams = FrameLayout.LayoutParams(1, 1)
                     cookieManager.setAcceptThirdPartyCookies(this, true)
 
                     settings.apply {
@@ -1266,17 +1250,8 @@ object CloudflareSolver {
                 }
                 interactiveWebView = wv
 
-                wv.visibility = android.view.View.VISIBLE
-                wv.alpha = 0.01f
-                wv.translationX = -50000f
-                wv.translationY = -50000f
-                wv.isFocusable = false
-                wv.isClickable = false
-                wv.layoutParams = FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT
-                )
-                // Adiciona no fundo do rootLayout (index 0) com translação offscreen para não interceptar toques do usuário
+                // v228: mantém GONE + 1x1 (ver apply acima) — sem surface de composição.
+                // Adiciona no fundo do rootLayout (index 0) sem interceptar toques.
                 rootLayout.addView(wv, 0)
                 Log.i(TAG, "[CF] WebView 100% HEADLESS (offscreen -50000px) acoplada em background | url=$url")
                 wv.loadUrl(url)

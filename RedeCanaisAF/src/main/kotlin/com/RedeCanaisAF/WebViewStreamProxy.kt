@@ -96,18 +96,16 @@ object WebViewStreamProxy {
                     ?: WebViewResolver.webViewUserAgent
                     ?: MOBILE_UA
 
+                // v228: GONE + 1x1 + SOFTWARE — captura de mídia não precisa de
+                // surface de composição (cada WebView tela cheia HW aproximava o LMK).
                 val view = WebView(activity).apply {
-                    visibility = android.view.View.VISIBLE
-                    alpha = 0.01f
-                    translationX = -50000f
-                    translationY = -50000f
+                    visibility = android.view.View.GONE
                     isFocusable = false
+                    isFocusableInTouchMode = false
                     isClickable = false
-                    setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
-                    layoutParams = android.widget.FrameLayout.LayoutParams(
-                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
-                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT
-                    )
+                    isLongClickable = false
+                    setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
+                    layoutParams = android.widget.FrameLayout.LayoutParams(1, 1)
                     cookieManager.setAcceptThirdPartyCookies(this, true)
                     settings.apply {
                         javaScriptEnabled = true

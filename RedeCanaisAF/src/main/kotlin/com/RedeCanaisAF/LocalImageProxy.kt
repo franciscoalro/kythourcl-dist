@@ -378,13 +378,16 @@ object LocalImageProxy {
             val cookieManager = CookieManager.getInstance()
             cookieManager.setAcceptCookie(true)
 
+            // v228: GONE + 1x1 + SOFTWARE — helper só precisa de sessão/cookies,
+            // sem surface de composição (LMK matava o app com WebViews tela cheia).
             val wv = WebView(activity).apply {
-                visibility = android.view.View.VISIBLE
-                alpha = 0.01f
-                translationX = -50000f
-                translationY = -50000f
+                visibility = android.view.View.GONE
                 isFocusable = false
+                isFocusableInTouchMode = false
                 isClickable = false
+                isLongClickable = false
+                setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
+                layoutParams = android.view.ViewGroup.LayoutParams(1, 1)
                 settings.apply {
                     javaScriptEnabled = true
                     domStorageEnabled = true

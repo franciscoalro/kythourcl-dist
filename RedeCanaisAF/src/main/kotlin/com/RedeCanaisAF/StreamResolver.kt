@@ -35,26 +35,15 @@ internal class StreamResolver(
 
         try {
             val doc = fetchDocument(cleanUrl, "$mainUrl/")
-            val html = doc.html()
-            // v222-verify: dump + trace
+            // v228: sem doc.html()/dump em produção — 2MB de String duplicada por
+            // chamada de loadLinks (LMK matava o app, signal 9). Trace leve via doc.body().
             try {
-                val ctx = com.lagradost.cloudstream3.CommonActivity.activity
-                ctx?.let {
-                    val f = java.io.File(it.filesDir, "redecanais_af_last_stream_detail.html")
-                    f.writeText(html.take(2_000_000))
+                val iframeCount = doc.select("iframe").size
+                val serverCount = doc.select("iframe[src*='server.php']").size
+                val hasProxy = doc.select("script, a").any {
+                    it.html().contains("__RC__/proxy")
                 }
-                val dbg = listOf("pm-video-watch-wrap" to doc.select(".pm-video-watch-wrap").size,
-                    ".pm-video-watch-wrap iframe" to doc.select(".pm-video-watch-wrap iframe").size,
-                    "#player iframe" to doc.select("#player iframe").size,
-                    "iframe[src*='server.php']" to doc.select("iframe[src*='server.php']").size,
-                    "iframe[src*='player']" to doc.select("iframe[src*='player']").size,
-                    "all iframe" to doc.select("iframe").size,
-                    "a[href*='server.php']" to doc.select("a[href*='server.php']").size,
-                    "bundle.js" to html.contains("bundle.js"),
-                    "__RC__/proxy" to html.contains("__RC__/proxy")
-                ).joinToString(" | ") { "${it.first}=${it.second}" }
-                val iframeSrcs = doc.select("iframe").map { it.attr("src").take(90) + "|" + it.attr("data-src").take(40) }.take(3)
-                Log.i(TAG, "[VERIFY_STREAM_DETAIL] url=$cleanUrl len=${html.length} sel=[$dbg] iframes=$iframeSrcs head=${html.take(900).replace("\n"," ")}")
+                Log.i(TAG, "[VERIFY_STREAM_DETAIL] url=$cleanUrl iframes=$iframeCount server.php=$serverCount hasProxy=$hasProxy")
             } catch (_: Throwable) {}
 
             // 1. Coleta de todos os Iframes e Embeds do DOM
@@ -109,21 +98,39 @@ internal class StreamResolver(
                 // navegador/WebView que emitiu o cf_clearance (VLC/curl/OkHttp direto = 520, provado
                 // via browser-harness). O WebView captura o recap e serve a URL local 127.0.0.1 ao
                 // ExoPlayer, que consome via proxy.
-                if (embedUrl.contains("server.php", true) && embedUrl.contains("vid=", true)) {
+                // v228: resolve redirect.api?p=<base64> ANTES de checar server.php — o player
+                // migrou para redecanaistv.af (server.php -> redirect.api -> player real).
+                // Sem isso o WebView carregava uma URL morta (403, domínio fora do ar) e o
+                // ExoPlayer nunca recebia fonte ("não encontra a fonte do vídeo").
+                var embedResolved = embedUrl
+                if (embedResolved.contains("redirect.api", true)) {
+                    val pRaw = Regex("""[?&]p=([^&]+)""", RegexOption.IGNORE_CASE)
+                        .find(embedResolved)?.groupValues?.getOrNull(1)
+                    if (!pRaw.isNullOrBlank()) {
+                        val decoded = tryDecodeBase64OrUrl(pRaw)
+                        // v228: normaliza redecanaistv.af -> redecanais.af (domínio fora do ar)
+                        val normalized = decoded.replace("redecanaistv.af", "redecanais.af", ignoreCase = true)
+                        if (normalized.startsWith("http", true) && normalized != embedResolved) {
+                            Log.i(TAG, "[REDIRECT_API_EARLY] $pRaw -> $decoded -> $normalized")
+                            embedResolved = normalized
+                        }
+                    }
+                }
+                if (embedResolved.contains("server.php", true) && embedResolved.contains("vid=", true)) {
                     // Otimização de ultra-velocidade: RCFServer2/ondemand é o único CDN ativo que responde imediatamente (206)
-                    val fastServerUrl = if (!embedUrl.contains("server=RCFServer2", true)) {
-                        var f = embedUrl.replace(Regex("server=[^&]+", RegexOption.IGNORE_CASE), "server=RCFServer2")
+                    val fastServerUrl = if (!embedResolved.contains("server=RCFServer2", true)) {
+                        var f = embedResolved.replace(Regex("server=[^&]+", RegexOption.IGNORE_CASE), "server=RCFServer2")
                         if (f.contains("subfolder=", true)) {
                             f.replace(Regex("subfolder=[^&]+", RegexOption.IGNORE_CASE), "subfolder=ondemand")
                         } else {
                             if (f.contains("?")) "$f&subfolder=ondemand" else "$f?subfolder=ondemand"
                         }
-                    } else embedUrl
+                    } else embedResolved
 
                     var localProxyUrl = WebViewStreamProxy.captureAndServe(fastServerUrl)
-                    if (localProxyUrl == null && fastServerUrl != embedUrl) {
-                        Log.i(TAG, "[PROXY_LINK] RCFServer2 falhou — tentando servidor original: $embedUrl")
-                        localProxyUrl = WebViewStreamProxy.captureAndServe(embedUrl)
+                    if (localProxyUrl == null && fastServerUrl != embedResolved) {
+                        Log.i(TAG, "[PROXY_LINK] RCFServer2 falhou — tentando servidor original: $embedResolved")
+                        localProxyUrl = WebViewStreamProxy.captureAndServe(embedResolved)
                     }
                     if (localProxyUrl != null) {
                         Log.i(TAG, "[PROXY_LINK] emitindo proxy local: $localProxyUrl")
@@ -134,26 +141,28 @@ internal class StreamResolver(
                                 url = localProxyUrl,
                                 type = ExtractorLinkType.VIDEO
                             ) {
-                                this.referer = embedUrl
+                                this.referer = embedResolved
                                 this.quality = Qualities.P1080.value
                                 this.headers = mapOf(
                                     "User-Agent" to CloudflareSolver.lastUserAgent.orEmpty(),
-                                    "Referer" to embedUrl
+                                    "Referer" to embedResolved
                                 )
                             }
                         )
                         foundAny = true
                         continue
                     }
-                    Log.w(TAG, "[PROXY_LINK] proxy local falhou para $embedUrl — tentando fluxo normal")
+                    Log.w(TAG, "[PROXY_LINK] proxy local falhou para $embedResolved — tentando fluxo normal")
                 }
                 if (resolveStreamOrExtractor(embedUrl, label, cleanUrl, subtitleCallback, callback, visitedUrls, depth = 0)) {
                     foundAny = true
                 }
             }
 
-            // 4. Extração de streams diretos (.m3u8 / .mp4) no próprio HTML da página principal
-            if (extractDirectStreamsFromHtml(html, cleanUrl, "Player Direto", callback)) {
+            // 4. Extração de streams diretos (.m3u8 / .mp4) no próprio HTML da página
+            // principal — v228: usa bodyHtml() (sem <head> de 4MB de ads) em vez do
+            // doc.html() completo; o head só tem tracking/facebook/disqus.
+            if (extractDirectStreamsFromHtml(doc.body().html(), cleanUrl, "Player Direto", callback)) {
                 foundAny = true
             }
         } catch (e: Throwable) {
@@ -194,14 +203,16 @@ internal class StreamResolver(
 
         Log.d(TAG, "[RESOLVE_STREAM][Depth $depth] url=$url | server=$serverLabel")
 
-        // v120: intercepta redirect.api?p=<base64> — o player migrou para redecanaistv.af
-        // (server.php -> bundle.js -> dt.api -> redirect.api?p=<base64 da URL do player real>)
+        // v120/v228: intercepta redirect.api?p=<base64> — o player migrou para
+        // redecanaistv.af (server.php -> bundle.js -> dt.api -> redirect.api?p=<base64>).
+        // v228: redecanaistv.af está fora do ar — normaliza para redecanais.af.
         if (url.contains("redirect.api", true)) {
             val pMatch = Regex("""[?&]p=([^&]+)""", RegexOption.IGNORE_CASE).find(url)
             val pRaw = pMatch?.groupValues?.getOrNull(1)
             if (!pRaw.isNullOrBlank()) {
                 val decoded = tryDecodeBase64OrUrl(pRaw)
-                if (decoded.isNotBlank() && decoded != pRaw) {
+                    .replace("redecanaistv.af", "redecanais.af", ignoreCase = true)
+                if (decoded.isNotBlank() && !decoded.equals(url, ignoreCase = true)) {
                     Log.i(TAG, "[REDIRECT_API] redirect.api?p= decodificado: $pRaw -> $decoded")
                     if (resolveStreamOrExtractor(decoded, serverLabel, referer, subtitleCallback, callback, visitedUrls, depth + 1)) {
                         return true
@@ -218,25 +229,13 @@ internal class StreamResolver(
         val serverParam = Regex("""[?&]server=([^&]+)""", RegexOption.IGNORE_CASE).find(url)?.groupValues?.getOrNull(1) ?: "RCServer"
         val subfolder = Regex("""[?&]subfolder=([^&]+)""", RegexOption.IGNORE_CASE).find(url)?.groupValues?.getOrNull(1) ?: "ondemand"
 
+        // v228: subdomínios de mídia (s1/rcfserver2.redecanais.af) NÃO têm DNS
+        // (NXDOMAIN confirmado) — emitir esses candidatos só polui o player com
+        // links mortos ("não encontra a fonte"). A fonte real vem do server.php via
+        // WebViewStreamProxy (proxy local) ou do HTML do player (__RC__/proxy).
+        // Mantém apenas log diagnóstico do vid para rastreio.
         if (!vid.isNullOrBlank()) {
-            val directStreamCandidates = listOf(
-                "https://s1.redecanais.af/$subfolder/$vid.mp4",
-                "https://${serverParam.lowercase()}.redecanais.af/$subfolder/$vid.mp4",
-                "https://s1.redecanais.af/hls/$vid.m3u8"
-            )
-            for (candidate in directStreamCandidates) {
-                // v119: não considera sucesso antes de probe+callback; evita falso positivo com URL 520/403
-                if (emitExtractorLink(
-                        streamUrl = candidate,
-                        name = "RedeCanais AF ($serverLabel)",
-                        referer = url,
-                        isM3u8 = candidate.contains(".m3u8", true),
-                        callback = callback
-                    )
-                ) {
-                    success = true
-                }
-            }
+            Log.d(TAG, "[SKIP_DEAD_CDN] vid=$vid server=$serverParam subfolder=$subfolder — s1/rcfserver2 sem DNS, aguardando proxy local/HTML")
         }
 
         // 2. URL com parâmetro codificado (?url=, ?file=, ?src=)
@@ -512,7 +511,13 @@ internal class StreamResolver(
         isM3u8: Boolean,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        if (!isValidStreamUrl(streamUrl)) {
+        // v228: nunca emitir redecanaistv.af — domínio fora do ar (timeout).
+        // Normaliza para redecanais.af antes de qualquer validação/probe.
+        val normalizedUrl = streamUrl.replace("redecanaistv.af", "redecanais.af", ignoreCase = true)
+        if (normalizedUrl != streamUrl) {
+            Log.i(TAG, "[EMIT_LINK_NORMALIZE] redecanaistv.af -> redecanais.af: $normalizedUrl")
+        }
+        if (!isValidStreamUrl(normalizedUrl)) {
             Log.w(TAG, "[EMIT_LINK_IGNORED] URL não é um stream de vídeo válido: $streamUrl")
             return false
         }
@@ -547,14 +552,19 @@ internal class StreamResolver(
 
         // Validação ativa da mídia antes de entregar ao ExoPlayer
         // v118: bypass probe para proxy (206 provado via browser-harness mesma sessao)
-        val isProxy = streamUrl.contains("__RC__/proxy", true) || streamUrl.contains("p12-common-sign", true) || streamUrl.contains("/proxy?src=", true)
+        // v228: o probe OkHttp usa TLS/JA3 diferente do WebView — o servidor responde 520
+        // mesmo para URLs de mídia válidas (__RC__/proxy é TLS-bound). Como o caminho
+        // preferencial (WebViewStreamProxy.captureAndServe) já entregou o link via proxy
+        // local, o probe aqui só servia para descartar links bons. Mantém o probe apenas
+        // para diagnóstico (log), sem abortar a emissão.
+        val isProxy = normalizedUrl.contains("__RC__/proxy", true) || normalizedUrl.contains("p12-common-sign", true) || normalizedUrl.contains("/proxy?src=", true)
         if (isProxy) {
-            Log.i(TAG, "[EMIT_LINK_BYPASS_PROBE] proxy __RC__ validado via WebView 206, emitindo direto sem probe OkHttp: $streamUrl")
+            Log.i(TAG, "[EMIT_LINK_BYPASS_PROBE] proxy __RC__ validado via WebView 206, emitindo direto sem probe OkHttp: $normalizedUrl")
         } else {
-            val probePassed = probeMediaStream(streamUrl, headers)
+            // v228: diagnóstico apenas — emissão não é mais abortada pelo probe.
+            val probePassed = probeMediaStream(normalizedUrl, headers)
             if (!probePassed) {
-                Log.e(TAG, "[EMIT_LINK_ABORTED] O servidor de mídia rejeitou a requisição do stream: $streamUrl")
-                return false
+                Log.w(TAG, "[EMIT_LINK_PROBE_FAIL] probe OkHttp falhou mas emitindo mesmo assim (TLS-bound): $normalizedUrl")
             }
         }
 
@@ -574,7 +584,7 @@ internal class StreamResolver(
             newExtractorLink(
                 source = "RedeCanais AF",
                 name = name,
-                url = streamUrl,
+                url = normalizedUrl,
                 type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             ) {
                 this.referer = referer
