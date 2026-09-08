@@ -185,6 +185,12 @@ internal class StreamResolver(
             l.contains("cloudflare.com") || l.contains("challenge-platform")
     }
 
+    // v229b: player pages (server.php resolvido) contam como HTML válido mesmo se o
+    // validador antigo de challenge as marcasse (sem cards/entry-title).
+    private fun isPlayerHtml(html: String): Boolean =
+        html.contains("rcPreloadPlayer") || html.contains("captcha_button") ||
+            html.contains("__RC__/proxy") || html.contains("server.php")
+
     /**
      * Resolução recursiva de embeds, iframes intermediários, extratores e links diretos.
      */
@@ -202,6 +208,33 @@ internal class StreamResolver(
         }
 
         Log.d(TAG, "[RESOLVE_STREAM][Depth $depth] url=$url | server=$serverLabel")
+
+        // v229: usa o server.php resolvido na RAM (~1MB) em vez de refazer
+        // fetch (tryFastHttpGet sempre dá 402+challenge-stub para server.php).
+        // Player page conta como válida mesmo se o validador a marcasse.
+        if (url.contains("server.php", true)) {
+            val dumped = CloudflareSolver.dumpCapturedHtml(url, "serverphp")
+            val dumpedOk = !dumped.isNullOrBlank() &&
+                (!CloudflareSolver.isChallengeContent(dumped) || isPlayerHtml(dumped))
+            if (dumpedOk) {
+                Log.i(TAG, "[SERVERPHP_HTML] usando HTML da RAM len=${dumped!!.length}")
+                if (extractDirectStreamsFromHtml(dumped, url, serverLabel, callback)) {
+                    return true
+                }
+                val innerIframes = org.jsoup.Jsoup.parse(dumped, url).select("iframe[src], iframe[data-src]")
+                for (iframe in innerIframes) {
+                    val innerSrc = iframe.attr("data-src").ifBlank { iframe.attr("src") }
+                    if (innerSrc.isNotBlank() && !isNonVideoUrl(innerSrc) && !innerSrc.contains("about:blank", true)) {
+                        val nestedUrl = fixUrl(innerSrc)
+                        if (resolveStreamOrExtractor(nestedUrl, "$serverLabel -> Aninhado", url, subtitleCallback, callback, visitedUrls, depth + 1)) {
+                            return true
+                        }
+                    }
+                }
+            } else {
+                Log.w(TAG, "[SERVERPHP_HTML] sem HTML na RAM para $url (dumped=${dumped?.length ?: "null"})")
+            }
+        }
 
         // v120/v228: intercepta redirect.api?p=<base64> — o player migrou para
         // redecanaistv.af (server.php -> bundle.js -> dt.api -> redirect.api?p=<base64>).
@@ -373,7 +406,12 @@ internal class StreamResolver(
             Regex("""<video[^>]+src=["'](https?://[^\s"']+)["']""", RegexOption.IGNORE_CASE),
             Regex("""sources\s*:\s*\[\s*\{[^}]*file\s*:\s*["'](https?://[^\s"']+)["']""", RegexOption.IGNORE_CASE),
             // v119: src do vídeo capturado pelo WebView (data-cs-video-src) nas páginas de player
-            Regex("""data-cs-video-src=["'](https?://[^\s"']+)["']""", RegexOption.IGNORE_CASE)
+            Regex("""data-cs-video-src=["'](https?://[^\s"']+)["']""", RegexOption.IGNORE_CASE),
+            // v229: endpoints internos do bundle do player (server.php -> bundle.js ->
+            // dt.api/serverforms.api/query -> redirect.api?p=<base64> -> player real).
+            // O WebView executa o JS; aqui capturamos as URLs intermediárias do HTML.
+            Regex("""["']((?:https?://[^\s"'\\]*?)?/(?:player3/)?(?:dt\.api|serverforms\.api|query\.api|query\.js|getvid\.php|getlink\.php)[^"'\s\\]*)["']""", RegexOption.IGNORE_CASE),
+            Regex("""["']((?:https?://[^\s"'\\]*?)?/player3/redirect\.api\?p=[^"'\s\\]+)["']""", RegexOption.IGNORE_CASE)
         )
 
         val candidates = mutableSetOf<String>()

@@ -269,8 +269,13 @@ object CloudflareSolver {
                 val resp = client.newCall(req).execute()
                 val body = resp.body?.string().orEmpty()
                 val dt = SystemClock.elapsedRealtime() - t0
-                if (resp.code in 200..299 && body.isNotBlank() && !isChallengeContent(body)) {
-                    Log.d(TAG, "[FAST_GET_OK] url=$url dt=${dt}ms len=${body.length}")
+                // v229b: player pages (whitelist) contam como OK — tryFastHttpGet é o ÚNICO
+                // fetch fora do mutex e o server.php sempre retorna 402+challenge-stub aqui
+                // mesmo com clearance (o HTML real só vem do WebView).
+                val bodyIsPlayer = body.isNotBlank() && isPlayerPage(body)
+                if (resp.code in 200..299 && body.isNotBlank() && (!isChallengeContent(body) || bodyIsPlayer)) {
+                    if (bodyIsPlayer) Log.i(TAG, "[FAST_GET_OK] player page url=$url dt=${dt}ms len=${body.length}")
+                    else Log.d(TAG, "[FAST_GET_OK] url=$url dt=${dt}ms len=${body.length}")
                     cleanHtmlForCache(body)
                 } else {
                     Log.d(TAG, "[FAST_GET_MISS] url=$url code=${resp.code} dt=${dt}ms chal=${isChallengeContent(body)} len=${body.length}")
@@ -441,6 +446,24 @@ object CloudflareSolver {
     }
 
     fun capturedHtml(url: String): String? = capturedHtmlByUrl[url]
+
+    // v229: retorna o HTML do server.php capturado na RAM e persiste em arquivo
+    // para inspeção (o server.php de ~1MB nunca vai ao cache de disco por design —
+    // cap 600KB + só catálogo).
+    fun dumpCapturedHtml(url: String, tag: String): String? {
+        return try {
+            val html = capturedHtmlByUrl[url] ?: return null
+            val ctx = appContext ?: CommonActivity.activity ?: return html
+            val safe = tag.replace(Regex("[^A-Za-z0-9_-]"), "_").take(40)
+            val f = java.io.File(ctx.filesDir, "redecanais_af_dump_${safe}.html")
+            f.writeText(html)
+            android.util.Log.i(TAG, "[SERVERPHP_HTML] tag=$tag len=${html.length} file=${f.absolutePath}")
+            html
+        } catch (e: Throwable) {
+            android.util.Log.w(TAG, "[SERVERPHP_HTML] falhou tag=$tag: ${e.message}")
+            capturedHtmlByUrl[url]
+        }
+    }
 
     fun capturedCount(): Int = capturedHtmlByUrl.size
 
@@ -658,6 +681,19 @@ object CloudflareSolver {
             content.contains("entry-title")) {
             return false
         }
+        // v229: páginas de player (server.php/play.php/embed) não têm cards nem
+        // entry-title — sem esta whitelist o requestDoc descartava o server.php
+        // resolvido (978KB) como "challenge" e o loadLinks recebia doc vazio
+        // (REQ#18 "Falha total" → nenhum link no celular).
+        if (content.contains("rcPreloadPlayer") ||
+            content.contains("captcha_button") ||
+            content.contains("__RC__/proxy") ||
+            content.contains("server.php") ||
+            content.contains("jwplayer") ||
+            content.contains("videojs") ||
+            content.contains("<video")) {
+            return false
+        }
         return content.contains("Just a moment", ignoreCase = true) ||
             content.contains("Um momento", ignoreCase = true) ||
             content.contains("Checking your browser", ignoreCase = true) ||
@@ -759,8 +795,16 @@ object CloudflareSolver {
     }
 
     suspend fun solve(url: String): String {
-        capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() && !isChallengeContent(it) }?.let {
-            return it
+        capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() }?.let { cached ->
+            // v229: aceita player pages (rcPreloadPlayer/captcha_button/__RC__) mesmo se o
+            // validador antigo as marcasse como challenge — o server.php resolvido era
+            // descartado aqui e o REQ#15 falhava ("Falha total") mesmo com HTML na RAM.
+            if (!isChallengeContent(cached)) return cached
+            if (cached.contains("rcPreloadPlayer") || cached.contains("captcha_button") ||
+                cached.contains("__RC__/proxy") || cached.contains("server.php")) {
+                Log.i(TAG, "[CF] HTML player reutilizado da RAM url=$url len=${cached.length}")
+                return cached
+            }
         }
 
         // Fast-path 1: se já temos cf_clearance no CookieManager, tenta GET direto sem travar no mutex
@@ -775,31 +819,51 @@ object CloudflareSolver {
         }
 
         val interactiveHtml = solveInteractive(url, timeoutMs = 25000L, force = false)
-        if (!interactiveHtml.isNullOrBlank() && !isChallengeContent(interactiveHtml)) {
+        // v229b: solveInteractiveLocked agora retorna player pages (whitelist interna) —
+        // aceitar aqui também, não só via !isChallengeContent.
+        val interactiveIsPlayer = !interactiveHtml.isNullOrBlank() &&
+            (interactiveHtml.contains("rcPreloadPlayer") || interactiveHtml.contains("captcha_button") ||
+                interactiveHtml.contains("__RC__/proxy") || interactiveHtml.contains("server.php"))
+        if (!interactiveHtml.isNullOrBlank() && (!isChallengeContent(interactiveHtml) || interactiveIsPlayer)) {
+            if (interactiveIsPlayer) Log.i(TAG, "[CF] HTML player retornado do interactive url=$url len=${interactiveHtml.length}")
             return interactiveHtml
         }
-        capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() && !isChallengeContent(it) }?.let {
-            return it
+        // v229: mesmo fallback player-page aqui — solveInteractive armazena na RAM
+        // mas o validador antigo descartava antes de retornar.
+        capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() }?.let { cached ->
+            if (!isChallengeContent(cached)) return cached
+            if (cached.contains("rcPreloadPlayer") || cached.contains("captcha_button") ||
+                cached.contains("__RC__/proxy") || cached.contains("server.php")) {
+                Log.i(TAG, "[CF] HTML player (pós-interactive) reutilizado da RAM url=$url len=${cached.length}")
+                return cached
+            }
         }
         return ""
     }
 
+    // v229b: player pages contam como resolvidas em todos os gates de cache.
+    private fun isPlayerPage(html: String): Boolean =
+        html.contains("rcPreloadPlayer") || html.contains("captcha_button") ||
+            html.contains("__RC__/proxy") || html.contains("server.php")
+
     @SuppressLint("SetJavaScriptEnabled")
     suspend fun solveInteractive(url: String, timeoutMs: Long = 25000L, force: Boolean = false): String? {
-        capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() && !isChallengeContent(it) }?.let {
+        capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() && (!isChallengeContent(it) || isPlayerPage(it)) }?.let {
             Log.i(TAG, "[CF] HTML do cache da sessão (outro REQ capturou) url=$url len=${it.length}")
             return it
         }
         return interactiveMutex.withLock {
-            capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() && !isChallengeContent(it) }?.let {
+            capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() && (!isChallengeContent(it) || isPlayerPage(it)) }?.let {
                 Log.i(TAG, "[CF] HTML do cache dentro do lock url=$url len=${it.length}")
                 return@withLock it
             }
             // v228: sem 2º fast-retry dentro do lock — solve() já tentou tryFastHttpGet
             // fora do lock; repetir aqui custava ~2s por MISS serializado no mutex.
             val result = solveInteractiveLocked(url, timeoutMs, force)
-            if (result == null || result.isBlank() || isChallengeContent(result)) {
-                capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() && !isChallengeContent(it) }?.let { return@withLock it }
+            // v229b: player page não é challenge — não descarta nem faz fallback.
+            val resultIsPlayer = !result.isNullOrBlank() && isPlayerPage(result)
+            if (result == null || result.isBlank() || (isChallengeContent(result) && !resultIsPlayer)) {
+                capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() && (!isChallengeContent(it) || isPlayerPage(it)) }?.let { return@withLock it }
             }
             result
         }
@@ -1116,7 +1180,10 @@ object CloudflareSolver {
                     addJavascriptInterface(object {
                         @android.webkit.JavascriptInterface
                         fun onHtmlCaptured(pageUrl: String, html: String) {
-                            if (html.isNotBlank() && !isChallengeContent(html) && html.length > 300) {
+                            // v229b: player pages contam como válidas (whitelist interna) —
+                            // sem isso o server.php era descartado neste gate também.
+                            if (html.isNotBlank() && html.length > 300 &&
+                                (!isChallengeContent(html) || isPlayerPage(html))) {
                                 val clean = cleanHtmlForCache(html)
                                 capturedHtmlByUrl[pageUrl] = clean
                                 Log.i(TAG, "[CF_JS_INTERFACE] HTML capturado via fetch assíncrono: len=${clean.length} url=$pageUrl")
@@ -1124,11 +1191,17 @@ object CloudflareSolver {
                             }
                         }
                     }, "HTMLOUT")
+                    // v229b: o console do server.php não passa pelo filtro cf/turnstile —
+                    // loga erros JS (ex "Uncaught (in promise) Error: 7a2f") que mostram
+                    // em que estágio o bundle do player trava.
                     webChromeClient = object : WebChromeClient() {
                         override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
                             val msg = consoleMessage?.message() ?: ""
-                            if (msg.contains("cf", true) || msg.contains("turnstile", true) || msg.contains("challenge", true)) {
-                                Log.d(TAG, "[CF_JS_CONSOLE] $msg")
+                            val src = consoleMessage?.sourceId()?.take(120).orEmpty()
+                            if (msg.contains("cf", true) || msg.contains("turnstile", true) || msg.contains("challenge", true) ||
+                                src.contains("server.php", true) || src.contains("player3", true) ||
+                                msg.contains("Uncaught", true) || msg.contains("Error", true)) {
+                                Log.i(TAG, "[CF_JS_CONSOLE] src=$src | $msg")
                             }
                             return true
                         }
@@ -1203,7 +1276,8 @@ object CloudflareSolver {
                                             .replace("\\\"", "\"")
                                             .replace("\\n", "\n")
                                             .replace("\\r", "\r")
-                                        if (!isChallengeContent(decoded) && decoded.length > 300) {
+                                        // v229b: player pages contam como resolvidas (whitelist).
+                                        if ((!isChallengeContent(decoded) || isPlayerPage(decoded)) && decoded.length > 300) {
                                             lastSolvedHtml = decoded
                                             capturedHtmlByUrl[finishedUrl ?: currentUrl] = decoded
                                             capturedHtmlByUrl[url] = decoded
@@ -1287,9 +1361,15 @@ object CloudflareSolver {
         if (finalClearance) saveClearanceFromCookieManager(url)
         // v130: retorna o HTML da URL PEDIDA (o WebView pode ter navegado para as URLs extras do
         // catálogo depois de capturar esta — lastSolvedHtml seria o da última navegação).
+        // v229: player pages (rcPreloadPlayer/captcha_button/__RC__/server.php) contam como
+        // resolvidas — sem isso o server.php capturado (978KB) era descartado e o REQ#15
+        // falhava mesmo com target_page_loaded=true.
         val captured = capturedHtmlByUrl[url]
+        val capturedIsPlayer = !captured.isNullOrBlank() &&
+            (captured.contains("rcPreloadPlayer") || captured.contains("captcha_button") ||
+                captured.contains("__RC__/proxy") || captured.contains("server.php"))
         return when {
-            !captured.isNullOrBlank() && !isChallengeContent(captured) -> captured
+            !captured.isNullOrBlank() && (!isChallengeContent(captured) || capturedIsPlayer) -> captured
             !lastSolvedHtml.isNullOrBlank() && !isChallengeContent(lastSolvedHtml!!) -> lastSolvedHtml
             else -> captured
         }

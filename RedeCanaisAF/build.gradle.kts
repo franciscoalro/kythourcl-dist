@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v228-player — corrige "sem fonte": resolve redirect.api?p=<base64> antes do proxy + normaliza redecanaistv.af + probe vira diagnóstico; catálogo: remove fast-retry duplicado no solver
+// v229-player: whitelist de player page no solver (server.php era descartado) + click via handler oficial + reload com query params + sonda de estado
 cloudstream {
-    version = 228
+    version = 229
 }

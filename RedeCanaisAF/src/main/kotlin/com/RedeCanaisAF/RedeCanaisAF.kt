@@ -57,7 +57,7 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 228
+        const val BUILD_VERSION = 229
         private const val TAG = "RedeCanaisAF-Trace"
         private const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/AP1A.240505.005) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Mobile Safari/537.36"
 
@@ -206,6 +206,14 @@ class RedeCanaisAF : MainAPI() {
             Log.i(TAG, "[REQ#$reqId] Cloudflare resolvido via WebView! len=${solverHtml.length}")
             logCookieState("AFTER_SOLVER", fixedUrl, reqId)
             return Jsoup.parse(solverHtml, fixedUrl)
+        }
+        // v229: solve() retornou "" mas o interactive armazenou o HTML do player na RAM
+        // (o validador antigo descartava antes de retornar — corrida já corrigida no
+        // solver mas este REQ usou o build anterior). Reaproveita direto da RAM.
+        val ramHtml = CloudflareSolver.capturedHtml(fixedUrl)
+        if (!ramHtml.isNullOrBlank() && !CloudflareSolver.isChallengeContent(ramHtml)) {
+            Log.i(TAG, "[REQ#$reqId] HTML player reaproveitado da RAM! len=${ramHtml.length}")
+            return Jsoup.parse(ramHtml, fixedUrl)
         }
 
         val cookieAfter = runCatching {

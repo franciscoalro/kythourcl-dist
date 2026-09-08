@@ -139,11 +139,35 @@ object WebViewStreamProxy {
                             view?.evaluateJavascript(CloudflareSolver.ANTI_DETECTION_JS, null)
                         }
 
+                        // v229e: deixa a navegação pós-click ACONTECER (não contém) mas
+                        // marca para reemitir a URL original se a query se perder —
+                        // provado 12:55: click -> server.php? (contido = player congelado,
+                        // só bundle.js+jquery.js, nenhuma API, 45s em vão). Sem contenção,
+                        // o fluxo segue (server.php? -> sessão -> player real); o reload
+                        // com query params (v229) recupera se cair em 520.
+                        // (Contain removido; onPageFinished com query vazia só loga.)
+                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                            val u = request?.url?.toString().orEmpty()
+                            if (u.contains("server.php?", true) && captured.get().not()) {
+                                Log.i(TAG, "[PROXY] navegação pós-click liberada: $u")
+                            }
+                            return super.shouldOverrideUrlLoading(view, request)
+                        }
+
                         override fun shouldInterceptRequest(
                             view: WebView?,
                             request: WebResourceRequest
                         ): WebResourceResponse? {
                             val u = request.url.toString()
+                            // v229: loga chamadas de API do bundle do player (dt.api/
+                            // serverforms/query/redirect) — visibilidade do fluxo real.
+                            if ((u.contains(".api", true) || u.contains("query", true) ||
+                                u.contains("bundle", true) || u.contains("serverforms", true) ||
+                                u.contains("dt.", true) || u.contains("getvid", true) ||
+                                u.contains("getlink", true) || u.contains("redirect", true)) &&
+                                !u.contains("google", true)) {
+                                Log.i(TAG, "[PROXY_API] ${request.method} ${u.take(220)}")
+                            }
                                    val isMediaStream = (u.contains("__RC__/proxy", true) || u.contains("/proxy?src=", true) ||
                                 u.contains("p12-common-sign", true) || u.contains("xn--l", true) ||
                                 u.contains("neosoro.gq", true) || u.contains("tos-alisg", true) ||
@@ -191,6 +215,9 @@ object WebViewStreamProxy {
         var lastReloadCheckMs = 0L
         var lastDirectFallbackMs = 0L
         var clickDoneAtMs = 0L
+        // v229c: player montado (btn+rcPreloadPlayer visíveis no diag) — enquanto true,
+        // nenhum reload: o bundle precisa de >10s após o click para montar o __RC__/proxy.
+        val playerMounted = AtomicBoolean(false)
         // v125: o fallback direto (rcPreloadPlayer manual) roda NO MÁXIMO uma vez por ciclo —
         // chamadas repetidas a cada 3s podem reiniciar a montagem do player (serverforms.api)
         var directFallbackDone = false
@@ -205,11 +232,15 @@ object WebViewStreamProxy {
                 val wvNow = wv ?: continue
 
                 // 1) Clica no recap assim que o DOM estiver pronto (não espera onPageFinished).
-                // v123: retry a cada CLICK_RETRY_MS até o click ser efetivo ('click'/'direct') —
-                // se rodar antes do DOM existir, retorna 'none' e tenta de novo.
+                // v123: retry a cada CLICK_RETRY_MS até o click ser efetivo ('click') —
+                // se rodar antes do DOM existir, retorna 'wait' e tenta de novo.
                 // v125: espera window.rcPreloadPlayer existir ANTES de clicar (como o
                 // browser-harness da Fase 51 fazia) — se o script do player ainda não
                 // carregou, o handler do botão não existe e o clique não dispara nada.
+                // v229d: NUNCA chama window.rcPreloadPlayer() diretamente — o diag provou
+                // que a chamada direta rejeita com "Error: 7a2f" (~250ms depois) e envenena
+                // o estado interno do player (nunca mais monta o __RC__/proxy). Só o
+                // handler do próprio botão sabe os args/contexto certos (token recap).
                 if (!clickDone.get() && captured.get().not() && now - lastClickMs >= CLICK_RETRY_MS) {
                     lastClickMs = now
                     withContext(Dispatchers.Main) {
@@ -223,15 +254,16 @@ object WebViewStreamProxy {
                                             return 'cf:' + (rect.left + 35) + ':' + (rect.top + rect.height/2);
                                         }
                                     }
-                                    if (typeof window.rcPreloadPlayer !== 'function') {
-                                        const b = document.getElementById('submit') || document.querySelector('.captcha_button') || document.querySelector('button');
-                                        if (b) { b.click(); return 'click_early'; }
-                                        return 'wait';
-                                    }
                                     const b = document.getElementById('submit') || document.querySelector('.captcha_button');
-                                    if (b) { b.click(); return 'click'; }
-                                    window.rcPreloadPlayer(Date.now());
-                                    return 'direct';
+                                    const hasFn = (typeof window.rcPreloadPlayer === 'function');
+                                    if (!b || !hasFn) return 'wait';
+                                    // v229e: o submit do recap navega para "server.php?" (query
+                                    // perdida = 520). Bloqueia a navegação com shouldOverrideUrl-
+                                    // Loading no NÍVEL NATIVO (não compete com handlers JS do
+                                    // bundle — o handler do botão roda intacto, só a navegação
+                                    // resultante é contida e o player monta no DOM atual).
+                                    b.click();
+                                    return 'click';
                                 })();""".trimIndent()
                             ) { res ->
                                 val r = res?.removeSurrounding("\"")
@@ -260,7 +292,7 @@ object WebViewStreamProxy {
                                     eventUp.recycle()
                                     Log.i(TAG, "[PROXY] Turnstile checkbox clicado no server.php em ($x, $y)")
                                 }
-                                if (r == "click" || r == "direct" || r == "click_early") {
+                                if (r == "click") {
                                     clickDone.set(true)
                                     clickDoneAtMs = now
                                 }
@@ -269,9 +301,10 @@ object WebViewStreamProxy {
                     }
                 }
 
-                // 2) Fallback direto (rcPreloadPlayer) 3s após o click inicial, se nada capturou.
-                // v125: roda UMA única vez (flag directFallbackDone) — o harness da Fase 51
-                // chamava rcPreloadPlayer UMA vez; repetir a cada 3s pode reiniciar o player.
+                // 2) Fallback: re-clica no BOTÃO 3s após o click inicial, se nada capturou.
+                // v229d: removida a chamada direta window.rcPreloadPlayer(Date.now()) —
+                // ela rejeita com "Error: 7a2f" e envenena o player (diag 12:14 provou).
+                // Se o DOM ainda tem o botão, um 2º click via handler oficial é seguro.
                 if (clickDone.get() && !captured.get() && !directFallbackDone && now - lastClickMs >= DIRECT_FALLBACK_MS && now - lastDirectFallbackMs >= DIRECT_FALLBACK_MS) {
                     lastDirectFallbackMs = now
                     directFallbackDone = true
@@ -279,15 +312,13 @@ object WebViewStreamProxy {
                         try {
                             wvNow.evaluateJavascript(
                                 """(function() {
-                                    if (typeof window.rcPreloadPlayer === 'function') {
-                                        window.rcPreloadPlayer(Date.now());
-                                        return 'direct2';
-                                    }
-                                    return 'no-fn';
+                                    const b = document.getElementById('submit') || document.querySelector('.captcha_button');
+                                    if (b && b.offsetParent !== null) { b.click(); return 'reclick'; }
+                                    return 'no-btn';
                                 })();""".trimIndent()
                             ) { res ->
-                                if (res?.contains("direct2") == true) {
-                                    Log.i(TAG, "[PROXY] rcPreloadPlayer direto chamado (fallback)")
+                                if (res?.contains("reclick") == true) {
+                                    Log.i(TAG, "[PROXY] recap re-clicado (fallback via botão)")
                                 }
                             }
                         } catch (_: Throwable) {}
@@ -295,7 +326,10 @@ object WebViewStreamProxy {
                 }
 
                 // 3) Poll via performance entries & DOM vídeo (fallback não-bloqueante)
+                // v229: sonda de estado do player a cada ~5s (alimenta playerMounted).
                 if (!captured.get()) {
+                    val elapsed = now - startMs
+                    val isDiagTick = elapsed > 0 && (elapsed / 5000L) != ((elapsed - POLL_INTERVAL_MS) / 5000L)
                     withContext(Dispatchers.Main) {
                         try {
                             wvNow.evaluateJavascript(
@@ -335,16 +369,47 @@ object WebViewStreamProxy {
                                     } catch (_: Throwable) {}
                                 }
                             }
+                            // v229: sonda de estado do player a cada ~5s — alimenta
+                            // playerMounted (bloqueia reload enquanto o bundle monta).
+                            if (isDiagTick) {
+                                wvNow.evaluateJavascript(
+                                    """(function() {
+                                        try {
+                                            const btn = document.getElementById('submit') || document.querySelector('.captcha_button');
+                                            const btnVisible = btn ? (btn.offsetParent !== null) : false;
+                                            const rcFn = (typeof window.rcPreloadPlayer === 'function');
+                                            const v = document.querySelector('video');
+                                            const vSrc = v ? ((v.currentSrc || v.src || '').substring(0,80)) : '';
+                                            return 'player btn=' + btnVisible + ' | rcFn=' + rcFn + ' | video=' + (vSrc || 'none') + ' | title=' + document.title.substring(0,50);
+                                        } catch(e) { return 'player ERR ' + e.message; }
+                                    })();""".trimIndent()
+                                ) { res ->
+                                    val clean = res?.removeSurrounding("\"").orEmpty()
+                                    Log.i(TAG, "[PROXY_STATE] t=${elapsed}ms $clean")
+                                    // player montado = btn visível + rcPreloadPlayer function —
+                                    // enquanto montado, o retry NÃO recarrega (mata a montagem).
+                                    playerMounted.set(clean.contains("btn=true") && clean.contains("rcFn=true"))
+                                }
+                            }
                         } catch (_: Throwable) {}
                     }
                 }
 
-                // 4) Retry com reload se a página não montou o player
+                // 4) Retry com reload se a página não montou o player.
+                // v229: recarrega a URL ORIGINAL com query params (vid/server/subfolder) —
+                // wv.reload() após submit do recap navegava para "server.php?" vazio,
+                // que retorna 520 e destrói a sessão válida (diag v229 provou).
+                // v229c: NÃO recarrega enquanto o player está montado (btn+rcPreloadPlayer
+                // presentes) — o bundle leva >10s para montar o __RC__/proxy após o click
+                // e o reload cego matava a montagem em andamento (diag 12:08 provou:
+                // player montado aos 15s, morto pelo reload #2).
                 val clickAge = if (clickDoneAtMs == 0L) Long.MAX_VALUE else now - clickDoneAtMs
                 val neverClicked = clickDoneAtMs == 0L
-                val dudClick = clickDone.get() && clickAge >= DUD_CLICK_MS
+                // v229c: stale só vale se o click foi há pouco E o player sumiu;
+                // player montado (btn+rcFn) invalida o stale — dá tempo ao bundle.
+                val staleClick = clickDone.get() && clickAge in DUD_CLICK_MS..15000L && playerMounted.get().not()
                 if (!captured.get() &&
-                    (neverClicked || dudClick) &&
+                    (neverClicked || staleClick) &&
                     now - startMs >= RELOAD_FIRST_MS &&
                     now - lastReloadCheckMs >= RELOAD_INTERVAL_MS &&
                     reloadCount < MAX_RELOADS
@@ -359,16 +424,17 @@ object WebViewStreamProxy {
                                 })();""".trimIndent()
                             ) { res ->
                                 val hasCaptcha = res?.contains("true") == true
-                                if (dudClick || !hasCaptcha) {
+                                if (staleClick || !hasCaptcha) {
                                     reloadCount++
-                                    if (dudClick) {
-                                        Log.i(TAG, "[PROXY] click dud -> reload #$reloadCount p/ sessão fresca")
+                                    if (staleClick) {
+                                        Log.i(TAG, "[PROXY] click sem efeito -> reload #$reloadCount p/ sessão fresca")
                                     } else {
                                         Log.i(TAG, "[PROXY] captcha ausente -> reload #$reloadCount para renovar RCIP/RCSESS")
                                     }
                                     clickDone.set(false)
                                     clickDoneAtMs = 0L
-                                    try { wvNow.reload() } catch (_: Throwable) {}
+                                    // v229: preserva query params — reload() nu perdia vid/server
+                                    try { wvNow.loadUrl(serverPhpUrl) } catch (_: Throwable) {}
                                 }
                             }
                         } catch (_: Throwable) {}
