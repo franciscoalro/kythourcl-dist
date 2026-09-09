@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v233: await asynchronous search indexes and decode captured HTML as JSON.
+// v234: deterministic proxy WebView cleanup; bound diagnostic fetch cloning.
 cloudstream {
-    version = 233
+    version = 234
 }

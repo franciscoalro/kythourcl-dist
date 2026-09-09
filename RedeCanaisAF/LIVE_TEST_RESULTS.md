@@ -44,6 +44,20 @@ Uma captura passiva posterior via Chrome DevTools Protocol (`Network.enable`) re
 
 **Conclusão:** clique, inicialização e chamadas ao serviço estão comprovados com dois conteúdos; URL de vídeo e reprodução ExoPlayer **não comprovadas**. O `204` é um código no JSON, não o status HTTP. A evidência descarta que o plugin tenha simplesmente deixado de acionar o botão ou a API. Ela ainda não distingue indisponibilidade do arquivo, política do servidor, sessão aceita parcialmente, exigência da etapa promocional ou outro estado interno; portanto, não alegamos indisponibilidade global nem uma causa que os dados não provam.
 
+## Captura adicional do Service Worker e memória
+
+A execução posterior no app v233 (PID 22395) capturou simultaneamente páginas e Service Workers, incluindo substituições do worker. O arquivo local `/tmp/rc-worker-replay-all.json` contém 1193 eventos.
+
+- Oito chamadas de rede a `serverforms.api` foram correlacionadas por URL exata entre página e worker: duas inicializações e duas resoluções para cada um de `RCFServer2` e `RCServer11`.
+- Os eventos ExtraInfo do worker confirmam envio de `cf_clearance`, `RCIP` e `RCSESS` nas oito chamadas, sem cookies bloqueados registrados. Os quatro resultados finais seguem HTTP 200, código interno 204 e lista vazia. A ausência desses cookies está descartada nesta execução; validade/aceitação pelo servidor não está comprovada.
+- Há duplicidade de cookies: no request `22569.1312`, `RCSESS` aparece com dois valores distintos, um no domínio `.redecanais.af` e outro host-only `redecanais.af`, ambos em `/`. O restaurador do plugin escreve explicitamente a variante de domínio. Isso justifica um teste controlado de escopo, mas ainda não prova a causa da lista vazia. Nenhum valor ou token é publicado.
+- `Network.getResponseBody` no worker não forneceu corpo utilizável nesta ferramenta; o JSON foi obtido no target da página. Corpo vazio registrado pelo coletor no worker não significa resposta de rede vazia.
+- A primeira tentativa foi interrompida por encerramento do app: `dumpsys activity exit-info` registra `LOW_MEMORY` às 10:07:51, PID 21689, PSS 784 MB / RSS 858 MB; há outros dois encerramentos com PSS 833 e 869 MB. Uma medição posterior registrou PSS 640132 KB, Native Heap PSS 366996 KB e dois WebViews. Isso comprova pressão de memória, não a responsabilidade de uma alocação específica.
+
+### Correção de ciclo de vida em validação — v234
+
+`WebViewStreamProxy.shutdown()` continha um bloco de limpeza inalcançável, pois lia `webView` depois de atribuir `null`. A limpeza anterior dependia da Activity atual. O patch guarda a referência antes de limpá-la e executa stop/detach/destroy na thread Main independentemente da Activity atual. Também deixa de clonar e converter para texto todas as respostas `fetch`; a inspeção de corpo fica limitada a endpoints de metadados (`serverforms.api`/`dt.api`) com `Content-Length` de até 1 MiB. A URL de stream continua capturada no `shouldInterceptRequest`. Isso evita uma amplificação de memória demonstrável no código, mas não prova que ela era a única origem do PSS observado. Não altera cookies, fingerprint ou resolução da API e não é apresentado como correção comprovada de playback ou dos encerramentos por memória.
+
 ## Limites e reprodução do teste
 
 Os testes comportamentais acima usaram o candidato local com a correção de busca; a versão final 233 inclui a mesma lógica e proteção adicional contra callback após encerramento. Compilar com `./gradlew :RedeCanaisAF:make`, instalar o `.cs3`, reiniciar o app, pesquisar `Batman`, abrir a série e tocar no primeiro episódio. Comparar logs novos, não reaproveitar linhas de execuções anteriores.

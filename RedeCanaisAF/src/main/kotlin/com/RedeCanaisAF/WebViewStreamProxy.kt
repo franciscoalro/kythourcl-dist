@@ -3,6 +3,8 @@ package com.RedeCanaisAF
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.graphics.Bitmap
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.view.MotionEvent
@@ -180,8 +182,17 @@ object WebViewStreamProxy {
                                   window.__rcLastFetchStatus=status;
                                   window.__rcLastFetchCt=ct;
                                   console.log('[HOOK] fetch-resp '+status+' ct='+ct.slice(0,60)+' loc='+String(loc).slice(0,250)+' url='+urlStr.slice(0,200));
+                                  // v234: only inspect small metadata responses. Cloning every
+                                  // fetch used to materialize media/chunks as text and amplify
+                                  // WebView native memory during playback.
+                                  const contentLength=parseInt(r.headers.get('content-length')||'0',10)||0;
+                                  const isMetadata=urlStr.indexOf('serverforms.api')>=0||urlStr.indexOf('dt.api')>=0;
+                                  // Stream capture itself is done by shouldInterceptRequest;
+                                  // cloning arbitrary text documents is unnecessary here.
+                                  if(!isMetadata||contentLength>1048576) return;
                                   const cl=r.clone();
                                   cl.text().then(function(t){
+                                    if(t.length>1048576){ console.log('[HOOK] fetch-body skipped oversized metadata len='+t.length); return; }
                                     window.__rcFetchCount++;
                                     window.__rcLastFetchBody=t;
                                     try{ window.__rcBodies.push({url:urlStr, ct:ct, status:status, body:t.slice(0,3000)}); if(window.__rcBodies.length>20) window.__rcBodies.shift(); }catch(_){}
@@ -1052,30 +1063,22 @@ object WebViewStreamProxy {
         try { serverSocket?.close() } catch (_: Throwable) {}
         serverSocket = null
         streamUrl = null
-        try {
-            val v = webView
-            if (v != null) {
-                CommonActivity.activity?.runOnUiThread {
-                    try {
-                        (v.parent as? ViewGroup)?.removeView(v)
-                        v.destroy()
-                    } catch (_: Throwable) {}
-                }
-            }
-        } catch (_: Throwable) {}
-        webView = null
-        val wv = webView
-        webView = null
-        if (wv != null) {
-            try {
-                wv.post {
-                    try {
-                        wv.stopLoading()
-                        (wv.parent as? ViewGroup)?.removeView(wv)
-                        wv.destroy()
-                    } catch (_: Throwable) {}
-                }
-            } catch (_: Throwable) {}
+        // Capture ownership before clearing the singleton. Dispatch independently
+        // of CommonActivity: the Activity may already be gone during shutdown.
+        val wv = synchronized(this) {
+            webView.also { webView = null }
+        } ?: return
+        val cleanup = Runnable {
+            runCatching { wv.stopLoading() }
+            runCatching { (wv.parent as? ViewGroup)?.removeView(wv) }
+            runCatching { wv.destroy() }
+                .onSuccess { Log.i(TAG, "[PROXY] WebView destruido no shutdown") }
+                .onFailure { Log.w(TAG, "[PROXY] Falha ao destruir WebView", it) }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            cleanup.run()
+        } else {
+            Handler(Looper.getMainLooper()).post(cleanup)
         }
     }
 }
