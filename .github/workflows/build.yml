@@ -35,18 +35,14 @@ jobs:
           git add builds/
           if ! git diff --staged --quiet; then
             git commit -m "build plugins [skip ci]"
-            # A newer source commit may land while this run is building. Rebase the
-            # generated artifact commit instead of failing with a non-fast-forward.
-            for attempt in 1 2 3; do
-              git pull --rebase origin main
-              if git push origin HEAD:main; then
-                exit 0
-              fi
-              echo "Push raced with another run (attempt $attempt); retrying..."
-              sleep $((attempt * 2))
-            done
-            echo "Failed to publish generated artifacts after 3 attempts" >&2
-            exit 1
+            # Never rebase artifacts onto sources they were not built from.
+            git fetch origin main
+            if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
+              echo "main advanced during build; newer workflow will publish artifacts"
+              exit 0
+            fi
+            # Non-forced push also guards a race after the SHA check.
+            git push origin HEAD:main
           else
             echo "No changes to commit"
           fi
