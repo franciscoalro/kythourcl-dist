@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v229-player: whitelist de player page no solver (server.php era descartado) + click via handler oficial + reload com query params + sonda de estado
+// v232-hook-total: viewport real MATCH_PARENT alpha 0.01 HARDWARE + hook total fetch/XHR/submit/mutation + __rcCaptured fast-path + TUNEL_VAZIO diag
 cloudstream {
-    version = 229
+    version = 232
 }
