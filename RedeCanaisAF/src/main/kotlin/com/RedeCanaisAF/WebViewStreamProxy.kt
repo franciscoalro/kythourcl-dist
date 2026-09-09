@@ -96,16 +96,28 @@ object WebViewStreamProxy {
                     ?: WebViewResolver.webViewUserAgent
                     ?: MOBILE_UA
 
-                // v228: GONE + 1x1 + SOFTWARE — captura de mídia não precisa de
-                // surface de composição (cada WebView tela cheia HW aproximava o LMK).
+                // v230: MATCH_PARENT invisível (alpha 0.01, atrás do conteúdo) +
+                // HARDWARE durante a captura — dois motivos provados no diag:
+                // (a) o bundle (videojs/ima3) pode exigir pipeline de mídia real
+                // para montar o __RC__/proxy; GONE+SOFTWARE congelava o player
+                // (v229: btn+rcFn presentes 45s sem nenhuma chamada de API);
+                // (b) com layout 1x1 o getBoundingClientRect retorna coords fora
+                // dos limites da view (ex: 60.0,0.5) e o dispatchTouchEvent é
+                // descartado — com viewport real as coords caem dentro da view.
+                // Vida curta (destruído no shutdown ao capturar/timeout) — 1 WebView
+                // transiente não pressiona o LMK como os permanentes da v228.
                 val view = WebView(activity).apply {
-                    visibility = android.view.View.GONE
+                    visibility = android.view.View.VISIBLE
+                    alpha = 0.01f
                     isFocusable = false
                     isFocusableInTouchMode = false
                     isClickable = false
                     isLongClickable = false
-                    setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
-                    layoutParams = android.widget.FrameLayout.LayoutParams(1, 1)
+                    setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
+                    layoutParams = android.widget.FrameLayout.LayoutParams(
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+                    )
                     cookieManager.setAcceptThirdPartyCookies(this, true)
                     settings.apply {
                         javaScriptEnabled = true
@@ -123,7 +135,211 @@ object WebViewStreamProxy {
                             super.onProgressChanged(view, newProgress)
                             view?.evaluateJavascript(CloudflareSolver.ANTI_DETECTION_JS, null)
                         }
+
+                        // v232: captura console.log do hook de fetch/XHR/submit do body
+                        override fun onConsoleMessage(msg: android.webkit.ConsoleMessage?): Boolean {
+                            try {
+                                val m = msg?.message().orEmpty()
+                                if (m.contains("[HOOK]", true) || m.contains("Uncaught", true) ||
+                                    m.contains("Failed to load", true) || m.contains("Error", true)) {
+                                    Log.i(TAG, "[HOOK_JS] $m @ ${msg?.sourceId()?.take(80)}:${msg?.lineNumber()}")
+                                }
+                            } catch (_: Throwable) {}
+                            return super.onConsoleMessage(msg)
+                        }
                     }
+
+                    // v232e: hook total — intercepta TODO fluxo cliente->servidor->meio
+                    // (fetch/XHR/submit/click/video) e expõe ao Kotlin via window.__rc*
+                    // para diagnóstico do túnel Redemovel/RCIP. Anteriormente só logava
+                    // bodies com __RC__/proxy (perdia serverforms vazio len=52 que indica
+                    // túnel caído). Agora registra 100% dos bodies em __rcBodies.
+                    val hookJs = """(function(){
+                        if(window.__rcHook) return;
+                        window.__rcHook=true;
+                        try{
+                          window.__rcCaptured='';
+                          window.__rcCapturedRawLen=0;
+                          window.__rcLastFetchUrl='';
+                          window.__rcLastFetchBody='';
+                          window.__rcLastFetchCt='';
+                          window.__rcLastFetchStatus=0;
+                          window.__rcBodies=[];
+                          window.__rcFetchCount=0;
+                          const ofetch=window.fetch;
+                          if(ofetch) window.fetch=function(u,o){
+                            const urlStr=String(u).slice(0,400);
+                            window.__rcLastFetchUrl=urlStr;
+                            try{ console.log('[HOOK] fetch '+urlStr+' opts='+JSON.stringify(o||{}).slice(0,250)+' cookies='+document.cookie.slice(0,200)); }catch(_){}
+                            const p=ofetch.apply(this, arguments);
+                            try{
+                              p.then(function(r){
+                                try{
+                                  const status=r.status, loc=r.headers.get('location')||r.headers.get('Location')||'';
+                                  const ct=r.headers.get('content-type')||'';
+                                  window.__rcLastFetchStatus=status;
+                                  window.__rcLastFetchCt=ct;
+                                  console.log('[HOOK] fetch-resp '+status+' ct='+ct.slice(0,60)+' loc='+String(loc).slice(0,250)+' url='+urlStr.slice(0,200));
+                                  const cl=r.clone();
+                                  cl.text().then(function(t){
+                                    window.__rcFetchCount++;
+                                    window.__rcLastFetchBody=t;
+                                    try{ window.__rcBodies.push({url:urlStr, ct:ct, status:status, body:t.slice(0,3000)}); if(window.__rcBodies.length>20) window.__rcBodies.shift(); }catch(_){}
+                                    const hasProxy=t.indexOf('__RC__/proxy')>=0||t.indexOf('/proxy?src=')>=0||t.indexOf('tos-alisg')>=0||t.indexOf('container=videos')>=0||t.indexOf('.m3u8')>=0||t.indexOf('.mp4')>=0||t.indexOf('https://')>=0;
+                                    const hasLoc=t.indexOf('location')>=0||t.indexOf('src=')>=0;
+                                    // v232e: SEMPRE loga body (antes só proxy||<3k) — crítico p/ serverforms vazio 204 []
+                                    const preview=t.slice(0,900).replace(/\n/g,' ').replace(/\r/g,'');
+                                    console.log('[HOOK] fetch-body #'+window.__rcFetchCount+' len='+t.length+' ct='+ct.slice(0,40)+' proxy='+hasProxy+' url='+urlStr.slice(0,120)+' preview='+preview);
+                                    // diagnóstico túnel: serverforms com [] = backend sem stream
+                                    if(urlStr.indexOf('serverforms')>=0 || urlStr.indexOf('dt.api')>=0){
+                                      console.log('[HOOK] serverforms payload len='+t.length+' body='+t.slice(0,1200).replace(/\n/g,' '));
+                                      try{
+                                        const j=JSON.parse(t);
+                                        console.log('[HOOK] serverforms JSON keys='+Object.keys(j).join(',')+' vals='+JSON.stringify(j).slice(0,900));
+                                        // detecta túnel caído: array vazio + code 204
+                                        if(j.e18b73c9 && Array.isArray(j.e18b73c9) && j.e18b73c9.length===0){
+                                          console.log('[HOOK] TUNEL_VAZIO serverforms retornou e18b73c9=[] (204) — possível Redemovel/RCIP expirado ou túnel caiu');
+                                        }
+                                        if(j.c4a0f6) console.log('[HOOK] c4a0f6 len='+(String(j.c4a0f6).length)+' preview='+String(j.c4a0f6).slice(0,150));
+                                      }catch(e){ console.log('[HOOK] serverforms JSON parse err '+e.message); }
+                                    }
+                                    try{
+                                      let found='';
+                                      const m=t.match(/https?:\/\/[^\s"'\\]+\.(?:m3u8|mp4)[^\s"'\\]*/i);
+                                      if(m) found=m[0];
+                                      if(!found){
+                                        const m2=t.match(/https?:\/\/[^\s"'\\]*tos-alisg[^\s"'\\]*/i);
+                                        if(m2) found=m2[0];
+                                      }
+                                      if(!found){
+                                        const m3=t.match(/https?:\/\/[^\s"'\\]*\/proxy\?container=[^\s"'\\]*/i);
+                                        if(m3) found=m3[0];
+                                      }
+                                      if(!found){
+                                        const m4=t.match(/https?:\/\/[^\s"'\\]*__RC__[^\s"'\\]*/i);
+                                        if(m4) found=m4[0];
+                                      }
+                                      if(!found){
+                                        try{
+                                          const j=JSON.parse(t);
+                                          const vals=JSON.stringify(j);
+                                          const m5=vals.match(/https?:\/\/[^\s"'\\]+\.(?:m3u8|mp4)[^\s"'\\]*/i);
+                                          if(m5) found=m5[0];
+                                          if(!found){
+                                            const m6=vals.match(/https?:\\\/\\\/[^\s"'\\]{20,}/);
+                                            if(m6) found=m6[0].replace(/\\\//g,'/');
+                                          }
+                                          // fallback: qualquer https longo em JSON (proxy sem extensão)
+                                          if(!found && vals.indexOf('https')>=0){
+                                            const m7=vals.match(/https?:[^\s"'\\]{15,}/);
+                                            if(m7) found=m7[0].replace(/\\\//g,'/');
+                                          }
+                                          // tenta decodificar base64 se houver
+                                          if(!found){
+                                            for(const k of Object.keys(j)){
+                                              const v=j[k];
+                                              if(typeof v==='string' && v.length>20){
+                                                try{ const dec=atob(v); if(dec.indexOf('http')>=0) { found=dec.match(/https?:\/\/[^\s"'\\]+/)?.[0]||''; if(found) break; } }catch(_){}
+                                              }
+                                            }
+                                          }
+                                        }catch(_){}
+                                      }
+                                      if(found){
+                                        window.__rcCaptured=found;
+                                        window.__rcCapturedRawLen=t.length;
+                                        console.log('[HOOK] captured stream '+found.slice(0,320));
+                                      } else if(hasProxy){
+                                        window.__rcCaptured=t.slice(0,800);
+                                        console.log('[HOOK] captured raw proxy body len='+t.length);
+                                      }
+                                      // sempre guarda último body p/ Kotlin poll (mesmo sem proxy)
+                                      window.__rcLastFetchBody=t.slice(0,3000);
+                                    }catch(e){ console.log('[HOOK] capture-err '+e.message); }
+                                  }).catch(function(e){ console.log('[HOOK] fetch-body-err '+e.message); });
+                                }catch(e){ console.log('[HOOK] fetch-resp-err '+e.message); }
+                                return r;
+                              }).catch(function(e){ console.log('[HOOK] fetch-reject '+e.message+' url='+urlStr.slice(0,200)); });
+                            }catch(_){}
+                            return p;
+                          };
+                          const oOpen=XMLHttpRequest.prototype.open;
+                          XMLHttpRequest.prototype.open=function(m,u){
+                            try{ console.log('[HOOK] XHR open '+m+' '+String(u).slice(0,260)); }catch(_){}
+                            return oOpen.apply(this, arguments);
+                          };
+                          const oSend=XMLHttpRequest.prototype.send;
+                          XMLHttpRequest.prototype.send=function(b){
+                            try{ console.log('[HOOK] XHR send '+(b?String(b).slice(0,300):'-')); }catch(_){}
+                            // espia resposta XHR
+                            try{
+                              const xhr=this;
+                              const prev=xhr.onload;
+                              const onLoad=function(){
+                                try{
+                                  const t=xhr.responseText||'';
+                                  const hasProxy=t.indexOf('__RC__/proxy')>=0||t.indexOf('/proxy?src=')>=0||t.indexOf('.m3u8')>=0;
+                                  console.log('[HOOK] XHR-resp status='+xhr.status+' len='+t.length+' proxy='+hasProxy+' preview='+t.slice(0,400).replace(/\n/g,' '));
+                                }catch(e){ console.log('[HOOK] XHR-resp-err '+e.message); }
+                                if(prev) return prev.apply(this, arguments);
+                              };
+                              if(xhr.addEventListener) xhr.addEventListener('load', onLoad, false); else xhr.onload=onLoad;
+                            }catch(_){}
+                            return oSend.apply(this, arguments);
+                          };
+                          document.addEventListener('submit', function(e){
+                            try{ console.log('[HOOK] submit action='+(e.target&&e.target.action||'')+' method='+(e.target&&e.target.method||'')); }catch(_){}
+                          }, true);
+                          window.addEventListener('error', function(e){ try{ console.log('[HOOK] window-error '+e.message+' @'+(e.filename||'').slice(0,80)+':'+e.lineno); }catch(_){} }, true);
+                          window.addEventListener('unhandledrejection', function(e){ try{ console.log('[HOOK] unhandledrejection '+(e.reason&&e.reason.message||String(e.reason)).slice(0,300)); }catch(_){} }, true);
+                          // v232: intercepta navegação (o form action="?" sem preventDefault
+                          // causa GET server.php? e o reload perde o handler do botão).
+                          window.addEventListener('beforeunload', function(){ try{ console.log('[HOOK] beforeunload href='+location.href.slice(0,120)); }catch(_){} }, true);
+                          document.addEventListener('click', function(e){
+                            try{
+                              const t=e.target;
+                              console.log('[HOOK] click tag='+(t&&t.tagName||'')+' id='+(t&&t.id||'')+' class='+(t&&t.className||'').toString().slice(0,60)+' prevented='+e.defaultPrevented+' trusted='+e.isTrusted);
+                            }catch(_){}
+                          }, true);
+                          // v232c: loga criação de <video> / <source> e mutações do #player
+                          try{
+                            const obs=new MutationObserver(function(muts){
+                              muts.forEach(function(m){
+                                m.addedNodes.forEach(function(n){
+                                  try{
+                                    const tag=n.tagName||'';
+                                    const src=n.src||n.currentSrc||'';
+                                    console.log('[HOOK] dom-add tag='+tag+' src='+String(src).slice(0,200)+' html='+String(n.outerHTML||'').slice(0,300).replace(/\n/g,' '));
+                                  }catch(_){}
+                                });
+                                if(m.type==='attributes' && m.target.tagName==='VIDEO'){
+                                  try{ console.log('[HOOK] video-attr '+m.attributeName+'='+String(m.target.getAttribute(m.attributeName)).slice(0,200)); }catch(_){}
+                                }
+                              });
+                            });
+                            obs.observe(document.documentElement||document.body, {childList:true, subtree:true, attributes:true, attributeFilter:['src','currentSrc']});
+                            console.log('[HOOK] mutation-observer installed');
+                          }catch(e){ console.log('[HOOK] observer-err '+e.message); }
+                          try{
+                            const origCreate=document.createElement.bind(document);
+                            document.createElement=function(tag){
+                              const el=origCreate(tag);
+                              if(String(tag).toLowerCase()==='video' || String(tag).toLowerCase()==='source'){
+                                console.log('[HOOK] createElement '+tag);
+                                try{
+                                  const desc=Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype,'src')||Object.getOwnPropertyDescriptor(HTMLVideoElement.prototype,'src');
+                                  if(desc&&desc.set){
+                                    let origSet=desc.set;
+                                    Object.defineProperty(el,'src',{set:function(v){ console.log('[HOOK] video.src set '+String(v).slice(0,300)); return origSet.call(this,v); }, get:desc.get, configurable:true});
+                                  }
+                                }catch(_){}
+                              }
+                              return el;
+                            };
+                          }catch(e){ console.log('[HOOK] createElement-hook-err '+e.message); }
+                          console.log('[HOOK] installed href='+location.href.slice(0,120));
+                        }catch(e){ console.log('[HOOK] install-err '+e.message); }
+                    })();""".trimIndent()
                     webViewClient = object : WebViewClient() {
                         override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
                             Log.w(TAG, "[CF_WV] onRenderProcessGone seguro acionado (didCrash=${detail?.didCrash()})")
@@ -136,7 +352,17 @@ object WebViewStreamProxy {
 
                         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                             super.onPageStarted(view, url, favicon)
-                            view?.evaluateJavascript(CloudflareSolver.ANTI_DETECTION_JS, null)
+                            try { view?.evaluateJavascript(CloudflareSolver.ANTI_DETECTION_JS, null) } catch(_: Throwable) {}
+                            try { view?.evaluateJavascript(hookJs, null) } catch(_: Throwable) {}
+                        }
+
+                        override fun onPageFinished(view: WebView?, finishedUrl: String?) {
+                            super.onPageFinished(view, finishedUrl)
+                            CookieManager.getInstance().flush()
+                            try { view?.evaluateJavascript(CloudflareSolver.ANTI_DETECTION_JS, null) } catch(_: Throwable) {}
+                            try { view?.evaluateJavascript(hookJs, null) } catch(_: Throwable) {}
+                            pageReady.set(true)
+                            Log.d(TAG, "[PROXY] onPageFinished url=$finishedUrl")
                         }
 
                         // v229e: deixa a navegação pós-click ACONTECER (não contém) mas
@@ -159,14 +385,19 @@ object WebViewStreamProxy {
                             request: WebResourceRequest
                         ): WebResourceResponse? {
                             val u = request.url.toString()
-                            // v229: loga chamadas de API do bundle do player (dt.api/
-                            // serverforms/query/redirect) — visibilidade do fluxo real.
-                            if ((u.contains(".api", true) || u.contains("query", true) ||
-                                u.contains("bundle", true) || u.contains("serverforms", true) ||
-                                u.contains("dt.", true) || u.contains("getvid", true) ||
-                                u.contains("getlink", true) || u.contains("redirect", true)) &&
-                                !u.contains("google", true)) {
-                                Log.i(TAG, "[PROXY_API] ${request.method} ${u.take(220)}")
+                            // v232: loga TODA navegação/requisição do server.php (não só .api)
+                            // — o body script pode fazer GET a server.php?action=... sem sufixo .api.
+                            if (!u.contains("google", true) && !u.contains("disqus", true) && !u.contains("facebook", true) && !u.contains("gstatic", true)) {
+                                // evita spam de fonte/css mas mantém XHR/fetch visíveis
+                                val isApi = u.contains(".api", true) || u.contains("query", true) ||
+                                    u.contains("bundle", true) || u.contains("serverforms", true) ||
+                                    u.contains("dt.", true) || u.contains("getvid", true) ||
+                                    u.contains("getlink", true) || u.contains("redirect", true) ||
+                                    u.contains("server.php", true) || u.contains("__RC__", true) ||
+                                    u.contains("proxy", true) || u.contains(".m3u8", true) || u.contains(".mp4", true)
+                                if (isApi || request.method != "GET" || u.contains("player3", true)) {
+                                    Log.i(TAG, "[PROXY_REQ] ${request.method} ${if (request.isForMainFrame) "MAIN " else ""}${u.take(320)}")
+                                }
                             }
                                    val isMediaStream = (u.contains("__RC__/proxy", true) || u.contains("/proxy?src=", true) ||
                                 u.contains("p12-common-sign", true) || u.contains("xn--l", true) ||
@@ -189,13 +420,6 @@ object WebViewStreamProxy {
                             return super.shouldInterceptRequest(view, request)
                         }
 
-                        override fun onPageFinished(view: WebView?, finishedUrl: String?) {
-                            super.onPageFinished(view, finishedUrl)
-                            CookieManager.getInstance().flush()
-                            view?.evaluateJavascript(CloudflareSolver.ANTI_DETECTION_JS, null)
-                            pageReady.set(true)
-                            Log.d(TAG, "[PROXY] onPageFinished url=$finishedUrl")
-                        }
                     }
                 }
                 wv = view
@@ -257,54 +481,156 @@ object WebViewStreamProxy {
                                     const b = document.getElementById('submit') || document.querySelector('.captcha_button');
                                     const hasFn = (typeof window.rcPreloadPlayer === 'function');
                                     if (!b || !hasFn) return 'wait';
-                                    // v229e: o submit do recap navega para "server.php?" (query
-                                    // perdida = 520). Bloqueia a navegação com shouldOverrideUrl-
-                                    // Loading no NÍVEL NATIVO (não compete com handlers JS do
-                                    // bundle — o handler do botão roda intacto, só a navegação
-                                    // resultante é contida e o player monta no DOM atual).
-                                    b.click();
-                                    return 'click';
+                                    // v230: retorna coordenadas do botão para toque REAL via
+                                    // dispatchTouchEvent — b.click() sintético não aciona o
+                                    // handler do bundle (v229: 45s sem API após click).
+                                    // v231: validação de visibilidade — offsetParent!==null,
+                                    // rect dentro do viewport, w/h > 0 e scrollIntoView para
+                                    // garantir layout resolvido. WebView MATCH_PARENT dá
+                                    // viewport real (1x1 retornava coords fora da view).
+                                    if (b.offsetParent === null) return 'hidden';
+                                    b.scrollIntoView({block:'center'});
+                                    const r = b.getBoundingClientRect();
+                                    const cx = r.left + r.width/2, cy = r.top + r.height/2;
+                                    if (r.width <= 0 || r.height <= 0) return 'zerosize';
+                                    if (cx < 0 || cy < 0 || cx > window.innerWidth || cy > window.innerHeight) return 'offscreen:' + Math.round(cx) + ':' + Math.round(cy);
+                                    return 'tap:' + cx + ':' + cy;
                                 })();""".trimIndent()
                             ) { res ->
                                 val r = res?.removeSurrounding("\"")
                                 Log.i(TAG, "[PROXY] click recap -> $r")
-                                if (r?.startsWith("cf:") == true) {
+                                // v230: toque REAL (DOWN+UP) nas coordenadas — serve tanto
+                                // para o Turnstile (cf:x:y) quanto para o botão recap
+                                // (tap:x:y). b.click() sintético não aciona o handler.
+                                if (r?.startsWith("cf:") == true || r?.startsWith("tap:") == true) {
                                     val parts = r.split(":")
                                     val x = parts.getOrNull(1)?.toFloatOrNull() ?: 50f
                                     val y = parts.getOrNull(2)?.toFloatOrNull() ?: 50f
                                     val downTime = SystemClock.uptimeMillis()
-                                    val eventDown = MotionEvent.obtain(
-                                        downTime, downTime,
-                                        MotionEvent.ACTION_DOWN,
-                                        x, y,
-                                        0.85f, 0.85f, 0, 1.0f, 1.0f, 0, 0
-                                    ).apply { source = android.view.InputDevice.SOURCE_TOUCHSCREEN }
-                                    wvNow.dispatchTouchEvent(eventDown)
-                                    eventDown.recycle()
+                                    // v231: validação — coords CSS precisam cair dentro da
+                                    // view nativa (coords fora = layout 1x1/scaling; o
+                                    // dispatchTouchEvent seria descartado em silêncio).
+                                    val vw = wvNow.width.toFloat()
+                                    val vh = wvNow.height.toFloat()
+                                    val scale = wvNow.scale
+                                    val vx = x * scale
+                                    val vy = y * scale
+                                    if (vx < 0 || vy < 0 || vx > vw || vy > vh) {
+                                        Log.w(TAG, "[PROXY] toque fora da view: css=($x,$y) scale=$scale view=(${vw}x$vh) — aguardando layout")
+                                        lastClickMs = now // retry: não marca clickDone
+                                    } else {
+                                        Log.i(TAG, "[PROXY] toque válido: css=($x,$y) -> view=($vx,$vy) view=(${vw}x$vh)")
+                                        // Sequência DOWN -> MOVE -> UP (gesto de toque real,
+                                        // não tap instantâneo — o bundle pode validar movimento)
+                                        val props = arrayOf(
+                                            MotionEvent.PointerProperties().apply {
+                                                id = 0
+                                                toolType = MotionEvent.TOOL_TYPE_FINGER
+                                            }
+                                        )
+                                        val coordsDown = arrayOf(
+                                            MotionEvent.PointerCoords().apply {
+                                                this.x = vx
+                                                this.y = vy
+                                                pressure = 1f
+                                                size = 1f
+                                            }
+                                        )
+                                        val eventDown = MotionEvent.obtain(
+                                            downTime, downTime,
+                                            MotionEvent.ACTION_DOWN, 1,
+                                            props, coordsDown,
+                                            0, 0, 1f, 1f, 0, 0, 0, 0
+                                        ).apply { source = android.view.InputDevice.SOURCE_TOUCHSCREEN }
+                                        wvNow.dispatchTouchEvent(eventDown)
+                                        eventDown.recycle()
 
-                                    val eventUp = MotionEvent.obtain(
-                                        downTime, downTime + 80,
-                                        MotionEvent.ACTION_UP,
-                                        x + 0.5f, y + 0.5f,
-                                        0f, 0f, 0, 1.0f, 1.0f, 0, 0
-                                    ).apply { source = android.view.InputDevice.SOURCE_TOUCHSCREEN }
-                                    wvNow.dispatchTouchEvent(eventUp)
-                                    eventUp.recycle()
-                                    Log.i(TAG, "[PROXY] Turnstile checkbox clicado no server.php em ($x, $y)")
-                                }
-                                if (r == "click") {
-                                    clickDone.set(true)
-                                    clickDoneAtMs = now
+                                        val coordsMove = arrayOf(
+                                            MotionEvent.PointerCoords().apply {
+                                                this.x = vx + 1f
+                                                this.y = vy + 1f
+                                                pressure = 1f
+                                                size = 1f
+                                            }
+                                        )
+                                        val eventMove = MotionEvent.obtain(
+                                            downTime, downTime + 40,
+                                            MotionEvent.ACTION_MOVE, 1,
+                                            props, coordsMove,
+                                            0, 0, 1f, 1f, 0, 0, 0, 0
+                                        ).apply { source = android.view.InputDevice.SOURCE_TOUCHSCREEN }
+                                        wvNow.dispatchTouchEvent(eventMove)
+                                        eventMove.recycle()
+
+                                        val eventUp = MotionEvent.obtain(
+                                            downTime, downTime + 80,
+                                            MotionEvent.ACTION_UP,
+                                            vx + 0.5f, vy + 0.5f,
+                                            0f, 0f, 0, 1.0f, 1.0f, 0, 0
+                                        ).apply { source = android.view.InputDevice.SOURCE_TOUCHSCREEN }
+                                        wvNow.dispatchTouchEvent(eventUp)
+                                        eventUp.recycle()
+                                    }
+                                    if (r.startsWith("cf:")) {
+                                        Log.i(TAG, "[PROXY] Turnstile checkbox clicado no server.php em ($x, $y)")
+                                    } else {
+                                        Log.i(TAG, "[PROXY] toque real no recap em ($x, $y)")
+                                        clickDone.set(true)
+                                        clickDoneAtMs = now
+                                        // v231: prova do pós-click — 2s após o toque, espelha
+                                        // o innerHTML do <body> na RAM (o outerHTML espelhado
+                                        // no PROXY_STATE traz só <head>; os scripts recriam
+                                        // o body — player, video, __RC__/proxy — via JS).
+                                        wvNow.postDelayed({
+                                            try {
+                                                wvNow.evaluateJavascript(
+                                                    """(function() {
+                                                        try {
+                                                            const b = document.body ? document.body.innerHTML : '';
+                                                            const v = document.querySelector('video');
+                                                            const vsrc = v ? (v.currentSrc || v.src || '') : '';
+                                                            const inl = Array.from(document.querySelectorAll('script:not([src])')).map(s => s.textContent || '').join('\n');
+                                                            // v232: fatiado em 3 partes de ~60KB (limite do
+                                                            // evaluateJavascript/JNI estoura em ~120KB e
+                                                            // trunca o retorno — o inline full tem ~290KB).
+                                                            const p1 = inl.substring(0,60000), p2 = inl.substring(60000,120000), p3 = inl.substring(120000,180000);
+                                                            return 'BODY len=' + b.length + ' video=' + (vsrc.substring(0,100) || 'none') + ' INLINE len=' + inl.length + ' ||BODYHTML||' + b.substring(0,20000) + '||P1||' + p1 + '||P2||' + p2 + '||P3||' + p3;
+                                                        } catch(e) { return 'BODY ERR ' + e.message; }
+                                                    })();""".trimIndent()
+                                                ) { res2 ->
+                                                    try {
+                                                        val c2 = res2?.removeSurrounding("\"").orEmpty()
+                                                        Log.i(TAG, "[PROXY_POSTCLICK] " + c2.substringBefore("||BODYHTML||").take(200))
+                                                        fun unesc(s: String) = s.replace("\\u003C", "<").replace("\\u003E", ">")
+                                                            .replace("\\\"", "\"").replace("\\n", "\n")
+                                                        val bodyHtml = unesc(c2.substringAfter("||BODYHTML||", "").substringBefore("||INLINE||", ""))
+                                                        if (bodyHtml.length > 200) {
+                                                            CloudflareSolver.mirrorServerPhpHtml(serverPhpUrl + "#body", bodyHtml)
+                                                        }
+                                                        // v232: remonta o inline fatiado (P1+P2+P3) e grava
+                                                        // em partes (mirror tem threshold mínimo).
+                                                        val p1 = unesc(c2.substringAfter("||P1||", "").substringBefore("||P2||", ""))
+                                                        val p2 = unesc(c2.substringAfter("||P2||", "").substringBefore("||P3||", ""))
+                                                        val p3 = unesc(c2.substringAfter("||P3||", ""))
+                                                        Log.i(TAG, "[PROXY_POSTCLICK] fatias inline: p1=${p1.length} p2=${p2.length} p3=${p3.length}")
+                                                        if (p1.length > 5000) {
+                                                            CloudflareSolver.mirrorServerPhpHtml(serverPhpUrl + "#inline", p1 + p2 + p3)
+                                                        }
+                                                    } catch (_: Throwable) {}
+                                                }
+                                            } catch (_: Throwable) {}
+                                        }, 2000)
+                                    }
                                 }
                             }
                         } catch (_: Throwable) {}
                     }
                 }
 
-                // 2) Fallback: re-clica no BOTÃO 3s após o click inicial, se nada capturou.
-                // v229d: removida a chamada direta window.rcPreloadPlayer(Date.now()) —
-                // ela rejeita com "Error: 7a2f" e envenena o player (diag 12:14 provou).
-                // Se o DOM ainda tem o botão, um 2º click via handler oficial é seguro.
+                // 2) Fallback: re-deriva as coordenadas do botão e re-toca 3s após
+                // o toque inicial, se nada capturou. v229d: sem chamada direta
+                // rcPreloadPlayer (Error: 7a2f); v230: sem b.click() sintético.
+                // v231: validação de viewport + scrollIntoView, mesma do toque inicial.
                 if (clickDone.get() && !captured.get() && !directFallbackDone && now - lastClickMs >= DIRECT_FALLBACK_MS && now - lastDirectFallbackMs >= DIRECT_FALLBACK_MS) {
                     lastDirectFallbackMs = now
                     directFallbackDone = true
@@ -313,12 +639,39 @@ object WebViewStreamProxy {
                             wvNow.evaluateJavascript(
                                 """(function() {
                                     const b = document.getElementById('submit') || document.querySelector('.captcha_button');
-                                    if (b && b.offsetParent !== null) { b.click(); return 'reclick'; }
-                                    return 'no-btn';
+                                    if (!b || b.offsetParent === null) return 'no-btn';
+                                    b.scrollIntoView({block:'center'});
+                                    const r = b.getBoundingClientRect();
+                                    const cx = r.left + r.width/2, cy = r.top + r.height/2;
+                                    if (r.width <= 0 || r.height <= 0) return 'zerosize';
+                                    if (cx < 0 || cy < 0 || cx > window.innerWidth || cy > window.innerHeight) return 'offscreen';
+                                    return 'retap:' + cx + ':' + cy;
                                 })();""".trimIndent()
                             ) { res ->
-                                if (res?.contains("reclick") == true) {
-                                    Log.i(TAG, "[PROXY] recap re-clicado (fallback via botão)")
+                                val rr = res?.removeSurrounding("\"").orEmpty()
+                                if (rr.startsWith("retap:")) {
+                                    val parts = rr.split(":")
+                                    val x = parts.getOrNull(1)?.toFloatOrNull() ?: 0f
+                                    val y = parts.getOrNull(2)?.toFloatOrNull() ?: 0f
+                                    val downTime = SystemClock.uptimeMillis()
+                                    val vw = wvNow.width.toFloat()
+                                    val vh = wvNow.height.toFloat()
+                                    val scale = wvNow.scale
+                                    val vx = x * scale
+                                    val vy = y * scale
+                                    if (vx < 0 || vy < 0 || vx > vw || vy > vh) {
+                                        Log.w(TAG, "[PROXY] fallback fora da view: css=($x,$y) view=(${vw}x$vh)")
+                                    } else {
+                                        val down = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, vx, vy, 0.85f, 0.85f, 0, 1.0f, 1.0f, 0, 0)
+                                            .apply { source = android.view.InputDevice.SOURCE_TOUCHSCREEN }
+                                        wvNow.dispatchTouchEvent(down)
+                                        down.recycle()
+                                        val up = MotionEvent.obtain(downTime, downTime + 80, MotionEvent.ACTION_UP, vx + 0.5f, vy + 0.5f, 0f, 0f, 0, 1.0f, 1.0f, 0, 0)
+                                            .apply { source = android.view.InputDevice.SOURCE_TOUCHSCREEN }
+                                        wvNow.dispatchTouchEvent(up)
+                                        up.recycle()
+                                        Log.i(TAG, "[PROXY] recap re-tocado (fallback) css=($x,$y) view=($vx,$vy)")
+                                    }
                                 }
                             }
                         } catch (_: Throwable) {}
@@ -327,9 +680,55 @@ object WebViewStreamProxy {
 
                 // 3) Poll via performance entries & DOM vídeo (fallback não-bloqueante)
                 // v229: sonda de estado do player a cada ~5s (alimenta playerMounted).
+                // v232e: sonda 100% dos fetch bodies (inclui serverforms vazio len=52)
+                // para diagnóstico de túnel Redemovel caído — usa 2 polls simples com unescape.
                 if (!captured.get()) {
                     val elapsed = now - startMs
                     val isDiagTick = elapsed > 0 && (elapsed / 5000L) != ((elapsed - POLL_INTERVAL_MS) / 5000L)
+                    // fast-path: hook capturou https via fetch body
+                    withContext(Dispatchers.Main) {
+                        try {
+                            wvNow.evaluateJavascript("""(function(){try{return window.__rcCaptured||'';}catch(e){return '';}})();""".trimIndent()) { r ->
+                                val f = r?.removeSurrounding("\"").orEmpty()
+                                    .replace("\\u003C", "<").replace("\\u003E", ">").replace("\\\"", "\"")
+                                if (f.isNotBlank() && f != "null" && f.length > 10 && !captured.get()) {
+                                    val isUrl = f.contains("http", true) || f.contains("__RC__", true) || f.contains("tos-alisg", true) || f.contains("/proxy", true)
+                                    if (isUrl || f.startsWith("http")) {
+                                        streamUrl = f
+                                        captured.set(true)
+                                        captureHolder.set(true)
+                                        Log.i(TAG, "[PROXY] Stream capturado via __rcCaptured: ${f.take(250)}")
+                                        try {
+                                            val ctx = com.lagradost.cloudstream3.CommonActivity.activity ?: CommonActivity.activity?.applicationContext
+                                            ctx?.let { c -> java.io.File(c.filesDir, "redecanais_af_last_stream_url.txt").writeText(f) }
+                                        } catch (_: Throwable) {}
+                                    }
+                                }
+                            }
+                        } catch (_: Throwable) {}
+                    }
+                    // v232e: diagnóstico de túnel — loga último fetch body mesmo sem proxy
+                    // (serverforms len=52 [] indica backend sem stream / RCIP expirado)
+                    if (isDiagTick) {
+                        withContext(Dispatchers.Main) {
+                            try {
+                                wvNow.evaluateJavascript("""(function(){
+                                    try{
+                                      const u=window.__rcLastFetchUrl||'';
+                                      const b=(window.__rcLastFetchBody||'').slice(0,1200);
+                                      const s=window.__rcLastFetchStatus||0;
+                                      const ct=window.__rcLastFetchCt||'';
+                                      const ck=document.cookie.slice(0,300);
+                                      return 'url='+u.slice(0,180)+' | st='+s+' ct='+ct.slice(0,30)+' | ck='+ck+' | body='+b.replace(/\n/g,' ');
+                                    }catch(e){return 'err '+e.message;}
+                                })();""".trimIndent()) { r ->
+                                    val s = r?.removeSurrounding("\"").orEmpty()
+                                        .replace("\\u003C","<").replace("\\u003E",">").replace("\\\"","\"").replace("\\n"," ")
+                                    Log.i(TAG, "[PROXY_DIAG] t=${elapsed}ms $s")
+                                }
+                            } catch (_: Throwable) {}
+                        }
+                    }
                     withContext(Dispatchers.Main) {
                         try {
                             wvNow.evaluateJavascript(
@@ -371,6 +770,10 @@ object WebViewStreamProxy {
                             }
                             // v229: sonda de estado do player a cada ~5s — alimenta
                             // playerMounted (bloqueia reload enquanto o bundle monta).
+                            // v231: também espelha o DOM do server.php na RAM do solver
+                            // (o solver nunca captura server.php — só o detalhe — então
+                            // o SERVERPHP_HTML tinha dumped=null; com o espelho o
+                            // StreamResolver inspeciona forms/scripts do player real).
                             if (isDiagTick) {
                                 wvNow.evaluateJavascript(
                                     """(function() {
@@ -380,15 +783,26 @@ object WebViewStreamProxy {
                                             const rcFn = (typeof window.rcPreloadPlayer === 'function');
                                             const v = document.querySelector('video');
                                             const vSrc = v ? ((v.currentSrc || v.src || '').substring(0,80)) : '';
-                                            return 'player btn=' + btnVisible + ' | rcFn=' + rcFn + ' | video=' + (vSrc || 'none') + ' | title=' + document.title.substring(0,50);
+                                            const html = document.documentElement ? document.documentElement.outerHTML : '';
+                                            return 'player btn=' + btnVisible + ' | rcFn=' + rcFn + ' | video=' + (vSrc || 'none') + ' | title=' + document.title.substring(0,50) + ' ||HTML||' + html.substring(0,60000);
                                         } catch(e) { return 'player ERR ' + e.message; }
                                     })();""".trimIndent()
                                 ) { res ->
                                     val clean = res?.removeSurrounding("\"").orEmpty()
-                                    Log.i(TAG, "[PROXY_STATE] t=${elapsed}ms $clean")
+                                    val state = clean.substringBefore("||HTML||")
+                                    Log.i(TAG, "[PROXY_STATE] t=${elapsed}ms $state")
                                     // player montado = btn visível + rcPreloadPlayer function —
                                     // enquanto montado, o retry NÃO recarrega (mata a montagem).
-                                    playerMounted.set(clean.contains("btn=true") && clean.contains("rcFn=true"))
+                                    playerMounted.set(state.contains("btn=true") && state.contains("rcFn=true"))
+                                    // espelho do DOM na RAM (1x por ciclo basta)
+                                    try {
+                                        val htmlPart = clean.substringAfter("||HTML||", "")
+                                            .replace("\\u003C", "<").replace("\\u003E", ">")
+                                            .replace("\\\"", "\"").replace("\\n", "\n")
+                                        if (htmlPart.length > 5000 && !captured.get()) {
+                                            CloudflareSolver.mirrorServerPhpHtml(serverPhpUrl, htmlPart)
+                                        }
+                                    } catch (_: Throwable) {}
                                 }
                             }
                         } catch (_: Throwable) {}

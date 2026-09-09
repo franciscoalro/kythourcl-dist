@@ -218,6 +218,27 @@ internal class StreamResolver(
                 (!CloudflareSolver.isChallengeContent(dumped) || isPlayerHtml(dumped))
             if (dumpedOk) {
                 Log.i(TAG, "[SERVERPHP_HTML] usando HTML da RAM len=${dumped!!.length}")
+                // v231: despejo verboso 1x por processo — forms, botão recap,
+                // scripts e iframes do server.php (o que o recap exige p/ montar).
+                if (!CloudflareSolver.verboseDumpDone) {
+                    CloudflareSolver.verboseDumpDone = true
+                    try {
+                        val doc = org.jsoup.Jsoup.parse(dumped, url)
+                        val forms = doc.select("form").map {
+                            "action=" + it.attr("action").take(80) + " method=" + it.attr("method") +
+                                " inputs=" + it.select("input").map { i -> (i.attr("name").ifBlank { i.attr("id") }).take(30) + ":" + i.attr("value").take(30) }.joinToString(",").take(300)
+                        }
+                        Log.i(TAG, "[SERVERPHP_STRUCT] forms=${forms.size} " + forms.take(4).joinToString(" || ").take(900))
+                        val btn = doc.select("#submit, .captcha_button").firstOrNull()
+                        Log.i(TAG, "[SERVERPHP_STRUCT] btn=" + (btn?.let { it.tagName() + "#" + it.id() + "." + it.className().take(40) + " type=" + it.attr("type") + " txt=" + it.text().take(60) } ?: "AUSENTE"))
+                        val scripts = doc.select("script[src]").map { it.attr("src").take(90) }
+                        Log.i(TAG, "[SERVERPHP_STRUCT] scripts=${scripts.size} " + scripts.take(10).joinToString(",").take(700))
+                        val ifr = doc.select("iframe[src]").map { it.attr("src").take(120) }
+                        Log.i(TAG, "[SERVERPHP_STRUCT] iframes=${ifr.size} " + ifr.take(6).joinToString(" | ").take(700))
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "[SERVERPHP_STRUCT] falhou: ${e.message}")
+                    }
+                }
                 if (extractDirectStreamsFromHtml(dumped, url, serverLabel, callback)) {
                     return true
                 }

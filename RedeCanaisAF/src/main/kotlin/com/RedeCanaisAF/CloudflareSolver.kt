@@ -450,6 +450,34 @@ object CloudflareSolver {
     // v229: retorna o HTML do server.php capturado na RAM e persiste em arquivo
     // para inspeção (o server.php de ~1MB nunca vai ao cache de disco por design —
     // cap 600KB + só catálogo).
+    // v231: despejo verboso uma única vez por processo — o server.php interessa
+    // ao diagnóstico do player (quais forms/scripts o recap exige).
+    @Volatile var verboseDumpDone = false
+
+    // v231: espelho do DOM do server.php vindo do WebView do proxy (o solver
+    // nunca captura server.php — só o detalhe — então o SERVERPHP_HTML tinha
+    // dumped=null). Persiste em arquivo para inspeção direta.
+    // v232: arquivos separados por sufixo (#body/#inline/head) — antes todos
+    // escreviam no mesmo arquivo e se sobrescreviam (perdemos o inline full).
+    fun mirrorServerPhpHtml(url: String, html: String) {
+        try {
+            if (html.length < 5000 && !url.contains("#")) return
+            val base = url.substringBefore("#")
+            capturedHtmlByUrl[base] = html
+            val ctx = appContext ?: CommonActivity.activity ?: return
+            val suffix = when {
+                url.endsWith("#body") -> "_body"
+                url.endsWith("#inline") -> "_inline"
+                else -> "_head"
+            }
+            val f = java.io.File(ctx.filesDir, "redecanais_af_dump_serverphp$suffix.html")
+            f.writeText(html)
+            android.util.Log.i(TAG, "[SERVERPHP_MIRROR] url=$url len=${html.length} file=${f.absolutePath}")
+        } catch (e: Throwable) {
+            android.util.Log.w(TAG, "[SERVERPHP_MIRROR] falhou: ${e.message}")
+        }
+    }
+
     fun dumpCapturedHtml(url: String, tag: String): String? {
         return try {
             val html = capturedHtmlByUrl[url] ?: return null
