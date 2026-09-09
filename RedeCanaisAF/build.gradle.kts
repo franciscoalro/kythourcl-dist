@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v234: deterministic proxy WebView cleanup; bound diagnostic fetch cloning.
+// v235: retry observed legacy poster directory after guessed path fails.
 cloudstream {
-    version = 234
+    version = 235
 }

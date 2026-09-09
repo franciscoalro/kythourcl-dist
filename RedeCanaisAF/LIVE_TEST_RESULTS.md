@@ -58,6 +58,17 @@ A execução posterior no app v233 (PID 22395) capturou simultaneamente páginas
 
 `WebViewStreamProxy.shutdown()` continha um bloco de limpeza inalcançável, pois lia `webView` depois de atribuir `null`. A limpeza anterior dependia da Activity atual. O patch guarda a referência antes de limpá-la e executa stop/detach/destroy na thread Main independentemente da Activity atual. Também deixa de clonar e converter para texto todas as respostas `fetch`; a inspeção de corpo fica limitada a endpoints de metadados (`serverforms.api`/`dt.api`) com `Content-Length` de até 1 MiB. A URL de stream continua capturada no `shouldInterceptRequest`. Isso evita uma amplificação de memória demonstrável no código, mas não prova que ela era a única origem do PSS observado. Não altera cookies, fingerprint ou resolução da API e não é apresentado como correção comprovada de playback ou dos encerramentos por memória.
 
+## Capas — v235
+
+A busca dinâmica fornece apenas título e URL, sem caminho de imagem. O fallback anterior inventava `/imgs-videos/Series/<título>.jpg`. No teste real com `Batman`, quatro URLs inventadas falharam tanto em OkHttp quanto no WebView. A página real do episódio de `A Sombra do Batman` expõe `og:image=/imgs-videos/Legado/A%20Sombra%20do%20Batman.jpg`; essa URL respondeu HTTP 200, `image/jpeg`, 163508 bytes.
+
+A v235 tenta `/imgs-videos/Legado/<título>.jpg` somente depois da falha observada em `/Series/` ou `/Desenhos/`. No Android real, recuperou:
+
+- `A Sombra do Batman`: 163508 bytes;
+- `As Novas Aventuras do Batman`: 196074 bytes.
+
+`As Aventuras do Batman` e `Batman` continuaram 404 também em `Legado`; portanto, a correção melhora capas comprovadamente existentes sem alegar cobertura total. O helper de imagem também é destruído antes de criar o WebView de playback para reduzir sobreposição de renderers sob pressão de memória.
+
 ## Limites e reprodução do teste
 
 Os testes comportamentais acima usaram o candidato local com a correção de busca; a versão final 233 inclui a mesma lógica e proteção adicional contra callback após encerramento. Compilar com `./gradlew :RedeCanaisAF:make`, instalar o `.cs3`, reiniciar o app, pesquisar `Batman`, abrir a série e tocar no primeiro episódio. Comparar logs novos, não reaproveitar linhas de execuções anteriores.

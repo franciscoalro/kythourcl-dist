@@ -73,6 +73,9 @@ object WebViewStreamProxy {
     @SuppressLint("SetJavaScriptEnabled")
     suspend fun captureAndServe(serverPhpUrl: String): String? {
         shutdown() // limpa estado anterior
+        // Poster fetches have already completed before playback. Release their helper
+        // renderer so the full-size hardware player WebView does not overlap it.
+        LocalImageProxy.shutdownHelper()
 
         val activity: Activity? = CommonActivity.activity
         if (activity == null || activity.isFinishing || activity.isDestroyed) {

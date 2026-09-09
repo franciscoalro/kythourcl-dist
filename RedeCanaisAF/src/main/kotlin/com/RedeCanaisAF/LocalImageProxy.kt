@@ -2,6 +2,8 @@ package com.RedeCanaisAF
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.os.Handler
+import android.os.Looper
 import android.util.Base64
 import android.util.Log
 import android.view.ViewGroup
@@ -170,13 +172,28 @@ object LocalImageProxy {
             }
 
             // 3. Fallback: Fetch via WebView + JavascriptInterface Bridge
-            val bytes = fetchImageBytes(targetUrl)
-            if (bytes != null && bytes.isNotEmpty()) {
+            var resolvedUrl = targetUrl
+            var bytes = fetchImageBytes(targetUrl)
+            // Search index rows contain no poster path. Older series/details expose
+            // the same filename under /Legado/ instead of the guessed /Series/ or
+            // /Desenhos/ path. Retry only after the observed primary URL fails.
+            if (bytes == null || bytes.isEmpty()) {
+                val legacyUrl = targetUrl
+                    .replace("/imgs-videos/Series/", "/imgs-videos/Legado/")
+                    .replace("/imgs-videos/Desenhos/", "/imgs-videos/Legado/")
+                if (legacyUrl != targetUrl) {
+                    Log.i(TAG, "[IMG_PROXY] Tentando fallback Legado para $targetUrl")
+                    bytes = tryDirectOkHttp(legacyUrl) ?: fetchImageBytes(legacyUrl)
+                    if (bytes != null && bytes.isNotEmpty()) resolvedUrl = legacyUrl
+                }
+            }
+            val finalBytes = bytes
+            if (finalBytes != null && finalBytes.isNotEmpty()) {
                 try {
-                    cachedFile?.writeBytes(bytes)
+                    cachedFile?.writeBytes(finalBytes)
                 } catch (_: Throwable) {}
-                Log.i(TAG, "[IMG_PROXY] Sucesso via WebView! Servindo ${bytes.size} bytes para $targetUrl")
-                sendResponse(socket, bytes)
+                Log.i(TAG, "[IMG_PROXY] Sucesso via fallback! Servindo ${finalBytes.size} bytes de $resolvedUrl")
+                sendResponse(socket, finalBytes)
             } else {
                 Log.w(TAG, "[IMG_PROXY] Falha total para $targetUrl (404)")
                 send404(socket)
@@ -372,6 +389,19 @@ object LocalImageProxy {
 
     @Suppress("DEPRECATION")
     @SuppressLint("SetJavaScriptEnabled")
+    fun shutdownHelper() {
+        val wv = synchronized(this) { helperWebView.also { helperWebView = null } } ?: return
+        isHelperReady.set(false)
+        val cleanup = Runnable {
+            runCatching { wv.stopLoading() }
+            runCatching { (wv.parent as? ViewGroup)?.removeView(wv) }
+            runCatching { wv.destroy() }
+            Log.i(TAG, "[IMG_PROXY] Helper WebView destruído")
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) cleanup.run()
+        else Handler(Looper.getMainLooper()).post(cleanup)
+    }
+
     fun ensureHelperWebView(activity: Activity) {
         if (helperWebView != null) return
         try {
