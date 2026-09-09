@@ -198,7 +198,7 @@ object WebViewStreamProxy {
                                         console.log('[HOOK] serverforms JSON keys='+Object.keys(j).join(',')+' vals='+JSON.stringify(j).slice(0,900));
                                         // detecta túnel caído: array vazio + code 204
                                         if(j.e18b73c9 && Array.isArray(j.e18b73c9) && j.e18b73c9.length===0){
-                                          console.log('[HOOK] TUNEL_VAZIO serverforms retornou e18b73c9=[] (204) — possível Redemovel/RCIP expirado ou túnel caiu');
+                                          console.log('[HOOK] TUNEL_VAZIO serverforms retornou e18b73c9=[] (código interno 204) — origem não determinada; pode ser sessão, disponibilidade ou política do servidor');
                                         }
                                         if(j.c4a0f6) console.log('[HOOK] c4a0f6 len='+(String(j.c4a0f6).length)+' preview='+String(j.c4a0f6).slice(0,150));
                                       }catch(e){ console.log('[HOOK] serverforms JSON parse err '+e.message); }

@@ -32,7 +32,16 @@ Player identificado pelo plugin: `RCFServer2`, `vid=ASMBRDBTMNEP01`.
 - O fallback de toque repetiu o mesmo resultado vazio.
 - 09:26:37.626: `[PROXY] Falha: nenhuma URL __RC__/proxy capturada em 45000 ms`.
 
-**Conclusão:** clique e chamada ao serviço comprovados; URL de vídeo e reprodução ExoPlayer **não comprovadas**. O `204` é um código no JSON, não o status HTTP dessa resposta. A causa da lista vazia (sessão, disponibilidade ou outra condição do servidor) não foi estabelecida. Não alegamos indisponibilidade global do site.
+Uma captura passiva posterior via Chrome DevTools Protocol (`Network.enable`) registrou a sequência completa do WebView, sem descriptografar, modificar ou fabricar respostas:
+
+1. `server.php` respondeu HTTP 200 e carregou o player.
+2. `serverforms.api?a6e91c4f=1...` respondeu HTTP 200 com `a91f0c7e=true`, `d34b8291=true`, timestamp e nonces.
+3. A chamada seguinte `serverforms.api?3c91e7a4=...` respondeu HTTP 200 com o código interno `204` e `e18b73c9=[]`.
+4. O mesmo ocorreu usando `RCFServer2` e o fallback `RCServer11`.
+5. Um segundo conteúdo de controle, `Batman Vs Superman: A Origem da Justiça - 2016` (`vid=BTMNVSPRMNAODJT`), também passou pela inicialização e retornou o mesmo array vazio em duas tentativas.
+6. `Network.requestWillBeSentExtraInfo` confirmou cookies de sessão ativos no WebView (`cf_clearance`, `RCIP`, `RCSESS`); valores foram omitidos e os arquivos brutos permanecem locais, modo 0600.
+
+**Conclusão:** clique, inicialização e chamadas ao serviço estão comprovados com dois conteúdos; URL de vídeo e reprodução ExoPlayer **não comprovadas**. O `204` é um código no JSON, não o status HTTP. A evidência descarta que o plugin tenha simplesmente deixado de acionar o botão ou a API. Ela ainda não distingue indisponibilidade do arquivo, política do servidor, sessão aceita parcialmente ou outro estado interno; portanto, não alegamos indisponibilidade global nem uma causa que os dados não provam.
 
 ## Limites e reprodução do teste
 
@@ -40,4 +49,4 @@ Os testes comportamentais acima usaram o candidato local com a correção de bus
 
 A varredura de oito títulos de 2026 não foi concluída nesta rodada; o título de controle permitiu testar o player sem depender de títulos ausentes do índice. Build bem-sucedido no CI não equivale a reprodução validada.
 
-Os logs brutos e capturas ficam locais em `/tmp/rc-live-search.log`, `/tmp/rc-batman.log`, `/tmp/rc-playback-final.log`, `/tmp/rc-playback.png`. Não são publicados porque os logs de player incluem cookies e tokens de sessão.
+Os logs brutos e capturas ficam locais em `/tmp/rc-live-search.log`, `/tmp/rc-batman.log`, `/tmp/rc-playback-final.log`, `/tmp/rc-playback.png`, `/tmp/rc-player-all.json` e `/tmp/rc-popular-all.json`. Não são publicados porque os eventos DevTools incluem cookies e tokens de sessão.
