@@ -39,9 +39,10 @@ Uma captura passiva posterior via Chrome DevTools Protocol (`Network.enable`) re
 3. A chamada seguinte `serverforms.api?3c91e7a4=...` respondeu HTTP 200 com o código interno `204` e `e18b73c9=[]`.
 4. O mesmo ocorreu usando `RCFServer2` e o fallback `RCServer11`.
 5. Um segundo conteúdo de controle, `Batman Vs Superman: A Origem da Justiça - 2016` (`vid=BTMNVSPRMNAODJT`), também passou pela inicialização e retornou o mesmo array vazio em duas tentativas.
-6. `Network.requestWillBeSentExtraInfo` confirmou cookies de sessão ativos no WebView (`cf_clearance`, `RCIP`, `RCSESS`); valores foram omitidos e os arquivos brutos permanecem locais, modo 0600.
+6. Eventos `Network.requestWillBeSentExtraInfo` de recursos do mesmo player confirmaram cookies ativos no contexto WebView (`cf_clearance`, `RCIP`, `RCSESS`); os eventos ExtraInfo das chamadas de resolução não foram entregues antes de o target ser destruído. Portanto, não usamos essa observação para afirmar quais cookies acompanharam especificamente cada `serverforms.api`. Valores foram omitidos e os arquivos brutos permanecem locais, modo 0600.
+7. Como comparação independente, o WebView Browser Tester abriu o mesmo episódio, completou o Turnstile e exibiu uma etapa “Acesso VIP / Abrir anúncio”. Não prosseguimos por esse fluxo promocional, logo ele não fornece um baseline independente de reprodução.
 
-**Conclusão:** clique, inicialização e chamadas ao serviço estão comprovados com dois conteúdos; URL de vídeo e reprodução ExoPlayer **não comprovadas**. O `204` é um código no JSON, não o status HTTP. A evidência descarta que o plugin tenha simplesmente deixado de acionar o botão ou a API. Ela ainda não distingue indisponibilidade do arquivo, política do servidor, sessão aceita parcialmente ou outro estado interno; portanto, não alegamos indisponibilidade global nem uma causa que os dados não provam.
+**Conclusão:** clique, inicialização e chamadas ao serviço estão comprovados com dois conteúdos; URL de vídeo e reprodução ExoPlayer **não comprovadas**. O `204` é um código no JSON, não o status HTTP. A evidência descarta que o plugin tenha simplesmente deixado de acionar o botão ou a API. Ela ainda não distingue indisponibilidade do arquivo, política do servidor, sessão aceita parcialmente, exigência da etapa promocional ou outro estado interno; portanto, não alegamos indisponibilidade global nem uma causa que os dados não provam.
 
 ## Limites e reprodução do teste
 
