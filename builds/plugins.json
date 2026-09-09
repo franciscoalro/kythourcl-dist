@@ -70,10 +70,10 @@
         "name": "RedeCanais"
     },
     {
-        "fileHash": "sha256-00be4f707493148fa8c34a8d73150140002648a39c9f02f360837a9cf939f766",
+        "fileHash": "sha256-24906544bba9d93a53e015c92282a756bae23056de1425c37977d855dcd41f0e",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 133617,
+        "fileSize": 133656,
         "status": 3,
         "authors": [
             "franciscoalro"
