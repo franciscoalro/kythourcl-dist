@@ -695,8 +695,13 @@ object CloudflareSolver {
         return touchX to touchY
     }
 
+    internal fun isPendingSearchContent(content: String): Boolean =
+        content.contains("final_mapafilmes.txt") && content.contains("search-input") &&
+            !content.contains("data-cs-search-ready=\"true\"")
+
     internal fun isChallengeContent(content: String): Boolean {
         if (content.isBlank()) return false
+        if (isPendingSearchContent(content)) return true
         if (isIpBannedContent(content)) return true
         // v227: página "Offline ou Block!" é stale, não é challenge mas também não serve
         if (content.contains("Offline ou Block", ignoreCase = true) ||
@@ -871,8 +876,8 @@ object CloudflareSolver {
 
     // v229b: player pages contam como resolvidas em todos os gates de cache.
     private fun isPlayerPage(html: String): Boolean =
-        html.contains("rcPreloadPlayer") || html.contains("captcha_button") ||
-            html.contains("__RC__/proxy") || html.contains("server.php")
+        !isPendingSearchContent(html) && (html.contains("rcPreloadPlayer") || html.contains("captcha_button") ||
+            html.contains("__RC__/proxy") || html.contains("server.php"))
 
     @SuppressLint("SetJavaScriptEnabled")
     suspend fun solveInteractive(url: String, timeoutMs: Long = 25000L, force: Boolean = false): String? {
@@ -896,6 +901,35 @@ object CloudflareSolver {
             result
         }
     }
+
+    // search.php fills #search-input only after both asynchronous indexes finish.
+    // An empty .listagem alone cannot distinguish loading from a genuine zero match.
+    private const val SEARCH_PENDING_JS = """
+        (location.pathname.endsWith('/search.php') &&
+         document.querySelector('#search-input') !== null &&
+         (document.readyState !== 'complete' ||
+          document.querySelector('#search-input').value !==
+              (new URLSearchParams(location.search).get('keywords') || '')))
+    """
+
+    private val CAPTURE_READY_HTML_JS = """
+        (function() {
+            if ($SEARCH_PENDING_JS) return null;
+            if (document.querySelector('#search-input')) {
+                document.documentElement.setAttribute('data-cs-search-ready', 'true');
+                console.log('[CF_SEARCH_READY] items=' + (typeof conteudos !== 'undefined' ? conteudos.length : -1) +
+                    ' rendered=' + document.querySelectorAll('.listagem > div').length +
+                    ' indexes=' + JSON.stringify(performance.getEntriesByType('resource').filter(function(r) {
+                        return /final_mapa/.test(r.name);
+                    }).map(function(r) { return {url:r.name, status:r.responseStatus, bytes:r.decodedBodySize}; })));
+            }
+            return document.documentElement ? document.documentElement.outerHTML : null;
+        })();
+    """
+
+    private fun decodeCapturedHtml(value: String?): String? = runCatching {
+        value?.let { org.json.JSONTokener(it).nextValue() as? String }
+    }.getOrNull()?.takeIf { it.isNotBlank() }
 
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun solveInteractiveLocked(url: String, timeoutMs: Long, force: Boolean): String? {
@@ -1071,8 +1105,10 @@ object CloudflareSolver {
                     try { bodySnip = (document.body ? document.body.innerText.substring(0, 500) : '').replace(/[|]/g, ' '); } catch(e) {}
                     var isChal = /Just a moment|Checking your browser|challenge-platform|cf-turnstile|Um momento|Aguarde|Verificando|security verification|security service|not a bot/i.test(title + ' ' + bodySnip);
                     
-                    if (!isChal && (cards > 0 || hasPlayer > 0 || (links >= 5 && htmlLen >= 1000 && (title.indexOf('RedeCanais') !== -1 || bodySnip.indexOf('redecanais') !== -1)))) {
+                    var searchPending = $SEARCH_PENDING_JS;
+                    if (!searchPending && !isChal && (cards > 0 || hasPlayer > 0 || (links >= 5 && htmlLen >= 1000 && (title.indexOf('RedeCanais') !== -1 || bodySnip.indexOf('redecanais') !== -1)))) {
                         if (window.HTMLOUT && typeof window.HTMLOUT.onHtmlCaptured === 'function') {
+                            if (document.querySelector('#search-input')) document.documentElement.setAttribute('data-cs-search-ready', 'true');
                             window.HTMLOUT.onHtmlCaptured(location.href, document.documentElement ? document.documentElement.outerHTML : '');
                         }
                     }
@@ -1115,19 +1151,14 @@ object CloudflareSolver {
                     }
                 }
 
+                // search.php populates results asynchronously; wait until JS is ready
                 val isResolved = !isChallenge && (cardCount > 0 || hasPlayer || (linkCount >= 5 && htmlLen >= 2000))
                 if (isResolved) {
-                    cv.evaluateJavascript(
-                        "(function() { return (document.documentElement ? document.documentElement.outerHTML : ''); })();"
-                    ) { html ->
+                    // v233: use JSON-decoded outerHTML to handle escaped search results
+                    cv.evaluateJavascript(CAPTURE_READY_HTML_JS) { htmlVal ->
                         if (!isPollingActive.get()) return@evaluateJavascript
-                        if (!html.isNullOrBlank() && html != "null") {
-                            val decoded = html.removeSurrounding("\"")
-                                .replace("\\u003C", "<")
-                                .replace("\\u003E", ">")
-                                .replace("\\\"", "\"")
-                                .replace("\\n", "\n")
-                                .replace("\\r", "\r")
+                        val decoded = decodeCapturedHtml(htmlVal)
+                        if (decoded != null) {
                             lastSolvedHtml = decoded
                             capturedHtmlByUrl[currentUrl] = decoded
                             capturedHtmlByUrl[url] = decoded
@@ -1137,6 +1168,12 @@ object CloudflareSolver {
                             runCatching { persistCapturedHtmlToDisk() }
                             isPollingActive.set(false)
                             htmlCaptureDone.complete(true)
+                        } else {
+                            Log.d(TAG, "[CF] search still loading, continue polling | url=$currentUrl")
+                            if (isPollingActive.get() && !isPollScheduled) {
+                                isPollScheduled = true
+                                cv.postDelayed({ pollAndCapture(cv) }, 500)
+                            }
                         }
                     }
                 } else {
@@ -1294,16 +1331,11 @@ object CloudflareSolver {
 
                             Log.d(TAG, "[CF] onPageFinished url=$finishedUrl | clearance=$hasClearance | target_url=$isTargetUrl")
                             if (hasClearance && isTargetUrl) {
-                                view?.evaluateJavascript(
-                                    "(function() { return (document.documentElement ? document.documentElement.outerHTML : ''); })();"
-                                ) { html ->
-                                    if (!html.isNullOrBlank() && html != "null") {
-                                        val decoded = html.removeSurrounding("\"")
-                                            .replace("\\u003C", "<")
-                                            .replace("\\u003E", ">")
-                                            .replace("\\\"", "\"")
-                                            .replace("\\n", "\n")
-                                            .replace("\\r", "\r")
+                                // v233: mesma barreira de prontidão da busca + decode JSON único
+                                view?.evaluateJavascript(CAPTURE_READY_HTML_JS) { htmlVal ->
+                                    if (!isPollingActive.get()) return@evaluateJavascript
+                                    val decoded = decodeCapturedHtml(htmlVal)
+                                    if (decoded != null) {
                                         // v229b: player pages contam como resolvidas (whitelist).
                                         if ((!isChallengeContent(decoded) || isPlayerPage(decoded)) && decoded.length > 300) {
                                             lastSolvedHtml = decoded
@@ -1398,8 +1430,7 @@ object CloudflareSolver {
                 captured.contains("__RC__/proxy") || captured.contains("server.php"))
         return when {
             !captured.isNullOrBlank() && (!isChallengeContent(captured) || capturedIsPlayer) -> captured
-            !lastSolvedHtml.isNullOrBlank() && !isChallengeContent(lastSolvedHtml!!) -> lastSolvedHtml
-            else -> captured
+            else -> null
         }
     }
 

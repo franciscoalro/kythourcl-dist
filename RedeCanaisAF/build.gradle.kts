@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v232-hook-total: viewport real MATCH_PARENT alpha 0.01 HARDWARE + hook total fetch/XHR/submit/mutation + __rcCaptured fast-path + TUNEL_VAZIO diag
+// v233: await asynchronous search indexes and decode captured HTML as JSON.
 cloudstream {
-    version = 232
+    version = 233
 }

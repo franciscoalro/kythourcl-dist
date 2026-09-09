@@ -57,7 +57,7 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 232
+        const val BUILD_VERSION = 233
         private const val TAG = "RedeCanaisAF-Trace"
         private const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/AP1A.240505.005) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Mobile Safari/537.36"
 
@@ -189,7 +189,7 @@ class RedeCanaisAF : MainAPI() {
 
         val code = res?.code ?: 0
         val body = res?.text.orEmpty()
-        val isChallenge = code in 400..599 ||
+        val isChallenge = code in 400..599 || CloudflareSolver.isPendingSearchContent(body) ||
             body.contains("Just a moment...", true) ||
             body.contains("Checking your browser", true) ||
             body.contains("cf-browser-verification", true) ||
@@ -232,7 +232,7 @@ class RedeCanaisAF : MainAPI() {
                 null
             }
             val retryBody = retryRes?.text.orEmpty()
-            val isRetryChallenge = (retryRes?.code ?: 0) in 400..599 ||
+            val isRetryChallenge = (retryRes?.code ?: 0) in 400..599 || CloudflareSolver.isPendingSearchContent(retryBody) ||
                 retryBody.contains("Just a moment...", true) ||
                 retryBody.contains("Checking your browser", true) ||
                 retryBody.contains("cf-browser-verification", true) ||
@@ -321,6 +321,7 @@ class RedeCanaisAF : MainAPI() {
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
 
     override suspend fun search(query: String): List<SearchResponse> {
+        if (query.isBlank()) return emptyList()
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
 
         return try {
@@ -328,6 +329,14 @@ class RedeCanaisAF : MainAPI() {
             val doc = requestDoc(searchUrl)
             var results = parseSearchResults(doc, query)
             Log.i(TAG, "[SEARCH_STAGE1] query='$query' | url=$searchUrl | raw=${results.size}")
+            if (results.isEmpty()) {
+                try {
+                    // Keep production diagnostics bounded; never dump multi-MB page scripts.
+                    Log.w(TAG, "[SEARCH_DIAG] query='$query' ready=${doc.selectFirst("html")?.attr("data-cs-search-ready")} listItems=${doc.select(".listagem > div").size}")
+                } catch (e: Throwable) {
+                    Log.w(TAG, "[SEARCH_DIAG_ERR] ${e.message}")
+                }
+            }
 
             if (results.isEmpty()) {
                 try {
