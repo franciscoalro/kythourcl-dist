@@ -1105,6 +1105,10 @@ object CloudflareSolver {
                     try { bodySnip = (document.body ? document.body.innerText.substring(0, 500) : '').replace(/[|]/g, ' '); } catch(e) {}
                     var isChal = /Just a moment|Checking your browser|challenge-platform|cf-turnstile|Um momento|Aguarde|Verificando|security verification|security service|not a bot/i.test(title + ' ' + bodySnip);
                     
+                    var isTarget = location.hostname.indexOf('redecanais') !== -1;
+                    if (!isTarget) {
+                        return '0|0|Offsite|0|1|0';
+                    }
                     var searchPending = $SEARCH_PENDING_JS;
                     if (!searchPending && !isChal && (cards > 0 || hasPlayer > 0 || (links >= 5 && htmlLen >= 1000 && (title.indexOf('RedeCanais') !== -1 || bodySnip.indexOf('redecanais') !== -1)))) {
                         if (window.HTMLOUT && typeof window.HTMLOUT.onHtmlCaptured === 'function') {
@@ -1282,6 +1286,16 @@ object CloudflareSolver {
                     }
                     webViewClient = object : WebViewClient() {
                         
+                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                            val target = request?.url?.toString() ?: return false
+                            val host = request.url?.host?.lowercase().orEmpty()
+                            if (host.contains("cloudflare.com") && !host.contains("challenges.cloudflare.com") && !host.contains("challenge-platform")) {
+                                Log.w(TAG, "[CF_BLOCK_NAV] Bloqueando navegação externa do Cloudflare: $target")
+                                return true
+                            }
+                            return super.shouldOverrideUrlLoading(view, request)
+                        }
+
                         override fun onReceivedSslError(view: WebView?, handler: android.webkit.SslErrorHandler?, error: android.net.http.SslError?) {
                             Log.w(TAG, "[CF_SSL] Ignorando erro SSL no proxy móvel: ${error?.primaryError}")
                             handler?.proceed()
