@@ -851,7 +851,7 @@ object CloudflareSolver {
             }
         }
 
-        val interactiveHtml = solveInteractive(url, timeoutMs = 25000L, force = false)
+        val interactiveHtml = solveInteractive(url, timeoutMs = 45000L, force = false)
         // v229b: solveInteractiveLocked agora retorna player pages (whitelist interna) —
         // aceitar aqui também, não só via !isChallengeContent.
         val interactiveIsPlayer = !interactiveHtml.isNullOrBlank() &&
@@ -964,7 +964,7 @@ object CloudflareSolver {
 
         fun tryTapTurnstile(view: WebView, reason: String) {
             val now = SystemClock.uptimeMillis()
-            val minCooldown = if (lastTapType == "button_rect") 2500L else 15000L
+            val minCooldown = 3200L
             if (!isPollingActive.get() || now - lastTurnstileTapAt < minCooldown) return
             view.evaluateJavascript(TURNSTILE_TAP_PROBE_JS.trimIndent()) { probeResult ->
                 if (!isPollingActive.get() || !view.isAttachedToWindow) return@evaluateJavascript
@@ -1145,7 +1145,7 @@ object CloudflareSolver {
 
                 if (isChallenge && isPollingActive.get()) {
                     val now = SystemClock.uptimeMillis()
-                    val cooldown = if (lastTapType == "button_rect") 2500L else 8000L
+                    val cooldown = 3200L
                     if (pollAttempts >= 3 && (now - lastTurnstileTapAt >= cooldown)) {
                         tryTapTurnstile(cv, "poll_$pollAttempts")
                     }
@@ -1207,17 +1207,22 @@ object CloudflareSolver {
                 val rootLayout = activity.findViewById<ViewGroup>(android.R.id.content)
 
                 val wv = WebView(activity).apply {
-                    // v228: GONE + 1x1 — VISIBLE+MATCH_PARENT com alpha 0.01 faz o
-                    // compositor alocar surface de tela cheia (720x1280 HW) por WebView;
-                    // 3 em paralelo (detalhes pós-Home) estouravam o LMK (signal 9).
-                    // GONE não participa do layout/composição mas executa JS/Turnstile.
-                    visibility = android.view.View.GONE
+                    // v236-pentest: VISIBLE MATCH_PARENT alpha 0.01 HARDWARE — GONE 1x1
+                    // quebra Turnstile managed (cTplV:5): view 1x1 => scale 1/720 =>
+                    // touchY fora da view => scaleToView null ("toque sem alvo" 30x).
+                    // MATCH_PARENT dá viewport real 720x1280; mutex garante 1 WebView
+                    // por vez (vida curta, destruído pós-capture).
+                    visibility = android.view.View.VISIBLE
+                    alpha = 0.01f
                     isFocusable = false
                     isFocusableInTouchMode = false
                     isClickable = false
                     isLongClickable = false
-                    setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
-                    layoutParams = FrameLayout.LayoutParams(1, 1)
+                    setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
+                    layoutParams = FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
+                    )
                     cookieManager.setAcceptThirdPartyCookies(this, true)
 
                     settings.apply {
@@ -1384,10 +1389,10 @@ object CloudflareSolver {
                 }
                 interactiveWebView = wv
 
-                // v228: mantém GONE + 1x1 (ver apply acima) — sem surface de composição.
-                // Adiciona no fundo do rootLayout (index 0) sem interceptar toques.
+                // v236: VISIBLE MATCH_PARENT alpha 0.01 — ver comentário do apply
+                // acima. Adiciona no fundo (index 0); mutex garante 1 WebView por vez.
                 rootLayout.addView(wv, 0)
-                Log.i(TAG, "[CF] WebView 100% HEADLESS (offscreen -50000px) acoplada em background | url=$url")
+                Log.i(TAG, "[CF] WebView VISIBLE MATCH_PARENT alpha 0.01 acoplada em background | url=$url")
                 wv.loadUrl(url)
 
                 Log.i(TAG, "[CF] WebView interativa carregando url=$url")

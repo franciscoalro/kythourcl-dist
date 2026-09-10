@@ -38,12 +38,31 @@ internal class StreamResolver(
             // v228: sem doc.html()/dump em produção — 2MB de String duplicada por
             // chamada de loadLinks (LMK matava o app, signal 9). Trace leve via doc.body().
             try {
-                val iframeCount = doc.select("iframe").size
+                val allIframes = doc.select("iframe")
+                val iframeCount = allIframes.size
                 val serverCount = doc.select("iframe[src*='server.php']").size
                 val hasProxy = doc.select("script, a").any {
                     it.html().contains("__RC__/proxy")
                 }
+                // v238: loga src de TODOS os iframes (não só count) — revela servers
+                // alternativos (ex: RCFServer3 vs RCFServer2) sem precisar de dump.
+                // v239: sem filtro + dump completo do body em arquivo (watch.php tem
+                // 6 iframes mas só 2 apareciam — os outros 4 podem ser players
+                // alternativos fora do seletor focado).
+                val srcs = allIframes.mapNotNull {
+                    val s = it.attr("src").ifBlank { it.attr("data-src") }.ifBlank { null }
+                    s?.take(300)
+                }.filter { it.isNotBlank() }
                 Log.i(TAG, "[VERIFY_STREAM_DETAIL] url=$cleanUrl iframes=$iframeCount server.php=$serverCount hasProxy=$hasProxy")
+                srcs.take(10).forEachIndexed { i, s -> Log.i(TAG, "[IFRAME_$i] $s") }
+                try {
+                    val ctx = com.lagradost.cloudstream3.CommonActivity.activity
+                    ctx?.let { c ->
+                        java.io.File(c.filesDir, "redecanais_af_last_watch.html")
+                            .writeText(doc.body().html().take(600_000))
+                        Log.i(TAG, "[WATCH_DUMP] body salvo len=${doc.body().html().length}")
+                    }
+                } catch (_: Throwable) {}
             } catch (_: Throwable) {}
 
             // 1. Coleta de todos os Iframes e Embeds do DOM
@@ -117,20 +136,42 @@ internal class StreamResolver(
                     }
                 }
                 if (embedResolved.contains("server.php", true) && embedResolved.contains("vid=", true)) {
-                    // Otimização de ultra-velocidade: RCFServer2/ondemand é o único CDN ativo que responde imediatamente (206)
-                    val fastServerUrl = if (!embedResolved.contains("server=RCFServer2", true)) {
-                        var f = embedResolved.replace(Regex("server=[^&]+", RegexOption.IGNORE_CASE), "server=RCFServer2")
-                        if (f.contains("subfolder=", true)) {
-                            f.replace(Regex("subfolder=[^&]+", RegexOption.IGNORE_CASE), "subfolder=ondemand")
-                        } else {
-                            if (f.contains("?")) "$f&subfolder=ondemand" else "$f?subfolder=ondemand"
+                    // v241 (Null_Pointer): matriz ENXUTA 2+embed — a matriz 6x do v238/v239
+                    // matava o app via LMK (pid 50427 morreu na tentativa 2/6 do Arrow;
+                    // cada captureAndServe monta WebView MATCH_PARENT + bundle 181K).
+                    // Evidência E2E: 4 vids x 8 variantes = 100% 204+e18b73c9=[]; variar
+                    // server/subfolder NÃO resolve (origem morta no backend, não parâmetro).
+                    // Tenta: (1) URL canônica do iframe (com gid quando houver) 12s,
+                    // (2) embed.php?vid=<id-curto-do-detalhe> 20s, (3) play.php?vid=
+                    // 15s, (4) fluxo normal. Total ~47s+overhead < 180s.
+                    // v242: embed usa o id CURTO da URL do detalhe (watch.php?vid=
+                    // d6a3471d2), NÃO o vid LONGO do iframe (XMEN97T01EP01) — E2E
+                    // provou que embed.php?vid=<longo> morre silencioso (25s sem 1
+                    // subrequest). play.php nunca foi testado — 3ª tentativa.
+                    val variants = buildServerVariants(embedResolved, cleanUrl)
+                    Log.i(TAG, "[EMBED_VARIANTS] n=${variants.size} " + variants.joinToString(" | ").take(900))
+                    var localProxyUrl: String? = null
+                    var attempt = 0
+                    for (variant in variants) {
+                        attempt++
+                        // v241: embed.php legado usa captureLegacyEmbed (player HTML5
+                        // direto, sem recap) — captureAndServe travaria 45s esperando
+                        // .captcha_button que não existe no player antigo.
+                        val isLegacy = variant.contains("embed.php", true) || variant.contains("play.php", true)
+                        // v241b: budget enxuto — o framework cancela loadLinks em ~10s
+                        // (provado: Job cancelled 23:52:47). Early-exit 204 aborta a
+                        // canônica em ~4s; embed legado roda em paralelo orçamentário.
+                        // v242: 12s canônica / 20s embed / 15s play.php.
+                        val budgetMs = when {
+                            variant.contains("embed.php", true) -> 20000L
+                            variant.contains("play.php", true) -> 15000L
+                            else -> 12000L
                         }
-                    } else embedResolved
-
-                    var localProxyUrl = WebViewStreamProxy.captureAndServe(fastServerUrl)
-                    if (localProxyUrl == null && fastServerUrl != embedResolved) {
-                        Log.i(TAG, "[PROXY_LINK] RCFServer2 falhou — tentando servidor original: $embedResolved")
-                        localProxyUrl = WebViewStreamProxy.captureAndServe(embedResolved)
+                        Log.i(TAG, "[PROXY_LINK] tentativa $attempt/${variants.size} budget=${budgetMs}ms legacy=$isLegacy url=$variant")
+                        localProxyUrl = if (isLegacy) WebViewStreamProxy.captureLegacyEmbed(variant, budgetMs)
+                        else WebViewStreamProxy.captureAndServe(variant, budgetMs, cleanUrl)
+                        if (localProxyUrl != null) break
+                        Log.i(TAG, "[PROXY_LINK] tentativa $attempt falhou (204/timeout) — próxima variante")
                     }
                     if (localProxyUrl != null) {
                         Log.i(TAG, "[PROXY_LINK] emitindo proxy local: $localProxyUrl")
@@ -190,6 +231,35 @@ internal class StreamResolver(
     private fun isPlayerHtml(html: String): Boolean =
         html.contains("rcPreloadPlayer") || html.contains("captcha_button") ||
             html.contains("__RC__/proxy") || html.contains("server.php")
+
+    // v241 (Null_Pointer): matriz enxuta (canônica + embed legado). Lab E2E
+    // REFUTOU a matriz 6x server/subfolder: 4 vids (AMRTDPDMNIOEMCHMS,
+    // UNTLDODEPMTDVNCYNG, cbae1c53, ARROWT01EP01) x 8 variantes = 100%
+    // {"2fa806d3":204,"e18b73c9":[]} — variar server/subfolder não ressuscita
+    // origem morta no backend, e 6 WebViews MATCH_PARENT estouram o LMK
+    // (pid 50427 morreu na tentativa 2/6 do Arrow). Mantém o fix v240 (gid).
+    // v242: embed.php?vid=<ID-CURTO-DO-DETALHE> — o id curto de 9 hex vive na
+    // URL do detalhe (musicvideo.php?vid=d6a3471d2), NÃO no iframe (o vid do
+    // iframe é LONGO: XMEN97T01EP01 — embed.php?vid=<longo> morre silencioso,
+    // E2E 23:59 X-Men: 25s sem 1 subrequest). + play.php?vid= (3ª tentativa,
+    // nunca testada em lab).
+    private fun buildServerVariants(embedUrl: String, detailUrl: String = ""): List<String> {
+        val out = linkedSetOf(embedUrl)
+        val vid = Regex("""[?&]vid=([^&]+)""", RegexOption.IGNORE_CASE)
+            .find(embedUrl)?.groupValues?.getOrNull(1).orEmpty()
+        if (vid.isBlank()) return out.toList()
+        // id curto: 1º do detalhe (watch/musicvideo.php?vid=<9hex>), senão do
+        // próprio embed (caso o iframe um dia carregue o curto), senão o longo.
+        val shortFromDetail = Regex("""[?&]vid=([0-9a-f]{9})\b""", RegexOption.IGNORE_CASE)
+            .find(detailUrl)?.groupValues?.getOrNull(1)
+        val shortFromEmbed = Regex("""[?&]vid=([0-9a-f]{9})\b""", RegexOption.IGNORE_CASE)
+            .find(embedUrl)?.groupValues?.getOrNull(1)
+        val embedId = shortFromDetail ?: shortFromEmbed ?: vid
+        if (shortFromDetail != null) Log.i(TAG, "[EMBED_ID] curto do detalhe: $shortFromDetail (iframe vid=$vid)")
+        out.add("$mainUrl/embed.php?vid=$embedId")
+        out.add("$mainUrl/play.php?vid=$embedId")
+        return out.take(3)
+    }
 
     /**
      * Resolução recursiva de embeds, iframes intermediários, extratores e links diretos.

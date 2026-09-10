@@ -71,7 +71,216 @@ object WebViewStreamProxy {
      * Retorna a URL local http://127.0.0.1:<porta>/stream.mp4 que o ExoPlayer deve reproduzir.
      */
     @SuppressLint("SetJavaScriptEnabled")
-    suspend fun captureAndServe(serverPhpUrl: String): String? {
+    // v241 (Null_Pointer): embed.php legado usa player HTML5 direto (sem recap/
+    // serverforms/RC4). O loop de clique/recap + hook serverforms NÃO se aplica:
+    // captura via <video>/performance-resource como o browser-harness da Fase 51
+    // (elemento <video> no contexto da página obteve 206). GONE 1x1 + SOFTWARE
+    // (leve, sem pipeline de mídia) + sem hook pesado — 1 WebView mínima.
+    suspend fun captureLegacyEmbed(embedUrl: String, budgetMs: Long = 30000L): String? {
+        shutdown()
+        LocalImageProxy.shutdownHelper()
+        val activity: Activity? = CommonActivity.activity
+        if (activity == null || activity.isFinishing || activity.isDestroyed) {
+            Log.w(TAG, "[PROXY] Activity indisponível (legacy)")
+            return null
+        }
+        Log.i(TAG, "[PROXY_LEGACY] Captura embed legado: $embedUrl")
+        val captured = AtomicBoolean(false)
+        var wv: WebView? = null
+        val rootLayout = activity.findViewById<ViewGroup>(android.R.id.content)
+        withContext(Dispatchers.Main) {
+            try {
+                val cookieManager = CookieManager.getInstance()
+                cookieManager.setAcceptCookie(true)
+                // v245: o WebView legado é NOVO (jar próprio vazio) — sem challenge
+                // ele morre em "Attention Required" (E2E v244: LEGACY_DOM prova).
+                // Copia TODOS os cookies do domínio (cf_clearance + RCIP/RCSESS)
+                // do CookieManager global antes do loadUrl. Sem flush, sem navegação.
+                try {
+                    val srcUrls = listOf(
+                        "https://redecanais.af/",
+                        "https://redecanais.af/player3/server.php",
+                        embedUrl.substringBefore("?").ifBlank { "https://redecanais.af/" }
+                    )
+                    var copied = 0
+                    for (su in srcUrls.distinct()) {
+                        val raw = cookieManager.getCookie(su) ?: continue
+                        val host = android.net.Uri.parse(embedUrl).host ?: "redecanais.af"
+                        for (piece in raw.split(";")) {
+                            val c = piece.trim()
+                            if (c.isBlank() || c.startsWith("expires", true) ||
+                                c.startsWith("path", true) || c.startsWith("domain", true) ||
+                                c.startsWith("max-age", true) || c.startsWith("samesite", true)
+                            ) continue
+                            try {
+                                cookieManager.setCookie("https://$host/", c)
+                                cookieManager.setCookie("https://$host${
+                                    android.net.Uri.parse(embedUrl).path ?: "/"
+                                }", c)
+                                copied++
+                            } catch (_: Throwable) {}
+                        }
+                    }
+                    try { cookieManager.flush() } catch (_: Throwable) {}
+                    Log.i(TAG, "[LEGACY_COOKIES] copiados=$copied para ${android.net.Uri.parse(embedUrl).host}")
+                } catch (e: Throwable) {
+                    Log.w(TAG, "[LEGACY_COOKIES] err=${e.message?.take(100)}")
+                }
+                val userAgent = CloudflareSolver.lastUserAgent
+                    ?: WebViewResolver.webViewUserAgent ?: MOBILE_UA
+                // v243: legado usa o MESMO modo do canônico (VISIBLE MATCH_PARENT
+                // alpha 0.01 HARDWARE) — GONE 1x1 SOFTWARE congelava a navegação
+                // (E2E v242: 4 embeds x 20s sem 1 LEGACY_NAV; mesmo bug v229).
+                val view = WebView(activity).apply {
+                    visibility = android.view.View.VISIBLE
+                    alpha = 0.01f
+                    isFocusable = false
+                    isFocusableInTouchMode = false
+                    isClickable = false
+                    isLongClickable = false
+                    setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
+                    layoutParams = android.widget.FrameLayout.LayoutParams(
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+                    )
+                    cookieManager.setAcceptThirdPartyCookies(this, true)
+                    settings.apply {
+                        javaScriptEnabled = true
+                        domStorageEnabled = true
+                        blockNetworkImage = true
+                        loadsImagesAutomatically = false
+                        useWideViewPort = false
+                        loadWithOverviewMode = false
+                        userAgentString = userAgent
+                    }
+                    webChromeClient = object : WebChromeClient() {
+                        override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                            super.onProgressChanged(view, newProgress)
+                            if (newProgress == 100 || newProgress % 25 == 0) {
+                                Log.i(TAG, "[LEGACY_PROG] progress=$newProgress url=${view?.url?.take(200)} title=${view?.title?.take(80)}")
+                            }
+                        }
+                    }
+                    webViewClient = object : WebViewClient() {
+                        override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                            super.onPageStarted(view, url, favicon)
+                            Log.i(TAG, "[LEGACY_PAGE] started url=${url?.take(250)}")
+                        }
+
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            super.onPageFinished(view, url)
+                            Log.i(TAG, "[LEGACY_PAGE] finished url=${url?.take(250)} title=${view?.title?.take(80)}")
+                            view?.evaluateJavascript(
+                                """(function(){return JSON.stringify({href:location.href,title:document.title,htmlLen:document.documentElement?document.documentElement.outerHTML.length:0,videos:document.querySelectorAll('video').length,iframes:document.querySelectorAll('iframe').length,body0:(document.body?document.body.innerHTML:'').slice(0,200)});})();"""
+                            ) { res -> Log.i(TAG, "[LEGACY_DOM] $res") }
+                        }
+
+                        @Suppress("DEPRECATION")
+                        override fun onReceivedError(
+                            view: WebView?,
+                            errorCode: Int,
+                            description: String?,
+                            failingUrl: String?
+                        ) {
+                            super.onReceivedError(view, errorCode, description, failingUrl)
+                            Log.w(TAG, "[LEGACY_ERR] code=$errorCode desc=${description?.take(100)} ${failingUrl?.take(200)}")
+                        }
+
+                        override fun shouldInterceptRequest(
+                            view: WebView?,
+                            request: WebResourceRequest
+                        ): WebResourceResponse? {
+                            val u = request.url.toString()
+                            val isMedia = (u.contains(".mp4", true) || u.contains(".m3u8", true) ||
+                                u.contains("__RC__/proxy", true) || u.contains("/proxy?src=", true) ||
+                                u.contains("tos-alisg", true) || u.contains("container=videos", true)) &&
+                                !u.contains("disqus", true) && !u.contains("google", true)
+                            if (isMedia && !captured.get()) {
+                                streamUrl = u
+                                captured.set(true)
+                                Log.i(TAG, "[PROXY_LEGACY] Stream capturado: ${u.take(180)}")
+                                try {
+                                    val ctx = CommonActivity.activity ?: CommonActivity.activity?.applicationContext
+                                    ctx?.let { c -> java.io.File(c.filesDir, "redecanais_af_last_stream_url.txt").writeText(u) }
+                                } catch (_: Throwable) {}
+                            } else if (u.contains("player", true) || u.contains(".mp4", true) || u.contains(".m3u8", true)) {
+                                Log.i(TAG, "[PROXY_LEGACY_REQ] ${request.method} ${u.take(250)}")
+                            }
+                            // v242 (Null_Pointer): diag do embed legado — loga TODA
+                            // navegação (MAIN + status via onReceivedHttpError) p/
+                            // distinguir 404/403/JS-vazio no embed.php?vid=<curto>.
+                            val uLower = u.lowercase()
+                            if (request.isForMainFrame || uLower.contains("embed.php") || uLower.contains("play.php")) {
+                                Log.i(TAG, "[LEGACY_NAV] ${request.method} MAIN=${request.isForMainFrame} ${u.take(250)}")
+                            }
+                            return super.shouldInterceptRequest(view, request)
+                        }
+
+                        override fun onReceivedHttpError(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                            errorResponse: WebResourceResponse?
+                        ) {
+                            try {
+                                val u = request?.url.toString()
+                                if (request?.isForMainFrame == true || u.contains("embed.php", true) || u.contains("play.php", true)) {
+                                    Log.w(TAG, "[LEGACY_HTTPERR] code=${errorResponse?.statusCode} ${u.take(250)}")
+                                }
+                            } catch (_: Throwable) {}
+                            super.onReceivedHttpError(view, request, errorResponse)
+                        }
+                    }
+                }
+                wv = view
+                webView = view
+                rootLayout.addView(view, 0)
+                view.loadUrl(embedUrl)
+            } catch (e: Throwable) {
+                Log.e(TAG, "[PROXY_LEGACY] Erro ao criar WebView: ${e.message}")
+            }
+        }
+        val budget = budgetMs.coerceIn(10000L, 45000L)
+        withTimeoutOrNull(budget) {
+            while (!captured.get()) {
+                delay(POLL_INTERVAL_MS)
+                val wvNow = wv ?: continue
+                withContext(Dispatchers.Main) {
+                    try {
+                        wvNow.evaluateJavascript(
+                            """(function(){
+                                const entries = performance.getEntriesByType('resource');
+                                for (let i = entries.length - 1; i >= 0; i--) {
+                                    const n = entries[i].name;
+                                    if ((n.indexOf('.mp4')>=0 || n.indexOf('.m3u8')>=0 || n.indexOf('__RC__')>=0 || n.indexOf('/proxy?')>=0) && n.indexOf('disqus')<0) return n;
+                                }
+                                const v = document.querySelector('video');
+                                if (v) { const s = v.currentSrc || v.src || ''; if (s && s.indexOf('blob:')<0) return s; }
+                                return '';
+                            })();""".trimIndent()
+                        ) { res ->
+                            val found = res?.removeSurrounding("\"").orEmpty()
+                            if (found.startsWith("http") && !captured.get()) {
+                                streamUrl = found
+                                captured.set(true)
+                                Log.i(TAG, "[PROXY_LEGACY] Stream via JS poll: ${found.take(180)}")
+                            }
+                        }
+                    } catch (_: Throwable) {}
+                }
+            }
+            true
+        }
+        val finalUrl = streamUrl
+        if (finalUrl.isNullOrBlank()) {
+            Log.w(TAG, "[PROXY_LEGACY] Falha: nenhum stream em ${budget}ms para $embedUrl")
+            shutdown()
+            return null
+        }
+        Log.i(TAG, "[PROXY_LEGACY] Captura OK: $finalUrl")
+        return startLocalServer(finalUrl)
+    }
+
+    suspend fun captureAndServe(serverPhpUrl: String, budgetMs: Long = CAPTURE_TIMEOUT_MS, detailUrl: String = ""): String? {
         shutdown() // limpa estado anterior
         // Poster fetches have already completed before playback. Release their helper
         // renderer so the full-size hardware player WebView does not overlap it.
@@ -171,10 +380,20 @@ object WebViewStreamProxy {
                           window.__rcLastFetchStatus=0;
                           window.__rcBodies=[];
                           window.__rcFetchCount=0;
+                          window.__rcLastApi=''; window.__rcApiHdrs=''; window.__rcApiLog=[];
                           const ofetch=window.fetch;
                           if(ofetch) window.fetch=function(u,o){
                             const urlStr=String(u).slice(0,400);
                             window.__rcLastFetchUrl=urlStr;
+                            // v242 (Null_Pointer, teste d): registra URL + headers de
+                            // TODA chamada .api (step1/step2) p/ replay OkHttp in-app.
+                            try{
+                              if(urlStr.indexOf('.api')>=0 && window.__rcApiLog.length<30){
+                                const hdrs=(o&&o.headers)?JSON.stringify(o.headers).slice(0,400):'{}';
+                                window.__rcLastApi=urlStr; window.__rcApiHdrs=hdrs+' method='+(o&&o.method||'GET');
+                                window.__rcApiLog.push({url:urlStr, hdrs:hdrs, m:(o&&o.method||'GET'), t:Date.now()});
+                              }
+                            }catch(_){}
                             try{ console.log('[HOOK] fetch '+urlStr+' opts='+JSON.stringify(o||{}).slice(0,250)+' cookies='+document.cookie.slice(0,200)); }catch(_){}
                             const p=ofetch.apply(this, arguments);
                             try{
@@ -412,6 +631,18 @@ object WebViewStreamProxy {
                                 if (isApi || request.method != "GET" || u.contains("player3", true)) {
                                     Log.i(TAG, "[PROXY_REQ] ${request.method} ${if (request.isForMainFrame) "MAIN " else ""}${u.take(320)}")
                                 }
+                                // v242 (Null_Pointer, teste c): snapshot de Set-Cookie +
+                                // redirect no ponto de interceptação. WebResourceRequest
+                                // não expõe response headers (só request headers via
+                                // requestHeaders) — loga o que é visível (método, URL,
+                                // headers de request) e o veredito do replay OkHttp
+                                // (teste d) cobre o lado response/set-cookie.
+                                if (isApi) {
+                                    try {
+                                        val rh = request.requestHeaders?.entries?.joinToString(";") { "${it.key}=${it.value.take(60)}" }?.take(300).orEmpty()
+                                        Log.i(TAG, "[REQH] ${request.method} ${u.take(200)} || reqHeaders=$rh")
+                                    } catch (_: Throwable) {}
+                                }
                             }
                                    val isMediaStream = (u.contains("__RC__/proxy", true) || u.contains("/proxy?src=", true) ||
                                 u.contains("p12-common-sign", true) || u.contains("xn--l", true) ||
@@ -463,8 +694,14 @@ object WebViewStreamProxy {
         // v126: orçamento por tentativa cortado p/ 45s — o framework cancela loadLinks em
         // ~120s (TimeoutCancellationException), então 2 tentativas (RCServer01 + RCFServer2)
         // precisam caber em 90s. Antigo 120s por tentativa abortava antes do fallback.
-        withTimeoutOrNull(CAPTURE_TIMEOUT_MS) {
-            while (!captured.get()) {
+        // v237: budget por tentativa (25s nas 3 primeiras variantes, 45s na última) +
+        // early-exit: 3x serverforms 204+e18b73c9=[] seguidos => túnel vazio, aborta
+        // sem esperar o timeout (economiza ~20s por variante morta).
+        val budget = budgetMs.coerceIn(10000L, CAPTURE_TIMEOUT_MS)
+        val empty204Count = java.util.concurrent.atomic.AtomicInteger(0)
+        var lastEmpty204Sig = ""
+        withTimeoutOrNull(budget) {
+            while (!captured.get() && empty204Count.get() < 3) {
                 delay(POLL_INTERVAL_MS) // v123: 200ms (era 500ms)
                 val now = System.currentTimeMillis()
                 val wvNow = wv ?: continue
@@ -700,6 +937,27 @@ object WebViewStreamProxy {
                     val elapsed = now - startMs
                     val isDiagTick = elapsed > 0 && (elapsed / 5000L) != ((elapsed - POLL_INTERVAL_MS) / 5000L)
                     // fast-path: hook capturou https via fetch body
+                    // v238: 204 contado UMA vez por poll (evaluate é async — o callback
+                    // antigo incrementava a cada re-poll do mesmo body, esgotando 3/3
+                    // com 1 único 204 real e abortando variante saudável em ~3s).
+                    withContext(Dispatchers.Main) {
+                        try {
+                            wvNow.evaluateJavascript("""(function(){try{return ((window.__rcLastFetchUrl||'').slice(-60)+'[SEP]'+(window.__rcLastFetchBody||'').slice(0,300));}catch(e){return ''}})();""".trimIndent()) { r ->
+                                val f = r?.removeSurrounding("\"").orEmpty()
+                                    .replace("\\u003C", "<").replace("\\u003E", ">").replace("\\\"", "\"")
+                                    .replace("\\n", " ")
+                                try {
+                                    if (f.contains("2fa806d3") && f.contains("204") && f.contains("e18b73c9")) {
+                                        if (f != lastEmpty204Sig) {
+                                            lastEmpty204Sig = f
+                                            val n = empty204Count.incrementAndGet()
+                                            Log.i(TAG, "[PROXY] túnel vazio 204 #$n/3 nesta variante — early-exit se persistir")
+                                        }
+                                    }
+                                } catch (_: Throwable) {}
+                            }
+                        } catch (_: Throwable) {}
+                    }
                     withContext(Dispatchers.Main) {
                         try {
                             wvNow.evaluateJavascript("""(function(){try{return window.__rcCaptured||'';}catch(e){return '';}})();""".trimIndent()) { r ->
@@ -874,7 +1132,22 @@ object WebViewStreamProxy {
 
         val finalUrl = streamUrl
         if (finalUrl.isNullOrBlank()) {
-            Log.w(TAG, "[PROXY] Falha: nenhuma URL __RC__/proxy capturada em $CAPTURE_TIMEOUT_MS ms")
+            if (empty204Count.get() >= 3) {
+                Log.w(TAG, "[PROXY] Túnel vazio 204+e18b73c9=[] x${empty204Count.get()} — servidor sem origem p/ este vid, abortando variante em ${System.currentTimeMillis() - startMs}ms (budget ${budget}ms)")
+            } else {
+                Log.w(TAG, "[PROXY] Falha: nenhuma URL __RC__/proxy capturada em ${budget} ms")
+            }
+            // v242 (Null_Pointer, teste d): replay OkHttp in-app do 2-step
+            // serverforms com cookies+UA do WebView. Falha esperada: 402/403
+            // (JA3-bound — clearance só vale no TLS do WebView). Se o replay
+            // DEVOLVER o mesmo 204+e18b73c9=[] do WebView => túnel vazio é
+            // decisão do BACKEND (origem morta), não da sessão/TLS/ad.
+            // Se devolver challenge/HTML diferente => diverge, pista nova.
+            try {
+                replayServerformsOnce(wv, serverPhpUrl, detailUrl)
+            } catch (e: Throwable) {
+                Log.w(TAG, "[REPLAY] err=${e.message?.take(120)}")
+            }
             shutdown()
             return null
         }
@@ -896,6 +1169,105 @@ object WebViewStreamProxy {
             java.io.File("/sdcard/redecanais_af_last_stream_url.txt").writeText(finalUrl)
         } catch (_: Throwable) {}
         return startLocalServer(finalUrl)
+    }
+
+    /**
+     * v242 (Null_Pointer, teste d): replay OkHttp in-app do 2-step serverforms.
+     * Lê __rcApiLog (URLs .api + headers que o bundle usou no WebView), repete
+     * step1/step2 via app.baseClient com cookies do CookieManager + UA do
+     * WebView + Referer server.php + x-requested-with. Loga [REPLAY] com
+     * code/len/preview de cada passo + classificação do 204:
+     *  - REPLAY_204_IDENTICO: mesmo {"2fa806d3":204,"e18b73c9":[]} => backend
+     *    decidiu túnel vazio (origem morta), NÃO é sessão/TLS/ad.
+     *  - REPLAY_DIVERGE: challenge/HTML/erro TLS => sessão diverge fora do WV.
+     * Roda em Dispatchers.Main (evaluateJavascript) + IO (OkHttp) — chamado
+     * ANTES do shutdown() para o WebView ainda estar vivo.
+     */
+    private suspend fun replayServerformsOnce(wv: WebView?, serverPhpUrl: String, detailUrl: String) {
+        if (wv == null) {
+            Log.w(TAG, "[REPLAY] sem WebView — abortado")
+            return
+        }
+        // 1) puxa __rcApiLog + cookies do WebView (thread Main)
+        val apiSnapshot = withContext(Dispatchers.Main) {
+            try {
+                val fut = CompletableFuture<String>()
+                wv.evaluateJavascript(
+                    """(function(){
+                        try{
+                          const log=(window.__rcApiLog||[]).slice(-6).map(e=>e.m+','+e.url+','+(e.hdrs||'{}')).join(' || ');
+                          return 'LOG='+log+' [SEP] CK='+document.cookie.slice(0,400)+' [SEP] LAST='+String(window.__rcLastApi||'').slice(0,300);
+                        }catch(e){return 'ERR '+e.message;}
+                    })();""".trimIndent()
+                ) { r -> fut.complete(r?.removeSurrounding("\"").orEmpty()) }
+                withContext(Dispatchers.IO) { fut.get(8, TimeUnit.SECONDS) }
+            } catch (e: Throwable) { "ERR ${e.message?.take(80)}" }
+        }
+        Log.i(TAG, "[REPLAY] snapshot: ${apiSnapshot.take(900)}")
+        val apiUrls = Regex("""(https?://[^,\s|]+\.api[^,\s|]*|/player3/[^\s|,|]+)""")
+            .findAll(apiSnapshot).map { it.groupValues[1] }.distinct().take(4).toList()
+        if (apiUrls.isEmpty()) {
+            Log.w(TAG, "[REPLAY] FALHA — __rcApiLog vazio (bundle não chamou .api nesta variante)")
+            return
+        }
+        // 2) cookies + UA no contexto do app
+        val cookies = try {
+            val cm = CookieManager.getInstance()
+            listOf(serverPhpUrl, detailUrl, "https://redecanais.af/")
+                .filter { it.isNotBlank() }.mapNotNull { runCatching { cm.getCookie(it) }.getOrNull() }
+                .flatMap { it.split(";") }.map { it.trim() }.filter { it.contains("=") }
+                .distinctBy { it.substringBefore("=") }.joinToString("; ")
+        } catch (_: Throwable) { "" }
+        val ua = CloudflareSolver.lastUserAgent ?: WebViewResolver.webViewUserAgent.orEmpty()
+        Log.i(TAG, "[REPLAY] urls=${apiUrls.size} cookies_len=${cookies.length} ck_names=" +
+            cookies.split(";").map { it.substringBefore("=").trim() }.joinToString(",").take(120))
+        // 3) replay sequencial via OkHttp do app (mesmo client = mesmo TLS/JA3 do app)
+        withContext(Dispatchers.IO) {
+            try {
+                val client = com.lagradost.cloudstream3.app.baseClient.newBuilder()
+                    .retryOnConnectionFailure(false).followRedirects(false)
+                    .followSslRedirects(false).build()
+                var step2Body = ""
+                apiUrls.forEachIndexed { i, raw ->
+                    val abs = when {
+                        raw.startsWith("http", true) -> raw
+                        raw.startsWith("/", true) -> "https://redecanais.af$raw"
+                        else -> "https://redecanais.af/player3/$raw"
+                    }
+                    try {
+                        val req = okhttp3.Request.Builder().url(abs).get()
+                            .header("User-Agent", ua)
+                            .header("Referer", serverPhpUrl)
+                            .header("Origin", "https://redecanais.af")
+                            .header("X-Requested-With", "XMLHttpRequest")
+                            .header("Accept", "application/json, text/javascript, */*; q=0.01")
+                            .header("Accept-Language", "pt-BR,pt;q=0.9,en;q=0.8")
+                            .apply { if (cookies.isNotBlank()) header("Cookie", cookies) }
+                            .build()
+                        val t0 = android.os.SystemClock.elapsedRealtime()
+                        client.newCall(req).execute().use { resp ->
+                            val body = resp.body?.string().orEmpty()
+                            val dt = android.os.SystemClock.elapsedRealtime() - t0
+                            val setCk = resp.headers.values("Set-Cookie").joinToString(";").take(200)
+                            val loc = resp.header("Location").orEmpty().take(150)
+                            Log.i(TAG, "[REPLAY] step${i + 1} code=${resp.code} dt=${dt}ms len=${body.length} setCk=$setCk loc=$loc url=${abs.take(150)}")
+                            Log.i(TAG, "[REPLAY] step${i + 1} preview=${body.take(300).replace("\n", " ")}")
+                            if (body.contains("e18b73c9") || body.contains("c4a0f6")) step2Body = body
+                            if (body.contains("\"2fa806d3\":204") && body.contains("\"e18b73c9\":[]"))
+                                Log.w(TAG, "[REPLAY_204_IDENTICO] OkHttp reproduziu o 204 do WebView — túnel vazio é decisão do backend (origem morta), não sessão/TLS/ad")
+                        }
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "[REPLAY] step${i + 1} FALHA err=${e.message?.take(150)} url=${abs.take(120)}")
+                    }
+                }
+                if (step2Body.isNotBlank() && !step2Body.contains("\"2fa806d3\":204"))
+                    Log.i(TAG, "[REPLAY_DIVERGE] corpo difere do 204 do WebView — pista nova, ver preview acima")
+                else if (step2Body.isBlank())
+                    Log.w(TAG, "[REPLAY_DIVERGE] nenhum passo retornou JSON serverforms (challenge/403/erro TLS provável — JA3-bound confirmado)")
+            } catch (e: Throwable) {
+                Log.w(TAG, "[REPLAY] client err=${e.message?.take(120)}")
+            }
+        }
     }
 
     /**
