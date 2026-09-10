@@ -1278,7 +1278,10 @@ object WebViewStreamProxy {
             } catch (e: Throwable) {
                 Log.w(TAG, "[REPLAY] err=${e.message?.take(120)}")
             }
-            shutdown()
+            // v248: NÃO dá shutdown aqui — o StreamResolver vai reaproveitar
+            // este MESMO WebView (challenge válido) para o embed legado via
+            // captureLegacyOnSameWebView. O shutdown acontece no
+            // captureLegacyEmbed (fallback) ou no fim da matriz.
             return null
         }
 

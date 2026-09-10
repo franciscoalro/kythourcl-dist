@@ -127,11 +127,13 @@ internal class StreamResolver(
                         .find(embedResolved)?.groupValues?.getOrNull(1)
                     if (!pRaw.isNullOrBlank()) {
                         val decoded = tryDecodeBase64OrUrl(pRaw)
-                        // v228: normaliza redecanaistv.af -> redecanais.af (domínio fora do ar)
-                        val normalized = decoded.replace("redecanaistv.af", "redecanais.af", ignoreCase = true)
-                        if (normalized.startsWith("http", true) && normalized != embedResolved) {
-                            Log.i(TAG, "[REDIRECT_API_EARLY] $pRaw -> $decoded -> $normalized")
-                            embedResolved = normalized
+                        // v248: NÃO normaliza mais o mirror para o domínio principal.
+                        // E2E v244-v247: mirror responde 403 no host mas nunca foi
+                        // testado no WebView (JA3-bound) — pode ter challenge
+                        // próprio válido e player vivo. Tenta o mirror REAL 1º.
+                        if (decoded.startsWith("http", true) && decoded != embedResolved) {
+                            Log.i(TAG, "[REDIRECT_API_EARLY] $pRaw -> $decoded (mirror real, sem normalizar)")
+                            embedResolved = decoded
                         }
                     }
                 }
@@ -157,14 +159,19 @@ internal class StreamResolver(
                         // v241: embed.php legado usa captureLegacyEmbed (player HTML5
                         // direto, sem recap) — captureAndServe travaria 45s esperando
                         // .captcha_button que não existe no player antigo.
-                        val isLegacy = variant.contains("embed.php", true) || variant.contains("play.php", true)
+                        // v248: watch.php?vid=<curto> usa captureAndServe (é página
+                        // canônica com iframe server.php, não player legado).
+                        val isLegacy = (variant.contains("embed.php", true) || variant.contains("play.php", true)) &&
+                            !variant.contains("watch.php", true)
                         // v241b: budget enxuto — o framework cancela loadLinks em ~10s
                         // (provado: Job cancelled 23:52:47). Early-exit 204 aborta a
                         // canônica em ~4s; embed legado roda em paralelo orçamentário.
                         // v242: 12s canônica / 20s embed / 15s play.php.
+                        // v248: watch 20s (canônico com recap, reaproveita reuse).
                         val budgetMs = when {
                             variant.contains("embed.php", true) -> 20000L
                             variant.contains("play.php", true) -> 15000L
+                            variant.contains("watch.php", true) -> 20000L
                             else -> 12000L
                         }
                         Log.i(TAG, "[PROXY_LINK] tentativa $attempt/${variants.size} budget=${budgetMs}ms legacy=$isLegacy url=$variant")
@@ -250,9 +257,21 @@ internal class StreamResolver(
     // nunca testada em lab).
     private fun buildServerVariants(embedUrl: String, detailUrl: String = ""): List<String> {
         val out = linkedSetOf(embedUrl)
+        // v248: base = host do próprio embed (mirror redecanaistv.af quando o
+        // redirect.api resolve para ele) — variantes no host errado herdariam
+        // challenge/origem do domínio errado.
+        val base = try {
+            val u = java.net.URI(embedUrl)
+            if (!u.host.isNullOrBlank()) "${u.scheme ?: "https"}://${u.host}" else mainUrl
+        } catch (_: Throwable) { mainUrl }
+        if (base != mainUrl) Log.i(TAG, "[MIRROR_BASE] variantes no host do embed: $base")
         val vid = Regex("""[?&]vid=([^&]+)""", RegexOption.IGNORE_CASE)
             .find(embedUrl)?.groupValues?.getOrNull(1).orEmpty()
         if (vid.isBlank()) return out.toList()
+        // v248: preserva o gid do iframe canônico também no embed/play legado
+        // (nunca testado: gid=0B265... pode ser exigido em qualquer endpoint).
+        val gid = Regex("""[?&](gid|token|key|auth)=([^&]+)""", RegexOption.IGNORE_CASE)
+            .find(embedUrl)?.let { "&${it.groupValues[1]}=${it.groupValues[2]}" }.orEmpty()
         // id curto: 1º do detalhe (watch/musicvideo.php?vid=<9hex> ou slug
         // terminando em _<9hex>.html — detalhe de filme usa slug!), senão do
         // próprio embed, senão o longo. v246b: slug _a915c0263.html NÃO casava
@@ -264,10 +283,13 @@ internal class StreamResolver(
         val shortFromEmbed = Regex("""[?&]vid=([0-9a-f]{9})\b""", RegexOption.IGNORE_CASE)
             .find(embedUrl)?.groupValues?.getOrNull(1)
         val embedId = shortFromDetail ?: shortFromEmbed ?: vid
-        Log.i(TAG, "[EMBED_ID] embedId=$embedId curtoDetalhe=$shortFromDetail curtoEmbed=$shortFromEmbed iframeVid=$vid detail=${detailUrl.take(120)}")
-        out.add("$mainUrl/embed.php?vid=$embedId")
-        out.add("$mainUrl/play.php?vid=$embedId")
-        return out.take(3)
+        Log.i(TAG, "[EMBED_ID] embedId=$embedId curtoDetalhe=$shortFromDetail curtoEmbed=$shortFromEmbed iframeVid=$vid gid=[$gid] detail=${detailUrl.take(120)}")
+        out.add("$base/embed.php?vid=$embedId$gid")
+        out.add("$base/play.php?vid=$embedId$gid")
+        // v248: watch.php?vid=<curto> — endpoint canônico de série/filme nunca
+        // testado no lab (só server.php foi). 4ª tentativa.
+        out.add("$base/watch.php?vid=$embedId")
+        return out.take(4)
     }
 
     /**
