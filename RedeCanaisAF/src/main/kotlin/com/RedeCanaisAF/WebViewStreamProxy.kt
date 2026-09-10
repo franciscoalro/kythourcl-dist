@@ -3,6 +3,7 @@ package com.RedeCanaisAF
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.graphics.Bitmap
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -10,6 +11,8 @@ import android.util.Log
 import android.view.MotionEvent
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.ServiceWorkerClient
+import android.webkit.ServiceWorkerController
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -65,6 +68,41 @@ object WebViewStreamProxy {
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var streamUrl: String? = null
     @Volatile private var isServing = false
+    @Volatile private var swInstalled = false
+
+    /**
+     * v251: registra ServiceWorker globalmente — o site usa /sw.js para
+     * interceptar fetch de serverforms.api/__RC__/proxy e enriquecer a sessão
+     * (extra credenciais/cookies que o app não monta). No WebView de
+     * produção (browser-harness/CDP) o SW estava ativo foi o único ambiente
+     * onde o __RC__/proxy retornou MP4 real e video.readyState=4; no WebView
+     * tradicional o SW vinha desativado (sw.js falhava silencioso) e o bundle
+     * caía em no-video. Instalado 1x por processo; tolera API<24 (N+).
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    fun ensureServiceWorker() {
+        if (swInstalled) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
+        try {
+            val sw = ServiceWorkerController.getInstance()
+            sw.setServiceWorkerClient(object : ServiceWorkerClient() {
+                override fun shouldInterceptRequest(request: WebResourceRequest): WebResourceResponse? {
+                    try {
+                        val u = request.url.toString()
+                        if (u.contains("serverforms", true) || u.contains("__RC__", true)
+                            || u.contains("tos-alisg", true) || u.contains("proxy", true)
+                            || u.contains("sw.js", true)
+                        ) Log.i(TAG, "[SW] shouldInterceptRequest ${request.method} " + u.take(260))
+                    } catch (_: Throwable) {}
+                    return null // delegar ao SW do site
+                }
+            })
+            swInstalled = true
+            Log.i(TAG, "[SW] registrado (ServiceWorkerClient global)")
+        } catch (e: Throwable) {
+            Log.w(TAG, "[SW] não registrado: ${e.message?.take(140)}")
+        }
+    }
 
     /**
      * Captura o stream real (__RC__/proxy) abrindo server.php no WebView e clicando no recap.
@@ -146,9 +184,11 @@ object WebViewStreamProxy {
                         android.widget.FrameLayout.LayoutParams.MATCH_PARENT
                     )
                     cookieManager.setAcceptThirdPartyCookies(this, true)
+                    try { ensureServiceWorker() } catch (_: Throwable) {}
                     settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
+                        @Suppress("DEPRECATION") try { databaseEnabled = true } catch (_: Throwable) {}
                         blockNetworkImage = false
                         loadsImagesAutomatically = true
                         useWideViewPort = true
@@ -374,9 +414,11 @@ object WebViewStreamProxy {
                         android.widget.FrameLayout.LayoutParams.MATCH_PARENT
                     )
                     cookieManager.setAcceptThirdPartyCookies(this, true)
+                    try { ensureServiceWorker() } catch (_: Throwable) {}
                     settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
+                        @Suppress("DEPRECATION") try { databaseEnabled = true } catch (_: Throwable) {}
                         blockNetworkImage = true
                         loadsImagesAutomatically = false
                         useWideViewPort = false
@@ -582,9 +624,22 @@ object WebViewStreamProxy {
                         android.widget.FrameLayout.LayoutParams.MATCH_PARENT
                     )
                     cookieManager.setAcceptThirdPartyCookies(this, true)
+                    // v251p: corrige SyntaxError que impedia o hook inteiro.
+                    // A linha 228 tinha faltando `})()` antes de `)()}` — pegava
+                    // todo o hookJs em catch(e) = nunca registrava fetch/hook.
+                    // SW dependia do mesmo WebView, então também não interceptava
+                    // serverforms (v250 ficava no-video; v251 corrigido).
+                    try { ensureServiceWorker() } catch (_: Throwable) {}
                     settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                            @Suppress("DEPRECATION") setAllowFileAccess(true)
+                            @Suppress("DEPRECATION") allowContentAccess = true
+                            @Suppress("DEPRECATION") allowFileAccessFromFileURLs = true
+                            @Suppress("DEPRECATION") allowUniversalAccessFromFileURLs = true
+                        }
+                        databaseEnabled = true
                         blockNetworkImage = false
                         loadsImagesAutomatically = true
                         useWideViewPort = true
@@ -797,7 +852,6 @@ object WebViewStreamProxy {
                           }
                           try{ Array.from(document.querySelectorAll('video')).forEach(rcWatchVideo); }catch(_){}
                           document.addEventListener('click', function(e){
-                          document.addEventListener('click', function(e){
                             try{
                               const t=e.target;
                               console.log('[HOOK] click tag='+(t&&t.tagName||'')+' id='+(t&&t.id||'')+' class='+(t&&t.className||'').toString().slice(0,60)+' prevented='+e.defaultPrevented+' trusted='+e.isTrusted);
@@ -968,6 +1022,14 @@ object WebViewStreamProxy {
      * nem destruir WebView. Retorna URL local ou null (sem shutdown: o
      * StreamResolver decide o ciclo de vida do único).
      */
+    /**
+     * v251: registra SW de forma covarde — se já estiver instalado sai;
+     * no nível do WebView (API 24+) o ServiceWorkerController global
+     * cobre todos os WebViews do processo, então 1 instalação vale o
+     * jar inteiro.
+     */
+    private fun ensureSWFast() { try { ensureServiceWorker() } catch (_: Throwable) {} }
+
     @SuppressLint("SetJavaScriptEnabled")
     suspend fun captureAndServeReuse(
         existing: WebView,
@@ -979,12 +1041,15 @@ object WebViewStreamProxy {
         val pageReady = AtomicBoolean(false)
         val clickDone = AtomicBoolean(false)
         val captureHolder = AtomicBoolean(false)
-        // NOTE: a reconfiguração de clients (hookJs + shouldIntercept) usa os
-        // mesmos blocos do captureAndServe; para não duplicar ~400 linhas, o
-        // reuse delega: instala clients mínimos (intercept+hook) no jar
-        // existente e roda o loop compartilhado.
         withContext(Dispatchers.Main) {
             try {
+                ensureSWFast()
+                // v251: o reuse anterior era STUB (só loadUrl) — nenhum client
+                // ou hook era instalado, por isso btn=true/rcFn=true vídeo=none
+                // existiu 10s e nunca navegou. Habilita SW e reinstala o
+                // shouldIntercept/hook mínimo para que o player monte e toque.
+                try { existing.settings.domStorageEnabled = true } catch (_: Throwable) {}
+                try { @Suppress("DEPRECATION") existing.settings.databaseEnabled = true } catch (_: Throwable) {}
                 existing.stopLoading()
                 pageReady.set(false)
                 // reinstala o hook de captura no novo documento (será

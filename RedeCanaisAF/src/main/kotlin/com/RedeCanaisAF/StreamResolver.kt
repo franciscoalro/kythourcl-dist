@@ -157,7 +157,14 @@ internal class StreamResolver(
                     // variante no MESMO jar (challenge válido), sem shutdown entre
                     // tentativas (o shutdown matava o challenge e o legado caía em
                     // Attention Required). Shutdown só no fim (sucesso/timeout).
-                    WebViewStreamProxy.ensureSingleWebView()
+                    // v251: a primeira variante canônica deve CRIAR o único WebView
+                    // pelo captureAndServe completo, que instala WebViewClient,
+                    // shouldInterceptRequest, hook JS, recap e video.play/playing.
+                    // v250 criava antes um WebView vazio em ensureSingleWebView e o
+                    // captureAndServeReuse apenas navegava: não havia clients/hooks,
+                    // por isso o mesmo frame que toca no browser-harness ficava em
+                    // no-video. captureAndServe NÃO destrói em falha; as variantes
+                    // seguintes reutilizam exatamente esse único jar.
                     var attempt = 0
                     try {
                     for (variant in variants) {
@@ -181,11 +188,13 @@ internal class StreamResolver(
                             else -> 12000L
                         }
                         Log.i(TAG, "[PROXY_LINK] tentativa $attempt/${variants.size} budget=${budgetMs}ms legacy=$isLegacy url=$variant")
-                        localProxyUrl = if (isLegacy) {
-                            // v250: sempre no WebView único (sem fallback p/ WebView
-                            // novo — jar novo = challenge novo = Attention Required).
-                            WebViewStreamProxy.captureLegacyOnSingleWebView(variant, budgetMs)
-                        } else WebViewStreamProxy.captureAndServeSingle(variant, budgetMs, cleanUrl)
+                        localProxyUrl = when {
+                            // v251: tentativa 1 cria/configura o ÚNICO WebView com
+                            // clients completos. Não usar ensureSingleWebView antes.
+                            attempt == 1 -> WebViewStreamProxy.captureAndServe(variant, budgetMs, cleanUrl)
+                            isLegacy -> WebViewStreamProxy.captureLegacyOnSingleWebView(variant, budgetMs)
+                            else -> WebViewStreamProxy.captureAndServeSingle(variant, budgetMs, cleanUrl)
+                        }
                         if (localProxyUrl != null) break
                         Log.i(TAG, "[PROXY_LINK] tentativa $attempt falhou (204/timeout) — próxima variante")
                     }
