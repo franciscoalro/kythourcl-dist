@@ -2,5 +2,5 @@
 
 // v235: retry observed legacy poster directory after guessed path fails.
 cloudstream {
-    version = 248
+    version = 250
 }

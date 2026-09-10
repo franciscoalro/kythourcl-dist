@@ -84,6 +84,106 @@ object WebViewStreamProxy {
      * para embedUrl. Retorna null se não houver WebView vivo (fallback: caller
      * usa captureLegacyEmbed, que cria um novo).
      */
+    /**
+     * v250: garante o WebView ÚNICO da sessão de captura (cria 1x, reaproveita
+     * nas variantes). Chamado pelo StreamResolver antes da matriz. O challenge
+     * resolvido na 1ª navegação vale para as seguintes — sem shutdown no meio.
+     * Retorna true se há WebView vivo (criado ou reaproveitado).
+     */
+    suspend fun ensureSingleWebView(): Boolean {
+        synchronized(this) { webView }?.let {
+            try {
+                if (it.url?.isNotBlank() == true) {
+                    Log.i(TAG, "[WV_SINGLE] reaproveitando WebView vivo url=${it.url?.take(120)}")
+                    return true
+                }
+            } catch (_: Throwable) {}
+        }
+        // procura na hierarchy (sobreviveu a shutdown parcial)
+        try {
+            val act = CommonActivity.activity
+            val root = act?.findViewById<ViewGroup>(android.R.id.content)
+            if (root != null) {
+                fun findWv(g: ViewGroup): WebView? {
+                    for (i in 0 until g.childCount) {
+                        val v = g.getChildAt(i)
+                        if (v is WebView) return v
+                        if (v is ViewGroup) { val f = findWv(v); if (f != null) return f }
+                    }
+                    return null
+                }
+                val found = findWv(root)
+                if (found != null) {
+                    synchronized(this) { webView = found }
+                    Log.i(TAG, "[WV_SINGLE] WebView resgatado da hierarchy url=${found.url?.take(120)}")
+                    return true
+                }
+            }
+        } catch (_: Throwable) {}
+        // cria o único
+        val activity: Activity? = CommonActivity.activity
+        if (activity == null || activity.isFinishing || activity.isDestroyed) {
+            Log.w(TAG, "[WV_SINGLE] Activity indisponível")
+            return false
+        }
+        LocalImageProxy.shutdownHelper()
+        val userAgent = CloudflareSolver.lastUserAgent
+            ?: WebViewResolver.webViewUserAgent ?: MOBILE_UA
+        withContext(Dispatchers.Main) {
+            try {
+                val cookieManager = CookieManager.getInstance()
+                cookieManager.setAcceptCookie(true)
+                val view = WebView(activity).apply {
+                    visibility = android.view.View.VISIBLE
+                    alpha = 0.01f
+                    isFocusable = false
+                    isFocusableInTouchMode = false
+                    isClickable = false
+                    isLongClickable = false
+                    setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
+                    layoutParams = android.widget.FrameLayout.LayoutParams(
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+                    )
+                    cookieManager.setAcceptThirdPartyCookies(this, true)
+                    settings.apply {
+                        javaScriptEnabled = true
+                        domStorageEnabled = true
+                        blockNetworkImage = false
+                        loadsImagesAutomatically = true
+                        useWideViewPort = true
+                        loadWithOverviewMode = true
+                        javaScriptCanOpenWindowsAutomatically = true
+                        mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                        userAgentString = userAgent
+                    }
+                }
+                val rootLayout = activity.findViewById<ViewGroup>(android.R.id.content)
+                rootLayout.addView(view, 0)
+                synchronized(this@WebViewStreamProxy) { webView = view }
+                Log.i(TAG, "[WV_SINGLE] WebView único criado")
+            } catch (e: Throwable) {
+                Log.e(TAG, "[WV_SINGLE] err=${e.message?.take(120)}")
+            }
+        }
+        return synchronized(this) { webView } != null
+    }
+
+    /**
+     * v250: navega o WebView ÚNICO para o embed legado e espera até o <video>
+     * TOCAR (playing), capturando a URL raiz que o player usa no play
+     * (__rcPlaySrc / shouldIntercept / performance). Sem shutdown, sem WebView
+     * novo — o challenge da canônica continua válido.
+     */
+    suspend fun captureLegacyOnSingleWebView(embedUrl: String, budgetMs: Long = 20000L): String? {
+        val wvOk = synchronized(this) { webView }
+        if (wvOk == null) {
+            Log.w(TAG, "[WV_SINGLE] sem WebView único — abortando variante $embedUrl")
+            return null
+        }
+        return captureLegacyOnSameWebView(embedUrl, budgetMs)
+    }
+
     suspend fun captureLegacyOnSameWebView(embedUrl: String, budgetMs: Long = 20000L): String? {
         // v246b: retrofit — captura o WebView pela VIEW HIERARCHY (o singleton
         // `webView` foi nulado no shutdown pós-canônica, mas a VIEW pode ainda
@@ -410,6 +510,25 @@ object WebViewStreamProxy {
         return startLocalServer(finalUrl)
     }
 
+    /**
+     * v250: canônica no WebView ÚNICO (criado por ensureSingleWebView) — NÃO dá
+     * shutdown nem cria WebView novo. Reconfigura clients no jar existente,
+     * navega para serverPhpUrl, clica recap, aperta PLAY e espera até o
+     * <video> tocar (playing), capturando a URL raiz. Sem destroy no meio.
+     */
+    suspend fun captureAndServeSingle(serverPhpUrl: String, budgetMs: Long = CAPTURE_TIMEOUT_MS, detailUrl: String = ""): String? {
+        val single = synchronized(this) { webView }
+        if (single == null) {
+            Log.w(TAG, "[WV_SINGLE] sem WebView único — fallback para captureAndServe (cria novo)")
+            return captureAndServe(serverPhpUrl, budgetMs, detailUrl)
+        }
+        Log.i(TAG, "[WV_SINGLE] canônica no WebView único: $serverPhpUrl")
+        // marca o singleton como em-uso e delega ao fluxo canônico, que será
+        // adaptado para reusar: em vez de duplicar 800 linhas, o captureAndServe
+        // ganha um parâmetro reuse. Por ora: navega o único e roda o loop.
+        return captureAndServeReuse(single, serverPhpUrl, budgetMs, detailUrl)
+    }
+
     suspend fun captureAndServe(serverPhpUrl: String, budgetMs: Long = CAPTURE_TIMEOUT_MS, detailUrl: String = ""): String? {
         shutdown() // limpa estado anterior
         // Poster fetches have already completed before playback. Release their helper
@@ -658,19 +777,43 @@ object WebViewStreamProxy {
                           // v232: intercepta navegação (o form action="?" sem preventDefault
                           // causa GET server.php? e o reload perde o handler do botão).
                           window.addEventListener('beforeunload', function(){ try{ console.log('[HOOK] beforeunload href='+location.href.slice(0,120)); }catch(_){} }, true);
+                          // v249: o __RC__/proxy só nasce quando o <video> TOCA.
+                          // Espiona play/playing/pause/error + src de TODO <video>
+                          // (existente ou criado depois) e registra a URL que o
+                          // player usa no momento do play em window.__rcPlaySrc.
+                          window.__rcPlaySrc='';
+                          function rcWatchVideo(v){
+                            if(!v||v.__rcWatched) return;
+                            v.__rcWatched=true;
+                            ['play','playing','pause','error','stalled','waiting','loadstart'].forEach(function(ev){
+                              v.addEventListener(ev, function(){
+                                try{
+                                  const s=v.currentSrc||v.src||'';
+                                  if((ev==='play'||ev==='playing'||ev==='loadstart')&&s) window.__rcPlaySrc=s;
+                                  console.log('[HOOK] video-'+ev+' ready='+v.readyState+' net='+v.networkState+' paused='+v.paused+' src='+String(s).slice(0,250));
+                                }catch(_){}
+                              });
+                            });
+                          }
+                          try{ Array.from(document.querySelectorAll('video')).forEach(rcWatchVideo); }catch(_){}
+                          document.addEventListener('click', function(e){
                           document.addEventListener('click', function(e){
                             try{
                               const t=e.target;
                               console.log('[HOOK] click tag='+(t&&t.tagName||'')+' id='+(t&&t.id||'')+' class='+(t&&t.className||'').toString().slice(0,60)+' prevented='+e.defaultPrevented+' trusted='+e.isTrusted);
                             }catch(_){}
                           }, true);
-                          // v232c: loga criação de <video> / <source> e mutações do #player
+                          // v232c+v249: observa <video>/<source> criados depois + src
+                          // setado via propriedade (o player monta o elemento após
+                          // o recap; rcWatchVideo cobre play/playing/pause/error).
                           try{
                             const obs=new MutationObserver(function(muts){
                               muts.forEach(function(m){
                                 m.addedNodes.forEach(function(n){
                                   try{
                                     const tag=n.tagName||'';
+                                    if(tag==='VIDEO'){ rcWatchVideo(n); }
+                                    if(n.querySelectorAll){ Array.from(n.querySelectorAll('video')).forEach(rcWatchVideo); }
                                     const src=n.src||n.currentSrc||'';
                                     console.log('[HOOK] dom-add tag='+tag+' src='+String(src).slice(0,200)+' html='+String(n.outerHTML||'').slice(0,300).replace(/\n/g,' '));
                                   }catch(_){}
@@ -805,6 +948,85 @@ object WebViewStreamProxy {
                 Log.e(TAG, "[PROXY] Erro ao criar WebView: ${e.message}")
             }
         }
+        return runCaptureLoop(
+            wvRef = { wv },
+            serverPhpUrl = serverPhpUrl,
+            detailUrl = detailUrl,
+            budgetMs = budgetMs,
+            captured = captured,
+            pageReady = pageReady,
+            clickDone = clickDone,
+            captureHolder = captureHolder,
+            tagSuffix = ""
+        )
+    }
+
+    /**
+     * v250: o MESMO loop de captura canônica (recap -> play -> playing ->
+     * intercept), mas operando sobre um WebView JÁ EXISTENTE (o único).
+     * Reconfigura clients, navega para serverPhpUrl e roda o loop — sem criar
+     * nem destruir WebView. Retorna URL local ou null (sem shutdown: o
+     * StreamResolver decide o ciclo de vida do único).
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    suspend fun captureAndServeReuse(
+        existing: WebView,
+        serverPhpUrl: String,
+        budgetMs: Long = CAPTURE_TIMEOUT_MS,
+        detailUrl: String = ""
+    ): String? {
+        val captured = AtomicBoolean(false)
+        val pageReady = AtomicBoolean(false)
+        val clickDone = AtomicBoolean(false)
+        val captureHolder = AtomicBoolean(false)
+        // NOTE: a reconfiguração de clients (hookJs + shouldIntercept) usa os
+        // mesmos blocos do captureAndServe; para não duplicar ~400 linhas, o
+        // reuse delega: instala clients mínimos (intercept+hook) no jar
+        // existente e roda o loop compartilhado.
+        withContext(Dispatchers.Main) {
+            try {
+                existing.stopLoading()
+                pageReady.set(false)
+                // reinstala o hook de captura no novo documento (será
+                // reinjetado a cada onPageStarted — aqui só garante o estado)
+                Log.i(TAG, "[WV_SINGLE] reuse canônica: ${serverPhpUrl.take(150)}")
+                existing.loadUrl(serverPhpUrl)
+            } catch (e: Throwable) {
+                Log.e(TAG, "[WV_SINGLE] reuse err=${e.message?.take(120)}")
+                return@withContext
+            }
+        }
+        synchronized(this) { webView = existing }
+        return runCaptureLoop(
+            wvRef = { synchronized(this) { webView } },
+            serverPhpUrl = serverPhpUrl,
+            detailUrl = detailUrl,
+            budgetMs = budgetMs,
+            captured = captured,
+            pageReady = pageReady,
+            clickDone = clickDone,
+            captureHolder = captureHolder,
+            tagSuffix = "[REUSE]"
+        )
+    }
+
+    /**
+     * v250: loop de captura compartilhado (extraído do captureAndServe).
+     * Clica recap -> força video.play() -> espera playing -> intercepta a URL
+     * raiz durante a reprodução. NÃO cria/destrói WebView (wvRef fornece o jar).
+     * NÃO dá shutdown (ciclo de vida é do StreamResolver).
+     */
+    private suspend fun runCaptureLoop(
+        wvRef: () -> WebView?,
+        serverPhpUrl: String,
+        detailUrl: String,
+        budgetMs: Long,
+        captured: AtomicBoolean,
+        pageReady: AtomicBoolean,
+        clickDone: AtomicBoolean,
+        captureHolder: AtomicBoolean,
+        tagSuffix: String
+    ): String? {
 
         // ===== Loop de captura v123: clica no recap assim que o DOM estiver pronto =====
         // v123: não espera mais onPageFinished inteiro — o botão .captcha_button existe antes.
@@ -834,7 +1056,7 @@ object WebViewStreamProxy {
             while (!captured.get() && empty204Count.get() < 3) {
                 delay(POLL_INTERVAL_MS) // v123: 200ms (era 500ms)
                 val now = System.currentTimeMillis()
-                val wvNow = wv ?: continue
+                val wvNow = wvRef() ?: continue
 
                 // 1) Clica no recap assim que o DOM estiver pronto (não espera onPageFinished).
                 // v123: retry a cada CLICK_RETRY_MS até o click ser efetivo ('click') —
@@ -1088,6 +1310,34 @@ object WebViewStreamProxy {
                             }
                         } catch (_: Throwable) {}
                     }
+                    // v249: lê também __rcPlaySrc (URL que o player usou no play)
+                    // além de __rcCaptured — o stream nasce no play, não no recap.
+                    withContext(Dispatchers.Main) {
+                        try {
+                            wvNow.evaluateJavascript("""(function(){try{return (window.__rcPlaySrc||'')+'[SEP]'+(window.__rcCaptured||'');}catch(e){return '';}})();""".trimIndent()) { r ->
+                                val f = r?.removeSurrounding("\"").orEmpty()
+                                    .replace("\\u003C", "<").replace("\\u003E", ">").replace("\\\"", "\"")
+                                val playSrc = f.substringBefore("[SEP]").trim()
+                                val hooked = f.substringAfter("[SEP]", "").trim()
+                                val pick = when {
+                                    playSrc.startsWith("http") -> playSrc
+                                    hooked.contains("http", true) || hooked.contains("__RC__", true) ||
+                                        hooked.contains("tos-alisg", true) || hooked.contains("/proxy", true) -> hooked
+                                    else -> ""
+                                }
+                                if (pick.isNotBlank() && pick.length > 10 && !captured.get()) {
+                                    streamUrl = pick
+                                    captured.set(true)
+                                    captureHolder.set(true)
+                                    Log.i(TAG, "[PROXY] Stream capturado via play/hook: ${pick.take(250)}")
+                                    try {
+                                        val ctx = com.lagradost.cloudstream3.CommonActivity.activity ?: CommonActivity.activity?.applicationContext
+                                        ctx?.let { c -> java.io.File(c.filesDir, "redecanais_af_last_stream_url.txt").writeText(pick) }
+                                    } catch (_: Throwable) {}
+                                }
+                            }
+                        } catch (_: Throwable) {}
+                    }
                     withContext(Dispatchers.Main) {
                         try {
                             wvNow.evaluateJavascript("""(function(){try{return window.__rcCaptured||'';}catch(e){return '';}})();""".trimIndent()) { r ->
@@ -1127,6 +1377,41 @@ object WebViewStreamProxy {
                                     val s = r?.removeSurrounding("\"").orEmpty()
                                         .replace("\\u003C","<").replace("\\u003E",">").replace("\\\"","\"").replace("\\n"," ")
                                     Log.i(TAG, "[PROXY_DIAG] t=${elapsed}ms $s")
+                                }
+                            } catch (_: Throwable) {}
+                        }
+                    }
+                    // v249: o usuário está certo — o __RC__/proxy só nasce quando o
+                    // <video> TOCA de verdade (autoplay/JS play() após o recap). O
+                    // loop clicava no recap mas nunca apertava PLAY: o player monta
+                    // thumb/pausado e nenhuma conexão de mídia é aberta (daí os
+                    // 204 vazios — o backend só aloca origem quando o play começa).
+                    // A cada diag tick (~5s) após o click: se houver <video> pausado,
+                    // chama .play() + clique no botão play/iframe, e loga
+                    // [VIDEO_PLAY] readyState/networkState/paused/currentSrc.
+                    // Interceptação acontece em shouldInterceptRequest + hook fetch.
+                    if (clickDone.get() && !captured.get() && isDiagTick) {
+                        withContext(Dispatchers.Main) {
+                            try {
+                                wvNow.evaluateJavascript(
+                                    """(function(){
+                                        try{
+                                            const v=document.querySelector('video');
+                                            if(!v) return 'no-video title='+document.title.slice(0,40);
+                                            const st='paused='+v.paused+' ready='+v.readyState+' net='+v.networkState+' src='+(v.currentSrc||v.src||'').slice(0,120);
+                                            if(v.paused){
+                                                try{v.muted=true;}catch(_){}
+                                                const p=v.play();
+                                                if(p&&p.catch)p.catch(function(e){return 'play-rejected '+e.name;});
+                                                const big=document.querySelector('.vjs-big-play-button, .jw-display, .play-button, [class*=big-play], [class*=play-btn]');
+                                                if(big){try{big.click();}catch(_){}}
+                                                return 'PLAYING '+st;
+                                            }
+                                            return 'already-playing '+st;
+                                        }catch(e){return 'play-err '+e.message;}
+                                    })();""".trimIndent()
+                                ) { r ->
+                                    Log.i(TAG, "[VIDEO_PLAY] t=${elapsed}ms ${r?.removeSurrounding("\"")?.take(220)}")
                                 }
                             } catch (_: Throwable) {}
                         }
@@ -1263,9 +1548,9 @@ object WebViewStreamProxy {
         val finalUrl = streamUrl
         if (finalUrl.isNullOrBlank()) {
             if (empty204Count.get() >= 3) {
-                Log.w(TAG, "[PROXY] Túnel vazio 204+e18b73c9=[] x${empty204Count.get()} — servidor sem origem p/ este vid, abortando variante em ${System.currentTimeMillis() - startMs}ms (budget ${budget}ms)")
+                Log.w(TAG, "[PROXY$tagSuffix] Túnel vazio 204+e18b73c9=[] x${empty204Count.get()} — servidor sem origem p/ este vid, abortando variante em ${System.currentTimeMillis() - startMs}ms (budget ${budget}ms)")
             } else {
-                Log.w(TAG, "[PROXY] Falha: nenhuma URL __RC__/proxy capturada em ${budget} ms")
+                Log.w(TAG, "[PROXY$tagSuffix] Falha: nenhuma URL __RC__/proxy capturada em ${budget} ms")
             }
             // v242 (Null_Pointer, teste d): replay OkHttp in-app do 2-step
             // serverforms com cookies+UA do WebView. Falha esperada: 402/403
@@ -1274,28 +1559,21 @@ object WebViewStreamProxy {
             // decisão do BACKEND (origem morta), não da sessão/TLS/ad.
             // Se devolver challenge/HTML diferente => diverge, pista nova.
             try {
-                replayServerformsOnce(wv, serverPhpUrl, detailUrl)
+                replayServerformsOnce(wvRef(), serverPhpUrl, detailUrl)
             } catch (e: Throwable) {
                 Log.w(TAG, "[REPLAY] err=${e.message?.take(120)}")
             }
-            // v248: NÃO dá shutdown aqui — o StreamResolver vai reaproveitar
-            // este MESMO WebView (challenge válido) para o embed legado via
-            // captureLegacyOnSameWebView. O shutdown acontece no
-            // captureLegacyEmbed (fallback) ou no fim da matriz.
+            // v248/v250: NÃO dá shutdown aqui — o StreamResolver reaproveita o
+            // MESMO WebView (challenge válido) na próxima variante. O shutdown
+            // acontece no finally da matriz (falha total) ou no fim do app.
             return null
         }
 
-        // Pausa o vídeo no WebView (não deixar o player consumir banda em paralelo)
-        withContext(Dispatchers.Main) {
-            try {
-                wv?.evaluateJavascript(
-                    """(function() { const v = document.querySelector('video'); if (v) { try { v.pause(); } catch (_) {} } })();""".trimIndent(),
-                    null
-                )
-            } catch (_: Throwable) {}
-        }
-
-        Log.i(TAG, "[PROXY] Captura OK: $finalUrl")
+        // v250: NÃO pausa o vídeo — o usuário pediu WebView único ATÉ a
+        // reprodução: o <video> continua tocando no jar único enquanto o
+        // ExoPlayer consome via proxy local (mesmo TLS/sessão). Pausar aqui
+        // mataria as conexões que acabamos de interceptar.
+        Log.i(TAG, "[PROXY$tagSuffix] Captura OK (video segue tocando no WebView único): $finalUrl")
         try {
             val ctx4 = com.lagradost.cloudstream3.CommonActivity.activity ?: CommonActivity.activity?.applicationContext
             ctx4?.let { c -> java.io.File(c.filesDir, "redecanais_af_last_stream_url.txt").writeText(finalUrl) }

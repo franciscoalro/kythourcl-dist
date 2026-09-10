@@ -153,7 +153,13 @@ internal class StreamResolver(
                     val variants = buildServerVariants(embedResolved, cleanUrl)
                     Log.i(TAG, "[EMBED_VARIANTS] n=${variants.size} " + variants.joinToString(" | ").take(900))
                     var localProxyUrl: String? = null
+                    // v250: WebView ÚNICO até o playing — cria 1x, navega variante a
+                    // variante no MESMO jar (challenge válido), sem shutdown entre
+                    // tentativas (o shutdown matava o challenge e o legado caía em
+                    // Attention Required). Shutdown só no fim (sucesso/timeout).
+                    WebViewStreamProxy.ensureSingleWebView()
                     var attempt = 0
+                    try {
                     for (variant in variants) {
                         attempt++
                         // v241: embed.php legado usa captureLegacyEmbed (player HTML5
@@ -176,14 +182,15 @@ internal class StreamResolver(
                         }
                         Log.i(TAG, "[PROXY_LINK] tentativa $attempt/${variants.size} budget=${budgetMs}ms legacy=$isLegacy url=$variant")
                         localProxyUrl = if (isLegacy) {
-                            // v246: tenta PRIMEIRO no WebView canônico reaproveitado
-                            // (challenge válido); se não houver WebView vivo (null),
-                            // cai para captureLegacyEmbed (WebView novo + cookies).
-                            WebViewStreamProxy.captureLegacyOnSameWebView(variant, budgetMs)
-                                ?: WebViewStreamProxy.captureLegacyEmbed(variant, budgetMs)
-                        } else WebViewStreamProxy.captureAndServe(variant, budgetMs, cleanUrl)
+                            // v250: sempre no WebView único (sem fallback p/ WebView
+                            // novo — jar novo = challenge novo = Attention Required).
+                            WebViewStreamProxy.captureLegacyOnSingleWebView(variant, budgetMs)
+                        } else WebViewStreamProxy.captureAndServeSingle(variant, budgetMs, cleanUrl)
                         if (localProxyUrl != null) break
                         Log.i(TAG, "[PROXY_LINK] tentativa $attempt falhou (204/timeout) — próxima variante")
+                    }
+                    } finally {
+                        if (localProxyUrl == null) WebViewStreamProxy.shutdown()
                     }
                     if (localProxyUrl != null) {
                         Log.i(TAG, "[PROXY_LINK] emitindo proxy local: $localProxyUrl")
