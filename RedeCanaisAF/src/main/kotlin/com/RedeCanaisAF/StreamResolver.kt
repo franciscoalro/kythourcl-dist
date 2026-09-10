@@ -306,10 +306,11 @@ internal class StreamResolver(
         Log.i(TAG, "[EMBED_ID] embedId=$embedId curtoDetalhe=$shortFromDetail curtoEmbed=$shortFromEmbed iframeVid=$vid gid=[$gid] detail=${detailUrl.take(120)}")
         out.add("$base/embed.php?vid=$embedId$gid")
         out.add("$base/play.php?vid=$embedId$gid")
-        // v248: watch.php?vid=<curto> — endpoint canônico de série/filme nunca
-        // testado no lab (só server.php foi). 4ª tentativa.
-        out.add("$base/watch.php?vid=$embedId")
-        return out.take(4)
+        // v254: watch.php removido da matriz WebView — é página de detalhe
+        // com iframe, não player; captureAndServe ficava btn=false/rcFn=false
+        // 20s em vão (diag v253). O fluxo normal (resolveStreamOrExtractor)
+        // já cobre watch.php sem WebView.
+        return out.take(3)
     }
 
     /**

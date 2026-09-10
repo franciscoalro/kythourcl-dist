@@ -1,8 +1,6 @@
 // Minimal build file
 
-// v252: espera navigator.serviceWorker.controller==activated antes do recap — sem isso o
-// bundle chama serverforms antes do SW enriquecer a request e cai em 204/e18b73c9=[]
-// (harness com controller=true tocou ready=4; virgem controller=false falhou igual ao plugin).
+// v254: fix reuse WebView único — capturaAndServeReuse era stub (só loadUrl sem clients/hook), watch.php reaproveitado ficava btn=false/rcFn=false 20s em vão. Matriz 3 variantes (remove watch.php: página de detalhe, não player).
 cloudstream {
-    version = 252
+    version = 254
 }

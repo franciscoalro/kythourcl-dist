@@ -84,6 +84,8 @@ object WebViewStreamProxy {
         if (swInstalled) return
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
         try {
+            // v253: habilita debug para browser-harness CDP (adb forward 9223) e registra SW
+            try { WebView.setWebContentsDebuggingEnabled(true) } catch (_: Throwable) {}
             val sw = ServiceWorkerController.getInstance()
             sw.setServiceWorkerClient(object : ServiceWorkerClient() {
                 override fun shouldInterceptRequest(request: WebResourceRequest): WebResourceResponse? {
@@ -98,7 +100,7 @@ object WebViewStreamProxy {
                 }
             })
             swInstalled = true
-            Log.i(TAG, "[SW] registrado (ServiceWorkerClient global)")
+            Log.i(TAG, "[SW] registrado (ServiceWorkerClient global + WebContentsDebuggingEnabled)")
         } catch (e: Throwable) {
             Log.w(TAG, "[SW] não registrado: ${e.message?.take(140)}")
         }
@@ -571,6 +573,54 @@ object WebViewStreamProxy {
         return captureAndServeReuse(single, serverPhpUrl, budgetMs, detailUrl)
     }
 
+    /**
+     * v253: aquece o storage/scope do domínio principal antes de atacar o
+     * server.php — o harness quente provou que controller==activated só existe
+     * quando o WebView já navegou em https://redecanais.af/ com cookies. Sem
+     * isso o server.php cai em Just a moment... (sem hasBtn/rcFn) ou em 204.
+     * Usa o MESMO WebView único; se já houver wv vivo reaproveita, senão cria.
+     * Fallback silencioso em exceção.
+     */
+    private suspend fun warmMainDomainIfNeeded(existing: WebView? = null): WebView? {
+        val activity: Activity? = CommonActivity.activity ?: return existing
+        try {
+            val wv = existing ?: synchronized(this) { webView } ?: return existing
+            val needWarm = withContext(Dispatchers.Main) {
+                try {
+                    val cur = wv.url.orEmpty()
+                    if (cur.contains("redecanais.af", true)) return@withContext false
+                    val fut = CompletableFuture<String>()
+                    wv.evaluateJavascript("(function(){try{return (navigator.serviceWorker.controller?'ctrl:'+navigator.serviceWorker.controller.state:'no-ctrl')}catch(e){return 'err'}})();") { v -> fut.complete(v ?: "") }
+                    val state = try { fut.get(1200, TimeUnit.MILLISECONDS).removeSurrounding("\"").orEmpty() } catch (_: Throwable) { "" }
+                    state != "ctrl:activated"
+                } catch (_: Throwable) { true }
+            }
+            if (!needWarm) return wv
+            Log.i(TAG, "[WARM] navegando WebView único em https://redecanais.af/ para ativar ServiceWorker controller")
+            withContext(Dispatchers.Main) {
+                wv.loadUrl("https://redecanais.af/")
+            }
+            // aguarda até 4s o controller ficar activated (poll rápido)
+            for (i in 0 until 20) {
+                delay(200)
+                val ready = withContext(Dispatchers.Main) {
+                    try {
+                        val f = CompletableFuture<String>()
+                        wv.evaluateJavascript("(function(){try{var c=navigator.serviceWorker.controller;return (c && c.state)||'no-ctrl'}catch(e){return 'err'}})();") { v -> f.complete(v ?: "") }
+                        f.get(500, TimeUnit.MILLISECONDS).contains("activated")
+                    } catch (_: Throwable) { false }
+                }
+                if (ready) { Log.i(TAG, "[WARM] controller activated em ${i * 200}ms"); break }
+            }
+            // pequena pausa para o site gravar storage/cookie no scope correto
+            delay(600)
+            return wv
+        } catch (e: Throwable) {
+            Log.w(TAG, "[WARM] falhou warm-up: ${e.message?.take(140)}")
+            return existing
+        }
+    }
+
     suspend fun captureAndServe(serverPhpUrl: String, budgetMs: Long = CAPTURE_TIMEOUT_MS, detailUrl: String = ""): String? {
         shutdown() // limpa estado anterior
         // Poster fetches have already completed before playback. Release their helper
@@ -921,6 +971,9 @@ object WebViewStreamProxy {
                             CookieManager.getInstance().flush()
                             try { view?.evaluateJavascript(CloudflareSolver.ANTI_DETECTION_JS, null) } catch(_: Throwable) {}
                             try { view?.evaluateJavascript(hookJs, null) } catch(_: Throwable) {}
+                            // v253: garante que o Service Worker do scope principal existe
+                            // mesmo após redirect do server.php — re-regista silencioso
+                            try { view?.evaluateJavascript("try{if('serviceWorker' in navigator && !navigator.serviceWorker.controller) navigator.serviceWorker.register('/sw.js').catch(function(){});}catch(e){}", null) } catch (_: Throwable) {}
                             pageReady.set(true)
                             Log.d(TAG, "[PROXY] onPageFinished url=$finishedUrl")
                         }
@@ -997,10 +1050,26 @@ object WebViewStreamProxy {
                 wv = view
                 webView = view
                 rootLayout.addView(view, 0)
-                view.loadUrl(serverPhpUrl)
+                // v253: aquece domínio principal antes do server.php — reproduz harness quente
+                // O valor de retorno é descartado (warm é best-effort); runCaptureLoop usa wv local.
+                try { view.loadUrl("https://redecanais.af/") } catch (_: Throwable) { view.loadUrl(serverPhpUrl) }
+                // breve janela para controller ficar activated antes de trocar para server.php
+                // o loop esperará SW de modo explícito, mas este pre-warm já evita Just a moment...
             } catch (e: Throwable) {
                 Log.e(TAG, "[PROXY] Erro ao criar WebView: ${e.message}")
             }
+        }
+        // v253 adaptação ao plugin: mesmo WebView aquece main domain, depois navega ao server.php
+        withContext(Dispatchers.Main) {
+            try {
+                val cur = wv?.url.orEmpty()
+                if (!cur.contains("server.php", true)) {
+                    // entra no loop esperando SW (2s) e depois troca URL; log para diagnóstico harness
+                    Log.i(TAG, "[WARM] pre-load main domain antes de server.php url=$cur")
+                    delay(1200)
+                    wv?.loadUrl(serverPhpUrl)
+                }
+            } catch (_: Throwable) {}
         }
         return runCaptureLoop(
             wvRef = { wv },
@@ -1030,6 +1099,179 @@ object WebViewStreamProxy {
      */
     private fun ensureSWFast() { try { ensureServiceWorker() } catch (_: Throwable) {} }
 
+    /**
+     * v253: adaptação ao plugin via browser-harness — expõe o WebView único ao harness
+     * (WebView.setWebContentsDebuggingEnabled). O harness raspa o frame em CDP
+     * (adb forward 9223) e a URL raiz do vídeo é extraída via currentSrc/shouldIntercept.
+     * Usado quando se quer debugar o MESMO WebView do plugin pelo browser-harness.
+     */
+    fun harnessWebView(): WebView? = synchronized(this) { webView }
+
+    private fun buildCaptureHookJs(): String = """(function(){
+                        if(window.__rcHook) return;
+                        window.__rcHook=true;
+                        try{
+                          window.__rcCaptured='';
+                          window.__rcCapturedRawLen=0;
+                          window.__rcLastFetchUrl='';
+                          window.__rcLastFetchBody='';
+                          window.__rcLastFetchCt='';
+                          window.__rcLastFetchStatus=0;
+                          window.__rcBodies=[];
+                          window.__rcFetchCount=0;
+                          window.__rcLastApi=''; window.__rcApiHdrs=''; window.__rcApiLog=[];
+                          const ofetch=window.fetch;
+                          if(ofetch) window.fetch=function(u,o){
+                            const urlStr=String(u).slice(0,400);
+                            window.__rcLastFetchUrl=urlStr;
+                            try{
+                              if(urlStr.indexOf('.api')>=0 && window.__rcApiLog.length<30){
+                                const hdrs=(o&&o.headers)?JSON.stringify(o.headers).slice(0,400):'{}';
+                                window.__rcLastApi=urlStr; window.__rcApiHdrs=hdrs+' method='+(o&&o.method||'GET');
+                                window.__rcApiLog.push({url:urlStr, hdrs:hdrs, m:(o&&o.method||'GET'), t:Date.now()});
+                              }
+                            }catch(_){}
+                            try{ console.log('[HOOK] fetch '+urlStr+' opts='+JSON.stringify(o||{}).slice(0,250)+' cookies='+document.cookie.slice(0,200)); }catch(_){}
+                            const p=ofetch.apply(this, arguments);
+                            try{
+                              p.then(function(r){
+                                try{
+                                  const status=r.status, loc=r.headers.get('location')||r.headers.get('Location')||'';
+                                  const ct=r.headers.get('content-type')||'';
+                                  window.__rcLastFetchStatus=status;
+                                  window.__rcLastFetchCt=ct;
+                                  console.log('[HOOK] fetch-resp '+status+' ct='+ct.slice(0,60)+' loc='+String(loc).slice(0,250)+' url='+urlStr.slice(0,200));
+                                  const contentLength=parseInt(r.headers.get('content-length')||'0',10)||0;
+                                  const isMetadata=urlStr.indexOf('serverforms.api')>=0||urlStr.indexOf('dt.api')>=0;
+                                  if(!isMetadata||contentLength>1048576) return;
+                                  const cl=r.clone();
+                                  cl.text().then(function(t){
+                                    if(t.length>1048576){ console.log('[HOOK] fetch-body skipped oversized metadata len='+t.length); return; }
+                                    window.__rcFetchCount++;
+                                    window.__rcLastFetchBody=t;
+                                    try{ window.__rcBodies.push({url:urlStr, ct:ct, status:status, body:t.slice(0,3000)}); if(window.__rcBodies.length>20) window.__rcBodies.shift(); }catch(_){}
+                                    const hasProxy=t.indexOf('__RC__/proxy')>=0||t.indexOf('/proxy?src=')>=0||t.indexOf('tos-alisg')>=0||t.indexOf('container=videos')>=0||t.indexOf('.m3u8')>=0||t.indexOf('.mp4')>=0||t.indexOf('https://')>=0;
+                                    const preview=t.slice(0,900).replace(/\n/g,' ').replace(/\r/g,'');
+                                    console.log('[HOOK] fetch-body #'+window.__rcFetchCount+' len='+t.length+' ct='+ct.slice(0,40)+' proxy='+hasProxy+' url='+urlStr.slice(0,120)+' preview='+preview);
+                                    if(urlStr.indexOf('serverforms')>=0 || urlStr.indexOf('dt.api')>=0){
+                                      console.log('[HOOK] serverforms payload len='+t.length+' body='+t.slice(0,1200).replace(/\n/g,' '));
+                                      try{
+                                        const j=JSON.parse(t);
+                                        console.log('[HOOK] serverforms JSON keys='+Object.keys(j).join(',')+' vals='+JSON.stringify(j).slice(0,900));
+                                        if(j.e18b73c9 && Array.isArray(j.e18b73c9) && j.e18b73c9.length===0){
+                                          console.log('[HOOK] TUNEL_VAZIO serverforms retornou e18b73c9=[] (código interno 204) — origem não determinada; pode ser sessão, disponibilidade ou política do servidor');
+                                        }
+                                        if(j.c4a0f6) console.log('[HOOK] c4a0f6 len='+(String(j.c4a0f6).length)+' preview='+String(j.c4a0f6).slice(0,150));
+                                      }catch(e){ console.log('[HOOK] serverforms JSON parse err '+e.message); }
+                                    }
+                                    try{
+                                      let found='';
+                                      const m=t.match(/https?:\/\/[^\s"'\\]+\.(?:m3u8|mp4)[^\s"'\\]*/i);
+                                      if(m) found=m[0];
+                                      if(!found){ const m2=t.match(/https?:\/\/[^\s"'\\]*tos-alisg[^\s"'\\]*/i); if(m2) found=m2[0]; }
+                                      if(!found){ const m3=t.match(/https?:\/\/[^\s"'\\]*\/proxy\?container=[^\s"'\\]*/i); if(m3) found=m3[0]; }
+                                      if(!found){ const m4=t.match(/https?:\/\/[^\s"'\\]*__RC__[^\s"'\\]*/i); if(m4) found=m4[0]; }
+                                      if(!found){
+                                        try{
+                                          const j=JSON.parse(t);
+                                          const vals=JSON.stringify(j);
+                                          const m5=vals.match(/https?:\/\/[^\s"'\\]+\.(?:m3u8|mp4)[^\s"'\\]*/i);
+                                          if(m5) found=m5[0];
+                                          if(!found){ const m6=vals.match(/https?:\\\/\\\/[^\s"'\\]{20,}/); if(m6) found=m6[0].replace(/\\\//g,'/'); }
+                                          if(!found && vals.indexOf('https')>=0){ const m7=vals.match(/https?:[^\s"'\\]{15,}/); if(m7) found=m7[0].replace(/\\\//g,'/'); }
+                                          if(!found){ for(const k of Object.keys(j)){ const v=j[k]; if(typeof v==='string' && v.length>20){ try{ const dec=atob(v); if(dec.indexOf('http')>=0) { found=dec.match(/https?:\/\/[^\s"'\\]+/)?.[0]||''; if(found) break; } }catch(_){} } } }
+                                        }catch(_){}
+                                      }
+                                      if(found){ window.__rcCaptured=found; window.__rcCapturedRawLen=t.length; console.log('[HOOK] captured stream '+found.slice(0,320)); }
+                                      else if(hasProxy){ window.__rcCaptured=t.slice(0,800); console.log('[HOOK] captured raw proxy body len='+t.length); }
+                                      window.__rcLastFetchBody=t.slice(0,3000);
+                                    }catch(e){ console.log('[HOOK] capture-err '+e.message); }
+                                  }).catch(function(e){ console.log('[HOOK] fetch-body-err '+e.message); });
+                                }catch(e){ console.log('[HOOK] fetch-resp-err '+e.message); }
+                                return r;
+                              }).catch(function(e){ console.log('[HOOK] fetch-reject '+e.message+' url='+urlStr.slice(0,200)); });
+                            }catch(_){}
+                            return p;
+                          };
+                          const oOpen=XMLHttpRequest.prototype.open;
+                          XMLHttpRequest.prototype.open=function(m,u){ try{ console.log('[HOOK] XHR open '+m+' '+String(u).slice(0,260)); }catch(_){} return oOpen.apply(this, arguments); };
+                          const oSend=XMLHttpRequest.prototype.send;
+                          XMLHttpRequest.prototype.send=function(b){
+                            try{ console.log('[HOOK] XHR send '+(b?String(b).slice(0,300):'-')); }catch(_){}
+                            try{
+                              const xhr=this;
+                              const prev=xhr.onload;
+                              const onLoad=function(){ try{ const t=xhr.responseText||''; const hasProxy=t.indexOf('__RC__/proxy')>=0||t.indexOf('/proxy?src=')>=0||t.indexOf('.m3u8')>=0; console.log('[HOOK] XHR-resp status='+xhr.status+' len='+t.length+' proxy='+hasProxy+' preview='+t.slice(0,400).replace(/\n/g,' ')); }catch(e){ console.log('[HOOK] XHR-resp-err '+e.message); } if(prev) return prev.apply(this, arguments); };
+                              if(xhr.addEventListener) xhr.addEventListener('load', onLoad, false); else xhr.onload=onLoad;
+                            }catch(_){}
+                            return oSend.apply(this, arguments);
+                          };
+                          document.addEventListener('submit', function(e){ try{ console.log('[HOOK] submit action='+(e.target&&e.target.action||'')+' method='+(e.target&&e.target.method||'')); }catch(_){} }, true);
+                          window.addEventListener('error', function(e){ try{ console.log('[HOOK] window-error '+e.message+' @'+(e.filename||'').slice(0,80)+':'+e.lineno); }catch(_){} }, true);
+                          window.addEventListener('unhandledrejection', function(e){ try{ console.log('[HOOK] unhandledrejection '+(e.reason&&e.reason.message||String(e.reason)).slice(0,300)); }catch(_){} }, true);
+                          window.addEventListener('beforeunload', function(){ try{ console.log('[HOOK] beforeunload href='+location.href.slice(0,120)); }catch(_){} }, true);
+                          window.__rcPlaySrc='';
+                          function rcWatchVideo(v){
+                            if(!v||v.__rcWatched) return;
+                            v.__rcWatched=true;
+                            ['play','playing','pause','error','stalled','waiting','loadstart'].forEach(function(ev){
+                              v.addEventListener(ev, function(){
+                                try{
+                                  const s=v.currentSrc||v.src||'';
+                                  if((ev==='play'||ev==='playing'||ev==='loadstart')&&s) window.__rcPlaySrc=s;
+                                  console.log('[HOOK] video-'+ev+' ready='+v.readyState+' net='+v.networkState+' paused='+v.paused+' src='+String(s).slice(0,250));
+                                }catch(_){}
+                              });
+                            });
+                          }
+                          try{ Array.from(document.querySelectorAll('video')).forEach(rcWatchVideo); }catch(_){}
+                          document.addEventListener('click', function(e){
+                            try{
+                              const t=e.target;
+                              console.log('[HOOK] click tag='+(t&&t.tagName||'')+' id='+(t&&t.id||'')+' class='+(t&&t.className||'').toString().slice(0,60)+' prevented='+e.defaultPrevented+' trusted='+e.isTrusted);
+                            }catch(_){}
+                          }, true);
+                          try{
+                            const obs=new MutationObserver(function(muts){
+                              muts.forEach(function(m){
+                                m.addedNodes.forEach(function(n){
+                                  try{
+                                    const tag=n.tagName||'';
+                                    if(tag==='VIDEO'){ rcWatchVideo(n); }
+                                    if(n.querySelectorAll){ Array.from(n.querySelectorAll('video')).forEach(rcWatchVideo); }
+                                    const src=n.src||n.currentSrc||'';
+                                    console.log('[HOOK] dom-add tag='+tag+' src='+String(src).slice(0,200)+' html='+String(n.outerHTML||'').slice(0,300).replace(/\n/g,' '));
+                                  }catch(_){}
+                                });
+                                if(m.type==='attributes' && m.target.tagName==='VIDEO'){
+                                  try{ console.log('[HOOK] video-attr '+m.attributeName+'='+String(m.target.getAttribute(m.attributeName)).slice(0,200)); }catch(_){}
+                                }
+                              });
+                            });
+                            obs.observe(document.documentElement||document.body, {childList:true, subtree:true, attributes:true, attributeFilter:['src','currentSrc']});
+                            console.log('[HOOK] mutation-observer installed');
+                          }catch(e){ console.log('[HOOK] observer-err '+e.message); }
+                          try{
+                            const origCreate=document.createElement.bind(document);
+                            document.createElement=function(tag){
+                              const el=origCreate(tag);
+                              if(String(tag).toLowerCase()==='video' || String(tag).toLowerCase()==='source'){
+                                console.log('[HOOK] createElement '+tag);
+                                try{
+                                  const desc=Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype,'src')||Object.getOwnPropertyDescriptor(HTMLVideoElement.prototype,'src');
+                                  if(desc&&desc.set){
+                                    let origSet=desc.set;
+                                    Object.defineProperty(el,'src',{set:function(v){ console.log('[HOOK] video.src set '+String(v).slice(0,300)); return origSet.call(this,v); }, get:desc.get, configurable:true});
+                                  }
+                                }catch(_){}
+                              }
+                              return el;
+                            };
+                          }catch(e){ console.log('[HOOK] createElement-hook-err '+e.message); }
+                          console.log('[HOOK] installed href='+location.href.slice(0,120));
+                        }catch(e){ console.log('[HOOK] install-err '+e.message); }
+                    })();"""
+
     @SuppressLint("SetJavaScriptEnabled")
     suspend fun captureAndServeReuse(
         existing: WebView,
@@ -1041,20 +1283,75 @@ object WebViewStreamProxy {
         val pageReady = AtomicBoolean(false)
         val clickDone = AtomicBoolean(false)
         val captureHolder = AtomicBoolean(false)
+        val hookJs = buildCaptureHookJs()
         withContext(Dispatchers.Main) {
             try {
                 ensureSWFast()
-                // v251: o reuse anterior era STUB (só loadUrl) — nenhum client
-                // ou hook era instalado, por isso btn=true/rcFn=true vídeo=none
-                // existiu 10s e nunca navegou. Habilita SW e reinstala o
-                // shouldIntercept/hook mínimo para que o player monte e toque.
                 try { existing.settings.domStorageEnabled = true } catch (_: Throwable) {}
                 try { @Suppress("DEPRECATION") existing.settings.databaseEnabled = true } catch (_: Throwable) {}
+                try { existing.settings.javaScriptEnabled = true } catch (_: Throwable) {}
                 existing.stopLoading()
                 pageReady.set(false)
-                // reinstala o hook de captura no novo documento (será
-                // reinjetado a cada onPageStarted — aqui só garante o estado)
-                Log.i(TAG, "[WV_SINGLE] reuse canônica: ${serverPhpUrl.take(150)}")
+                // v254: WebView único — reinstala clients/hook completos (mesmo de captureAndServe)
+                // O stub anterior só fazia loadUrl sem WebViewClient/hook, por isso watch.php
+                // reaproveitado ficava btn=false/rcFn=false eternamente.
+                existing.webChromeClient = object : WebChromeClient() {
+                    override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                        super.onProgressChanged(view, newProgress)
+                        view?.evaluateJavascript(CloudflareSolver.ANTI_DETECTION_JS, null)
+                    }
+                    override fun onConsoleMessage(msg: android.webkit.ConsoleMessage?): Boolean {
+                        try {
+                            val m = msg?.message().orEmpty()
+                            if (m.contains("[HOOK]", true) || m.contains("Uncaught", true) || m.contains("Failed to load", true) || m.contains("Error", true)) {
+                                Log.i(TAG, "[HOOK_JS] $m @ ${msg?.sourceId()?.take(80)}:${msg?.lineNumber()}")
+                            }
+                        } catch (_: Throwable) {}
+                        return super.onConsoleMessage(msg)
+                    }
+                }
+                existing.webViewClient = object : WebViewClient() {
+                    override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                        Log.w(TAG, "[CF_WV] onRenderProcessGone seguro acionado (didCrash=${detail?.didCrash()})")
+                        try { (view?.parent as? ViewGroup)?.removeView(view); view?.destroy() } catch (_: Throwable) {}
+                        return true
+                    }
+                    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                        super.onPageStarted(view, url, favicon)
+                        try { view?.evaluateJavascript(CloudflareSolver.ANTI_DETECTION_JS, null) } catch(_: Throwable) {}
+                        try { view?.evaluateJavascript(hookJs, null) } catch(_: Throwable) {}
+                    }
+                    override fun onPageFinished(view: WebView?, finishedUrl: String?) {
+                        super.onPageFinished(view, finishedUrl)
+                        CookieManager.getInstance().flush()
+                        try { view?.evaluateJavascript(CloudflareSolver.ANTI_DETECTION_JS, null) } catch(_: Throwable) {}
+                        try { view?.evaluateJavascript(hookJs, null) } catch(_: Throwable) {}
+                        try { view?.evaluateJavascript("try{if('serviceWorker' in navigator && !navigator.serviceWorker.controller) navigator.serviceWorker.register('/sw.js').catch(function(){});}catch(e){}", null) } catch (_: Throwable) {}
+                        pageReady.set(true)
+                        Log.d(TAG, "[PROXY] onPageFinished url=$finishedUrl [REUSE]")
+                    }
+                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                        val u = request?.url?.toString().orEmpty()
+                        if (u.contains("server.php?", true) && captured.get().not()) Log.i(TAG, "[PROXY] navegação pós-click liberada: $u [REUSE]")
+                        return super.shouldOverrideUrlLoading(view, request)
+                    }
+                    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest): WebResourceResponse? {
+                        val u = request.url.toString()
+                        if (!u.contains("google", true) && !u.contains("disqus", true) && !u.contains("facebook", true) && !u.contains("gstatic", true)) {
+                            val isApi = u.contains(".api", true) || u.contains("query", true) || u.contains("bundle", true) || u.contains("serverforms", true) || u.contains("dt.", true) || u.contains("getvid", true) || u.contains("getlink", true) || u.contains("redirect", true) || u.contains("server.php", true) || u.contains("__RC__", true) || u.contains("proxy", true) || u.contains(".m3u8", true) || u.contains(".mp4", true)
+                            if (isApi || request.method != "GET" || u.contains("player3", true)) Log.i(TAG, "[PROXY_REQ] ${request.method} ${if (request.isForMainFrame) "MAIN " else ""}${u.take(320)} [REUSE]")
+                            if (isApi) { try { val rh = request.requestHeaders?.entries?.joinToString(";") { "${it.key}=${it.value.take(60)}" }?.take(300).orEmpty(); Log.i(TAG, "[REQH] ${request.method} ${u.take(200)} || reqHeaders=$rh [REUSE]") } catch (_: Throwable) {} }
+                        }
+                        val isMediaStream = (u.contains("__RC__/proxy", true) || u.contains("/proxy?src=", true) || u.contains("p12-common-sign", true) || u.contains("xn--l", true) || u.contains("neosoro.gq", true) || u.contains("tos-alisg", true) || u.contains("/proxy?container=", true) || u.contains("container=videos", true) || (u.contains(".mp4", true) && !u.contains(".jpg") && !u.contains(".png")) || u.contains(".m3u8", true) || u.contains("/ondemand/", true) || u.contains("/videos/", true)) && !u.contains("disqus", true) && !u.contains("chatango", true) && !u.contains("google", true)
+                        if (isMediaStream && !captured.get()) {
+                            streamUrl = u; captured.set(true); captureHolder.set(true)
+                            Log.i(TAG, "[PROXY] Stream capturado via shouldInterceptRequest [REUSE]: ${u.take(180)}")
+                            try { val ctx2 = com.lagradost.cloudstream3.CommonActivity.activity ?: CommonActivity.activity?.applicationContext; ctx2?.let { c -> java.io.File(c.filesDir, "redecanais_af_last_stream_url.txt").writeText(u) } } catch (_: Throwable) {}
+                        }
+                        return super.shouldInterceptRequest(view, request)
+                    }
+                }
+                Log.i(TAG, "[WV_SINGLE] reuse canônica: ${serverPhpUrl.take(150)} [REUSE]")
                 existing.loadUrl(serverPhpUrl)
             } catch (e: Throwable) {
                 Log.e(TAG, "[WV_SINGLE] reuse err=${e.message?.take(120)}")
