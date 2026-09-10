@@ -1108,12 +1108,25 @@ object WebViewStreamProxy {
         // chamadas repetidas a cada 3s podem reiniciar a montagem do player (serverforms.api)
         var directFallbackDone = false
         val startMs = System.currentTimeMillis()
+        // v252: Service Worker. O site usa /sw.js para enriquecer serverforms.api
+        // (__RC__/proxy). No browser-harness com cache o controller já estava
+        // activated e o mesmo frame tocou ready=4; no harness virgem (controller=false)
+        // e no plugin (click em 250ms) o bundle buscou serverforms ANTES do SW e
+        // caiu em 204/e18b73c9=[]. Espera o SW ficar activated antes do tap.
+        val swReady = AtomicBoolean(false)
+        var lastSwCheckMs = 0L
+        var swWaitLogged = false
+        val swWaitMaxMs = 9000L
         // v126: orçamento por tentativa cortado p/ 45s — o framework cancela loadLinks em
         // ~120s (TimeoutCancellationException), então 2 tentativas (RCServer01 + RCFServer2)
         // precisam caber em 90s. Antigo 120s por tentativa abortava antes do fallback.
         // v237: budget por tentativa (25s nas 3 primeiras variantes, 45s na última) +
         // early-exit: 3x serverforms 204+e18b73c9=[] seguidos => túnel vazio, aborta
         // sem esperar o timeout (economiza ~20s por variante morta).
+        // v252b: capta o tempo real preso na barreira do SW para subtrair do
+        // budget de captura — sem isso a primeira variante (12s de capture)
+        // gasta 2s parada no SW e só sobra 10s; com retries do impostado
+        // não dá. Subtrai o elapsed já preso.
         val budget = budgetMs.coerceIn(10000L, CAPTURE_TIMEOUT_MS)
         val empty204Count = java.util.concurrent.atomic.AtomicInteger(0)
         var lastEmpty204Sig = ""
@@ -1122,6 +1135,43 @@ object WebViewStreamProxy {
                 delay(POLL_INTERVAL_MS) // v123: 200ms (era 500ms)
                 val now = System.currentTimeMillis()
                 val wvNow = wvRef() ?: continue
+
+                // v252: espera o Service Worker ficar activated ANTES do recap.
+                // Sem isso o bundle faz serverforms antes do SW enriquecer a request.
+                if (!swReady.get() && !captured.get() && now - lastSwCheckMs >= 400L) {
+                    lastSwCheckMs = now
+                    withContext(Dispatchers.Main) {
+                        try {
+                            wvNow.evaluateJavascript(
+                                """(function(){
+                                    try{
+                                      if (!('serviceWorker' in navigator)) return 'sw-unsupported';
+                                      var c = navigator.serviceWorker.controller;
+                                      var n = (c && c.state) || '';
+                                      // força registro se o site não disparou (WebView navegado sem /sw.js anterior)
+                                      if (!c && 'serviceWorker' in navigator && !window.__swRegTry) {
+                                        window.__swRegTry = true;
+                                        try { navigator.serviceWorker.register('/sw.js').catch(function(){}); } catch(_){}
+                                      }
+                                      if (c && n === 'activated') return 'sw-ready:' + n;
+                                      return 'sw-wait:' + (n || 'no-ctrl');
+                                    }catch(e){ return 'sw-err:'+e.message; }
+                                })();""".trimIndent()
+                            ) { res ->
+                                val sw = res?.removeSurrounding("\"").orEmpty()
+                                if (sw.startsWith("sw-ready")) {
+                                    swReady.set(true)
+                                    Log.i(TAG, "[PROXY_SW] $sw — liberando recap")
+                                } else if (System.currentTimeMillis() - startMs >= swWaitMaxMs) {
+                                    // não bloqueia indefinidamente — após 9s libera mesmo sem SW (túnel pode funcionar sem; melhor tentar que travar)
+                                    if (!swReady.get()) { swReady.set(true); Log.w(TAG, "[PROXY_SW] timeout 9s ($sw) — prosseguindo sem SW (pode cair em 204)") }
+                                } else if (!swWaitLogged && System.currentTimeMillis() - startMs > 2000L) {
+                                    swWaitLogged = true; Log.i(TAG, "[PROXY_SW] aguardando SW ($sw)...")
+                                }
+                            }
+                        } catch (_: Throwable) {}
+                    }
+                }
 
                 // 1) Clica no recap assim que o DOM estiver pronto (não espera onPageFinished).
                 // v123: retry a cada CLICK_RETRY_MS até o click ser efetivo ('click') —
@@ -1133,7 +1183,10 @@ object WebViewStreamProxy {
                 // que a chamada direta rejeita com "Error: 7a2f" (~250ms depois) e envenena
                 // o estado interno do player (nunca mais monta o __RC__/proxy). Só o
                 // handler do próprio botão sabe os args/contexto certos (token recap).
-                if (!clickDone.get() && captured.get().not() && now - lastClickMs >= CLICK_RETRY_MS) {
+                // v252: só clica depois que o SW ficou ready (ou timeout de 9s).
+                if (!swReady.get()) {
+                    // entra no próximo tick quando o SW liberar
+                } else if (!clickDone.get() && captured.get().not() && now - lastClickMs >= CLICK_RETRY_MS) {
                     lastClickMs = now
                     withContext(Dispatchers.Main) {
                         try {

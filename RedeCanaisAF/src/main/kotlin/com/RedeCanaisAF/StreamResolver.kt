@@ -181,11 +181,15 @@ internal class StreamResolver(
                         // canônica em ~4s; embed legado roda em paralelo orçamentário.
                         // v242: 12s canônica / 20s embed / 15s play.php.
                         // v248: watch 20s (canônico com recap, reaproveita reuse).
+                        // v252: a primeira variante precisa de orçamento extra — esperar
+                        // o Service Worker (controller activated) consome até 9s antes
+                        // do tap. 12000ms não cabia (9s SW + 3s capture = false).
                         val budgetMs = when {
                             variant.contains("embed.php", true) -> 20000L
                             variant.contains("play.php", true) -> 15000L
                             variant.contains("watch.php", true) -> 20000L
-                            else -> 12000L
+                            attempt == 1 -> 22000L
+                            else -> 18000L
                         }
                         Log.i(TAG, "[PROXY_LINK] tentativa $attempt/${variants.size} budget=${budgetMs}ms legacy=$isLegacy url=$variant")
                         localProxyUrl = when {
