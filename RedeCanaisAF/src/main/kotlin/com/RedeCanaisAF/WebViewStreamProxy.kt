@@ -76,6 +76,136 @@ object WebViewStreamProxy {
     // captura via <video>/performance-resource como o browser-harness da Fase 51
     // (elemento <video> no contexto da página obteve 206). GONE 1x1 + SOFTWARE
     // (leve, sem pipeline de mídia) + sem hook pesado — 1 WebView mínima.
+    /**
+     * v246: reaproveita o WebView canônico (que JÁ tem challenge válido) para o
+     * embed legado. Chamado pelo StreamResolver logo após captureAndServe da
+     * canônica — NÃO dá shutdown (que destruiria o jar válido); apenas troca o
+     * WebViewClient para o modo legado (LEGACY_* logs) e navega o MESMO WebView
+     * para embedUrl. Retorna null se não houver WebView vivo (fallback: caller
+     * usa captureLegacyEmbed, que cria um novo).
+     */
+    suspend fun captureLegacyOnSameWebView(embedUrl: String, budgetMs: Long = 20000L): String? {
+        // v246b: retrofit — captura o WebView pela VIEW HIERARCHY (o singleton
+        // `webView` foi nulado no shutdown pós-canônica, mas a VIEW pode ainda
+        // estar atachada). Se nem a view existir, retorna null (fallback).
+        var wv: WebView? = synchronized(this) { webView }
+        if (wv == null) {
+            try {
+                val act = CommonActivity.activity
+                val root = act?.findViewById<ViewGroup>(android.R.id.content)
+                if (root != null) {
+                    for (i in 0 until root.childCount) {
+                        val v1 = root.getChildAt(i)
+                        if (v1 is WebView) { wv = v1; break }
+                        if (v1 is ViewGroup) {
+                            for (j in 0 until v1.childCount) {
+                                val v2 = v1.getChildAt(j)
+                                if (v2 is WebView) { wv = v2; break }
+                            }
+                        }
+                        if (wv != null) break
+                    }
+                }
+            } catch (_: Throwable) {}
+        }
+        val wvOk = wv
+        if (wvOk == null) {
+            Log.w(TAG, "[PROXY_REUSE] sem WebView (singleton+view) — fallback para captureLegacyEmbed")
+            return null
+        }
+        try {
+            Log.i(TAG, "[PROXY_REUSE] WebView encontrado na hierarchy url=${wvOk.url?.take(150)} — navegando para $embedUrl")
+        } catch (_: Throwable) {}
+        synchronized(this) { webView = wvOk }
+        Log.i(TAG, "[PROXY_REUSE] navegando WebView válido para $embedUrl")
+        val captured = AtomicBoolean(false)
+        streamUrl = null
+        withContext(Dispatchers.Main) {
+            try {
+                wvOk.webChromeClient = object : WebChromeClient() {
+                    override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                        super.onProgressChanged(view, newProgress)
+                        if (newProgress == 100 || newProgress % 25 == 0) {
+                            Log.i(TAG, "[LEGACY_PROG] progress=$newProgress url=${view?.url?.take(200)} title=${view?.title?.take(80)}")
+                        }
+                    }
+                }
+                wvOk.webViewClient = object : WebViewClient() {
+                    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                        super.onPageStarted(view, url, favicon)
+                        Log.i(TAG, "[LEGACY_PAGE] started url=${url?.take(250)} (reuse)")
+                    }
+
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        super.onPageFinished(view, url)
+                        Log.i(TAG, "[LEGACY_PAGE] finished url=${url?.take(250)} title=${view?.title?.take(80)} (reuse)")
+                        view?.evaluateJavascript(
+                            """(function(){return JSON.stringify({href:location.href,title:document.title,htmlLen:document.documentElement?document.documentElement.outerHTML.length:0,videos:document.querySelectorAll('video').length,iframes:document.querySelectorAll('iframe').length,body0:(document.body?document.body.innerHTML:'').slice(0,200)});})();"""
+                        ) { res -> Log.i(TAG, "[LEGACY_DOM] $res (reuse)") }
+                    }
+
+                    override fun shouldInterceptRequest(
+                        view: WebView?,
+                        request: WebResourceRequest
+                    ): WebResourceResponse? {
+                        val u = request.url.toString()
+                        val isMedia = (u.contains(".mp4", true) || u.contains(".m3u8", true) ||
+                            u.contains("__RC__/proxy", true) || u.contains("/proxy?src=", true) ||
+                            u.contains("tos-alisg", true) || u.contains("container=videos", true)) &&
+                            !u.contains("disqus", true) && !u.contains("google", true)
+                        if (isMedia && !captured.get()) {
+                            streamUrl = u
+                            captured.set(true)
+                            Log.i(TAG, "[PROXY_REUSE] Stream capturado: ${u.take(180)}")
+                        }
+                        return super.shouldInterceptRequest(view, request)
+                    }
+                }
+                wvOk.loadUrl(embedUrl)
+            } catch (e: Throwable) {
+                Log.e(TAG, "[PROXY_REUSE] err=${e.message?.take(120)}")
+                return@withContext
+            }
+        }
+        val budget = budgetMs.coerceIn(10000L, 45000L)
+        withTimeoutOrNull(budget) {
+            while (!captured.get()) {
+                delay(POLL_INTERVAL_MS)
+                withContext(Dispatchers.Main) {
+                    try {
+                        wvOk.evaluateJavascript(
+                            """(function(){
+                                const entries = performance.getEntriesByType('resource');
+                                for (let i = entries.length - 1; i >= 0; i--) {
+                                    const n = entries[i].name;
+                                    if ((n.indexOf('.mp4')>=0 || n.indexOf('.m3u8')>=0 || n.indexOf('__RC__')>=0 || n.indexOf('/proxy?')>=0) && n.indexOf('disqus')<0) return n;
+                                }
+                                const v = document.querySelector('video');
+                                if (v) { const s = v.currentSrc || v.src || ''; if (s && s.indexOf('blob:')<0) return s; }
+                                return '';
+                            })();""".trimIndent()
+                        ) { res ->
+                            val found = res?.removeSurrounding("\"").orEmpty()
+                            if (found.startsWith("http") && !captured.get()) {
+                                streamUrl = found
+                                captured.set(true)
+                                Log.i(TAG, "[PROXY_REUSE] Stream via JS poll: ${found.take(180)}")
+                            }
+                        }
+                    } catch (_: Throwable) {}
+                }
+            }
+            true
+        }
+        val finalUrl = streamUrl
+        if (finalUrl.isNullOrBlank()) {
+            Log.w(TAG, "[PROXY_REUSE] Falha: nenhum stream em ${budget}ms para $embedUrl (WebView reaproveitado)")
+            return null
+        }
+        Log.i(TAG, "[PROXY_REUSE] Captura OK: $finalUrl")
+        return startLocalServer(finalUrl)
+    }
+
     suspend fun captureLegacyEmbed(embedUrl: String, budgetMs: Long = 30000L): String? {
         shutdown()
         LocalImageProxy.shutdownHelper()

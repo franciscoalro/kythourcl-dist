@@ -168,8 +168,13 @@ internal class StreamResolver(
                             else -> 12000L
                         }
                         Log.i(TAG, "[PROXY_LINK] tentativa $attempt/${variants.size} budget=${budgetMs}ms legacy=$isLegacy url=$variant")
-                        localProxyUrl = if (isLegacy) WebViewStreamProxy.captureLegacyEmbed(variant, budgetMs)
-                        else WebViewStreamProxy.captureAndServe(variant, budgetMs, cleanUrl)
+                        localProxyUrl = if (isLegacy) {
+                            // v246: tenta PRIMEIRO no WebView canônico reaproveitado
+                            // (challenge válido); se não houver WebView vivo (null),
+                            // cai para captureLegacyEmbed (WebView novo + cookies).
+                            WebViewStreamProxy.captureLegacyOnSameWebView(variant, budgetMs)
+                                ?: WebViewStreamProxy.captureLegacyEmbed(variant, budgetMs)
+                        } else WebViewStreamProxy.captureAndServe(variant, budgetMs, cleanUrl)
                         if (localProxyUrl != null) break
                         Log.i(TAG, "[PROXY_LINK] tentativa $attempt falhou (204/timeout) — próxima variante")
                     }
@@ -248,14 +253,18 @@ internal class StreamResolver(
         val vid = Regex("""[?&]vid=([^&]+)""", RegexOption.IGNORE_CASE)
             .find(embedUrl)?.groupValues?.getOrNull(1).orEmpty()
         if (vid.isBlank()) return out.toList()
-        // id curto: 1º do detalhe (watch/musicvideo.php?vid=<9hex>), senão do
-        // próprio embed (caso o iframe um dia carregue o curto), senão o longo.
+        // id curto: 1º do detalhe (watch/musicvideo.php?vid=<9hex> ou slug
+        // terminando em _<9hex>.html — detalhe de filme usa slug!), senão do
+        // próprio embed, senão o longo. v246b: slug _a915c0263.html NÃO casava
+        // [?&]vid= — o embed recebia CAPTAMRC3LEG (E2E 00:56 prova).
         val shortFromDetail = Regex("""[?&]vid=([0-9a-f]{9})\b""", RegexOption.IGNORE_CASE)
             .find(detailUrl)?.groupValues?.getOrNull(1)
+            ?: Regex("""_([0-9a-f]{9})\.html""", RegexOption.IGNORE_CASE)
+                .find(detailUrl)?.groupValues?.getOrNull(1)
         val shortFromEmbed = Regex("""[?&]vid=([0-9a-f]{9})\b""", RegexOption.IGNORE_CASE)
             .find(embedUrl)?.groupValues?.getOrNull(1)
         val embedId = shortFromDetail ?: shortFromEmbed ?: vid
-        if (shortFromDetail != null) Log.i(TAG, "[EMBED_ID] curto do detalhe: $shortFromDetail (iframe vid=$vid)")
+        Log.i(TAG, "[EMBED_ID] embedId=$embedId curtoDetalhe=$shortFromDetail curtoEmbed=$shortFromEmbed iframeVid=$vid detail=${detailUrl.take(120)}")
         out.add("$mainUrl/embed.php?vid=$embedId")
         out.add("$mainUrl/play.php?vid=$embedId")
         return out.take(3)
