@@ -57,7 +57,7 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 255
+        const val BUILD_VERSION = 272
         private const val TAG = "RedeCanaisAF-Trace"
         private const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/AP1A.240505.005) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Mobile Safari/537.36"
 
@@ -90,7 +90,7 @@ class RedeCanaisAF : MainAPI() {
             .proxy(java.net.Proxy.NO_PROXY)
             // INTERCEPT_ANALYSIS: deixe NO_PROXY comentado e use http_proxy=172.17.0.3:8080 (mitm->ZAP)
             .retryOnConnectionFailure(true)
-            .protocols(listOf(okhttp3.Protocol.HTTP_2, okhttp3.Protocol.HTTP_1_1))
+            .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
 
         baseBuilder.interceptors().removeAll {
             it.javaClass.simpleName.contains("Cloudflare", ignoreCase = true)
@@ -189,7 +189,19 @@ class RedeCanaisAF : MainAPI() {
 
         val code = res?.code ?: 0
         val body = res?.text.orEmpty()
-        val isChallenge = code in 400..599 || CloudflareSolver.isPendingSearchContent(body) ||
+        // P0-1: detector via header. REFINO (TS NET-01, 2026-09-11): o CF envia
+        // `cf-mitigated: challenge` em TODA resposta, inclusive 200 (robots.txt
+        // prova). O header sozinho NÃO prova challenge — só vale com code != 200.
+        val mitigatedHeader = runCatching {
+            res?.headers?.let { h ->
+                val v = h["cf-mitigated"] ?: h["Cf-Mitigated"] ?: h["CF-Mitigated"]
+                v?.contains("challenge", ignoreCase = true) == true
+            } ?: false
+        }.getOrDefault(false) && code != 200
+        if (mitigatedHeader) {
+            Log.w(TAG, "[REQ#$reqId] Header cf-mitigated: challenge detectado (code=$code) — indo direto ao solver")
+        }
+        val isChallenge = mitigatedHeader || code in 400..599 || CloudflareSolver.isPendingSearchContent(body) ||
             body.contains("Just a moment...", true) ||
             body.contains("Checking your browser", true) ||
             body.contains("cf-browser-verification", true) ||
@@ -200,7 +212,15 @@ class RedeCanaisAF : MainAPI() {
             return Jsoup.parse(body, fixedUrl)
         }
 
-        Log.w(TAG, "[REQ#$reqId] Cloudflare ativo (code=$code, isChallenge=$isChallenge). Resolvendo via CloudflareSolver...")
+        Log.w(TAG, "[REQ#$reqId] Cloudflare ativo (code=$code, isChallenge=$isChallenge, mitigated=$mitigatedHeader). Resolvendo via CloudflareSolver...")
+        // P0-2: 402 com cf_clearance presente = Precursor rebaixou a sessão
+        // (docs Cloudflare: clearance revalidada continuamente; comportamento suspeito
+        // invalida e re-desafia MESMO com cookie válido). Trata como "re-resolver":
+        // invalida o cookie morto UMA vez e deixa o solver emitir sessão nova.
+        if (code == 402 && hasClearance) {
+            Log.w(TAG, "[REQ#$reqId] 402 com clearance presente → sessão rebaixada pelo Precursor; invalidando e re-resolvendo")
+            runCatching { CloudflareSolver.invalidateClearance(fixedUrl) }
+        }
         val solverHtml = CloudflareSolver.solve(fixedUrl)
         if (solverHtml.isNotBlank()) {
             Log.i(TAG, "[REQ#$reqId] Cloudflare resolvido via WebView! len=${solverHtml.length}")
@@ -232,7 +252,13 @@ class RedeCanaisAF : MainAPI() {
                 null
             }
             val retryBody = retryRes?.text.orEmpty()
-            val isRetryChallenge = (retryRes?.code ?: 0) in 400..599 || CloudflareSolver.isPendingSearchContent(retryBody) ||
+            val retryMitigated = runCatching {
+                retryRes?.headers?.let { h ->
+                    val v = h["cf-mitigated"] ?: h["Cf-Mitigated"] ?: h["CF-Mitigated"]
+                    v?.contains("challenge", ignoreCase = true) == true
+                } ?: false
+            }.getOrDefault(false) && (retryRes?.code ?: 0) != 200
+            val isRetryChallenge = retryMitigated || (retryRes?.code ?: 0) in 400..599 || CloudflareSolver.isPendingSearchContent(retryBody) ||
                 retryBody.contains("Just a moment...", true) ||
                 retryBody.contains("Checking your browser", true) ||
                 retryBody.contains("cf-browser-verification", true) ||
@@ -287,26 +313,40 @@ class RedeCanaisAF : MainAPI() {
         // framework foi elevado para 180s. Envolver em timeout de 6-45s só produzia
         // "HOME_TIMEOUT_EMPTY" (lista vazia) ou cancelava o WebView no meio da
         // captura — foi isso que gerou o "Timed out waiting for 120000 ms" na UI.
-        val doc = requestDoc(url)
         val homeList = mutableListOf<SearchResponse>()
         val seenUrls = HashSet<String>()
+        var hasNext = false
 
-        val elements = doc.select(
-            "#pm-grid > li, li.col-xs-6, li.col-sm-4, li.col-md-3, li.col-lg-3, " +
-            "li.pm-li-video, article.pm-video-item, .pm-video-thumb, .pm-category-browse li, " +
-            ".entry-item, li.video-item, div.pm-li-video"
-        )
-        Log.i(TAG, "[HOME_RAW_CARDS] Cat=${request.name} | found=${elements.size}")
+        try {
+            val doc = requestDoc(url)
+            val elements = doc.select(
+                "#pm-grid > li, li.col-xs-6, li.col-sm-4, li.col-md-3, li.col-lg-3, " +
+                "li.pm-li-video, article.pm-video-item, .pm-video-thumb, .pm-category-browse li, " +
+                ".entry-item, li.video-item, div.pm-li-video"
+            )
+            Log.i(TAG, "[HOME_RAW_CARDS] Cat=${request.name} | found=${elements.size}")
 
-        for (el in elements) {
-            val card = parseCard(el) ?: continue
-            if (seenUrls.add(card.url)) {
-                homeList.add(card)
+            for (el in elements) {
+                val card = parseCard(el) ?: continue
+                if (seenUrls.add(card.url)) {
+                    homeList.add(card)
+                }
+            }
+
+            hasNext = doc.select(".pagination a[rel='next'], .pagination a.next, a:contains(Próximo), a:contains(»)")
+                .isNotEmpty() || homeList.size >= 12
+        } catch (e: Throwable) {
+            Log.w(TAG, "[HOME_ERR] Cat=${request.name} err=${e.message} — tentando cache de disco")
+            val diskHtml = CloudflareSolver.getDiskCachedHtml(url)
+            if (!diskHtml.isNullOrBlank()) {
+                val doc = Jsoup.parse(diskHtml, url)
+                val elements = doc.select("#pm-grid > li, li.col-xs-6, li.col-sm-4, li.col-md-3, li.col-lg-3, li.pm-li-video, article.pm-video-item, .pm-video-thumb, .pm-category-browse li, .entry-item, li.video-item, div.pm-li-video")
+                for (el in elements) {
+                    val card = parseCard(el) ?: continue
+                    if (seenUrls.add(card.url)) homeList.add(card)
+                }
             }
         }
-
-        val hasNext = doc.select(".pagination a[rel='next'], .pagination a.next, a:contains(Próximo), a:contains(»)")
-            .isNotEmpty() || homeList.size >= 12
 
         val response = newHomePageResponse(
             listOf(HomePageList(request.name, homeList)),
@@ -318,13 +358,13 @@ class RedeCanaisAF : MainAPI() {
         return response
     }
 
-    override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
+    override suspend fun quickSearch(query: String): List<SearchResponse> = emptyList()
 
-    override suspend fun search(query: String): List<SearchResponse> {
-        if (query.isBlank()) return emptyList()
+    override suspend fun search(query: String): List<SearchResponse> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
+        if (query.isBlank()) return@withContext emptyList()
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
 
-        return try {
+        return@withContext try {
             val searchUrl = "$mainUrl/search.php?keywords=$encoded"
             val doc = requestDoc(searchUrl)
             var results = parseSearchResults(doc, query)
@@ -436,8 +476,8 @@ class RedeCanaisAF : MainAPI() {
             }
         }
 
-        // Suporte a resultados em lista (.listagem div) do RedeCanais
-        doc.select(".listagem div, .listagem > div, .lista-filmes div, section div.listagem div").forEach { div ->
+        // Suporte a resultados em lista (.listagem div, p, li) do RedeCanais
+        doc.select(".listagem div, .listagem > div, .lista-filmes div, section div.listagem div, .listagem p, .listagem li, .content p, .content div").forEach { div ->
             val a = div.selectFirst("a[href*='.html']") ?: return@forEach
             val href = a.attr("href")
             if (href.isBlank() || href.startsWith("#") || href.startsWith("javascript:") ||
@@ -448,6 +488,7 @@ class RedeCanaisAF : MainAPI() {
                 ?.ifBlank { null }
                 ?: div.ownText().replace("Acessar", "").replace("-", "").trim()
                 ?: a.attr("title").ifBlank { a.text().trim() }
+                ?: a.parent()?.ownText()?.replace("Acessar", "")?.replace("-", "")?.trim().orEmpty()
 
             if (rawTitle.isBlank() || rawTitle.equals("Acessar", true)) return@forEach
 

@@ -175,11 +175,11 @@ object WebViewStreamProxy {
                 cookieManager.setAcceptCookie(true)
                 val view = WebView(activity).apply {
                     visibility = android.view.View.VISIBLE
-                    alpha = 0.01f
-                    isFocusable = false
-                    isFocusableInTouchMode = false
-                    isClickable = false
-                    isLongClickable = false
+                    alpha = 1.0f
+                    isFocusable = true
+                    isFocusableInTouchMode = true
+                    isClickable = true
+                    isLongClickable = true
                     setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
                     layoutParams = android.widget.FrameLayout.LayoutParams(
                         android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
@@ -405,11 +405,11 @@ object WebViewStreamProxy {
                 // (E2E v242: 4 embeds x 20s sem 1 LEGACY_NAV; mesmo bug v229).
                 val view = WebView(activity).apply {
                     visibility = android.view.View.VISIBLE
-                    alpha = 0.01f
-                    isFocusable = false
-                    isFocusableInTouchMode = false
-                    isClickable = false
-                    isLongClickable = false
+                    alpha = 1.0f
+                    isFocusable = true
+                    isFocusableInTouchMode = true
+                    isClickable = true
+                    isLongClickable = true
                     setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
                     layoutParams = android.widget.FrameLayout.LayoutParams(
                         android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
@@ -663,11 +663,11 @@ object WebViewStreamProxy {
                 // transiente não pressiona o LMK como os permanentes da v228.
                 val view = WebView(activity).apply {
                     visibility = android.view.View.VISIBLE
-                    alpha = 0.01f
-                    isFocusable = false
-                    isFocusableInTouchMode = false
-                    isClickable = false
-                    isLongClickable = false
+                    alpha = 1.0f
+                    isFocusable = true
+                    isFocusableInTouchMode = true
+                    isClickable = true
+                    isLongClickable = true
                     setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
                     layoutParams = android.widget.FrameLayout.LayoutParams(
                         android.widget.FrameLayout.LayoutParams.MATCH_PARENT,

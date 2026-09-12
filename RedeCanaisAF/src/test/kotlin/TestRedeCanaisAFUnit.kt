@@ -1,3 +1,4 @@
+import com.RedeCanaisAF.RedeCanaisAFText
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.junit.Assert.assertEquals
@@ -296,5 +297,28 @@ class TestRedeCanaisAFUnit {
         assertTrue(streams.size >= 2)
         assertTrue(streams.any { it.contains(".mp4") })
         assertTrue(streams.any { it.contains(".m3u8") })
+    }
+
+    @Test
+    fun `TESTE 7 - paridade normalize NFD vs tabela verbatim do site (TS RE-04)`() {
+        // Espelho Kotlin do tests-ts/re/normalize-parity.test.ts: NFD deve
+        // concordar com a tabela manual do site no vocabulário do catálogo.
+        val catalogo = listOf(
+            "Coração" to "coracao",
+            "Capitão América: Guerra Civil" to "capitao america: guerra civil",
+            "Ação" to "acao",
+            "Niño" to "nino",
+            "São Paulo" to "sao paulo",
+            "Pokémon XY&Z" to "pokemon xy&z",
+            "Crème brûlée" to "creme brulee",
+            "A Viúva Negra 2ª Temporada" to "a viuva negra 2ª temporada"
+        )
+        for ((raw, expected) in catalogo) {
+            assertTrue(RedeCanaisAFText.isRelevantSearchTitle(raw, expected.split(" ").first()))
+        }
+        // includes normalizado comporta igual
+        assertTrue(RedeCanaisAFText.isRelevantSearchTitle("A Captura (Dublado) - 2026", "captura"))
+        assertTrue(RedeCanaisAFText.isRelevantSearchTitle("Coração", "coracao"))
+        assertFalse(RedeCanaisAFText.isRelevantSearchTitle("Batman: O Cavaleiro das Trevas", "superman"))
     }
 }

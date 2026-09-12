@@ -40,17 +40,16 @@ object LocalImageProxy {
     @Volatile var port: Int = 0
         private set
 
-    @Volatile private var helperWebView: WebView? = null
-    private val isHelperReady = AtomicBoolean(false)
+    @Volatile var helperWebView: WebView? = null
+    val isHelperReady = AtomicBoolean(false)
     private val pendingFetches = ConcurrentHashMap<String, CompletableFuture<ByteArray?>>()
 
     private val directHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(5, TimeUnit.SECONDS)
-            .readTimeout(8, TimeUnit.SECONDS)
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
-            .proxy(java.net.Proxy.NO_PROXY) // v227-dual: PRODUÇÃO (comente para análise mitmproxy/ZAP)
             .build()
     }
 
@@ -431,6 +430,7 @@ object LocalImageProxy {
                     userAgentString = ua
                 }
                 addJavascriptInterface(ImageBridge(), "ImageBridge")
+                addJavascriptInterface(CloudflareSolver.HtmlBridge(), "HtmlBridge")
                 webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)

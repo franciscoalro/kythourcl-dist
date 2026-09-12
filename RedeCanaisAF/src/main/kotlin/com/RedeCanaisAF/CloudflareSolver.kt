@@ -250,6 +250,69 @@ object CloudflareSolver {
         )
     }
 
+    private val pendingHtmlFetches = ConcurrentHashMap<String, CompletableDeferred<String?>>()
+
+    class HtmlBridge {
+        @android.webkit.JavascriptInterface
+        fun postHtml(url: String, html: String) {
+            val pending = pendingHtmlFetches.remove(url)
+            if (pending != null) {
+                val valid = if (html.isNotBlank() && html.length > 300 && !isChallengeContent(html)) {
+                    val clean = cleanHtmlForCache(html)
+                    capturedHtmlByUrl[url] = clean
+                    clean
+                } else null
+                pending.complete(valid)
+            }
+        }
+    }
+
+    suspend fun tryFastWebViewFetch(url: String, timeoutMs: Long = 6000L): String? {
+        val activity = CommonActivity.activity ?: return null
+        if (activity.isFinishing || activity.isDestroyed) return null
+
+        val deferred = CompletableDeferred<String?>()
+        pendingHtmlFetches[url] = deferred
+
+        withContext(Dispatchers.Main) {
+            try {
+                LocalImageProxy.ensureHelperWebView(activity)
+                val wv = LocalImageProxy.helperWebView
+                if (wv == null) {
+                    deferred.complete(null)
+                    pendingHtmlFetches.remove(url)
+                    return@withContext
+                }
+
+                val js = """(async () => {
+                    try {
+                        const r = await fetch(${org.json.JSONObject.quote(url)}, { credentials: 'include' });
+                        if (r.ok) {
+                            const t = await r.text();
+                            if (t.length > 300 && !t.includes('id="challenge-form"') && !t.includes('<title>Just a moment')) {
+                                if (window.HtmlBridge) {
+                                    window.HtmlBridge.postHtml(${org.json.JSONObject.quote(url)}, t);
+                                    return;
+                                }
+                            }
+                        }
+                    } catch(e) {}
+                    if (window.HtmlBridge) {
+                        window.HtmlBridge.postHtml(${org.json.JSONObject.quote(url)}, '');
+                    }
+                })();""".trimIndent()
+                wv.evaluateJavascript(js, null)
+            } catch (e: Throwable) {
+                deferred.complete(null)
+                pendingHtmlFetches.remove(url)
+            }
+        }
+
+        return withTimeoutOrNull(timeoutMs) {
+            deferred.await()
+        }
+    }
+
     suspend fun tryFastHttpGet(url: String, cookies: String): String? {
         return withContext(Dispatchers.IO) {
             try {
@@ -260,7 +323,7 @@ object CloudflareSolver {
                     .retryOnConnectionFailure(true)
                     .followRedirects(true)
                     .followSslRedirects(true)
-                    .protocols(listOf(okhttp3.Protocol.HTTP_2, okhttp3.Protocol.HTTP_1_1))
+                    .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
                     .build()
                 val t0 = SystemClock.elapsedRealtime()
                 val req = okhttp3.Request.Builder().url(url).apply {
@@ -541,12 +604,12 @@ object CloudflareSolver {
                     }
                 }
 
-                // 2. Procura direta em IFRAMEs do Turnstile (o widget principal fica abaixo do titulo, top >= 200)
-                var iframes = document.querySelectorAll('iframe');
+                // 2. Procura direta em IFRAMEs do Turnstile
+                var iframes = document.querySelectorAll('iframe[src*="cloudflare"], iframe[src*="challenge-platform"], iframe');
                 for (var i = 0; i < iframes.length; i++) {
                     var ifr = iframes[i];
                     var ir = ifr.getBoundingClientRect();
-                    if (ir.width >= 150 && ir.height >= 40 && ir.top >= 200) {
+                    if (ir.width >= 100 && ir.height >= 30 && ir.top >= 50 && ir.top <= (h - 40)) {
                         return getRect('iframe_rect', ifr);
                     }
                 }
@@ -559,33 +622,33 @@ object CloudflareSolver {
                         var shadowBtn = node.shadowRoot.querySelector('button, input[type="button"], [role="button"]');
                         if (shadowBtn) {
                             var sbr = shadowBtn.getBoundingClientRect();
-                            if (sbr.width > 0 && sbr.height > 0 && sbr.top >= 200) return getRect('button_rect', shadowBtn);
+                            if (sbr.width > 0 && sbr.height > 0 && sbr.top >= 50 && sbr.top <= (h - 40)) return getRect('button_rect', shadowBtn);
                         }
                         var shadowIframe = node.shadowRoot.querySelector('iframe');
                         if (shadowIframe) {
                             var sir = shadowIframe.getBoundingClientRect();
-                            if (sir.width >= 20 && sir.height >= 20 && sir.top >= 200) return getRect('iframe_rect', shadowIframe);
+                            if (sir.width >= 20 && sir.height >= 20 && sir.top >= 50 && sir.top <= (h - 40)) return getRect('iframe_rect', shadowIframe);
                         }
                         var shadowCb = node.shadowRoot.querySelector('input[type="checkbox"], .ctp-checkbox-label, [class*="checkbox"], [id*="turnstile"]');
                         if (shadowCb) {
                             var scbr = shadowCb.getBoundingClientRect();
-                            if (scbr.width > 0 && scbr.height > 0 && scbr.top >= 200) return getRect('checkbox_rect', shadowCb);
+                            if (scbr.width > 0 && scbr.height > 0 && scbr.top >= 50 && scbr.top <= (h - 40)) return getRect('checkbox_rect', shadowCb);
                         }
                     }
                 }
 
                 // 4. Procura por DIVs / containers do widget Turnstile
-                var divs = document.querySelectorAll('.cf-turnstile, [class*="turnstile"], [id*="turnstile"], [id*="cf-chl-widget"], div');
+                var divs = document.querySelectorAll('.cf-turnstile, [class*="turnstile"], [id*="turnstile"], [id*="cf-chl-widget"], #challenge-stage div');
                 for (var k = 0; k < divs.length; k++) {
                     var d = divs[k];
                     var dr = d.getBoundingClientRect();
-                    if (dr.width >= 200 && dr.width <= 400 && dr.height >= 40 && dr.height <= 100 && dr.top >= 200) {
+                    if (dr.width >= 150 && dr.width <= 400 && dr.height >= 40 && dr.height <= 120 && dr.top >= 50 && dr.top <= (h - 40)) {
                         return getRect('iframe_rect', d);
                     }
                 }
 
-                // 5. Fallback calibrado para o widget Turnstile na tela mobile (top = 358 CSS px)
-                return ['iframe_rect', 16, 358, 328, 65, w, h].join('|');
+                // 5. Fallback calibrado para o widget Turnstile na tela mobile (top = 290 CSS px)
+                return ['iframe_rect', 16, 290, 328, 65, w, h].join('|');
             } catch(err) {
                 return 'probe_error:' + err.message;
             }
@@ -705,12 +768,20 @@ object CloudflareSolver {
         if (isIpBannedContent(content)) return true
         // v227: página "Offline ou Block!" é stale, não é challenge mas também não serve
         if (content.contains("Offline ou Block", ignoreCase = true) ||
-            content.contains("RedeCanais - Offline", ignoreCase = true)) {
+            content.contains("RedeCanais - Offline", ignoreCase = true) ||
+            content.contains("<title>Carregando", ignoreCase = true)) {
             return true
         }
         if (content.contains("pm-video-thumb") ||
             content.contains("pm-li-video") ||
             content.contains("pm-video-title") ||
+            content.contains("pm-grid") ||
+            content.contains("pm-category-browse") ||
+            content.contains("col-xs-6") ||
+            content.contains("lista-filmes") ||
+            content.contains("listagem") ||
+            content.contains("pm-video-watch-wrap") ||
+            content.contains("pm-video-description") ||
             content.contains("entry-title")) {
             return false
         }
@@ -732,18 +803,14 @@ object CloudflareSolver {
             content.contains("Checking your browser", ignoreCase = true) ||
             content.contains("Verificando", ignoreCase = true) ||
             content.contains("security verification", ignoreCase = true) ||
-            content.contains("security service", ignoreCase = true) ||
             content.contains("verifies you are not a bot", ignoreCase = true) ||
             content.contains("Ray ID:", ignoreCase = true) ||
             content.contains("Error code 520", ignoreCase = true) ||
             content.contains("Error code 522", ignoreCase = true) ||
             content.contains("Error code 524", ignoreCase = true) ||
             content.contains("Web server is returning", ignoreCase = true) ||
-            content.contains("id=\"challenge-form\"", ignoreCase = true) ||
             content.contains("challenge-platform", ignoreCase = true) ||
-            content.contains("cf-turnstile", ignoreCase = true) ||
-            content.contains("cf-challenge", ignoreCase = true) ||
-            (content.contains("Cloudflare", ignoreCase = true) && !content.contains("redecanais"))
+            content.contains("id=\"challenge-form\"", ignoreCase = true)
     }
 
     // v147: Error 1006 / "Access denied — banned your IP" é bloqueio PERMANENTE do IP pelo dono do site
@@ -767,44 +834,6 @@ object CloudflareSolver {
                     try {
                         Object.defineProperty(navigator, 'webdriver', {
                             get: function() { return undefined; },
-                            configurable: true
-                        });
-                    } catch(e) {}
-                }
-                if (!window.chrome) {
-                    window.chrome = {
-                        runtime: {},
-                        loadTimes: function() {},
-                        csi: function() {},
-                        app: {}
-                    };
-                }
-                if (!navigator.plugins || navigator.plugins.length === 0) {
-                    try {
-                        var dummyPlugin = {
-                            0: { type: "application/x-google-chrome-pdf", suffixes: "pdf", description: "Portable Document Format" },
-                            description: "Portable Document Format",
-                            filename: "internal-pdf-viewer",
-                            name: "Chrome PDF Viewer",
-                            length: 1
-                        };
-                        var plugins = [dummyPlugin];
-                        Object.defineProperty(plugins, 'namedItem', {
-                            value: function(name) { return this[name] || null; }
-                        });
-                        Object.defineProperty(plugins, 'item', {
-                            value: function(index) { return this[index] || null; }
-                        });
-                        Object.defineProperty(navigator, 'plugins', {
-                            get: function() { return plugins; },
-                            configurable: true
-                        });
-                    } catch(e) {}
-                }
-                if (!navigator.languages || navigator.languages.length === 0) {
-                    try {
-                        Object.defineProperty(navigator, 'languages', {
-                            get: function() { return ['pt-BR', 'pt', 'en-US', 'en']; },
                             configurable: true
                         });
                     } catch(e) {}
@@ -840,18 +869,18 @@ object CloudflareSolver {
             }
         }
 
-        // Fast-path 1: se já temos cf_clearance no CookieManager, tenta GET direto sem travar no mutex
+        // Fast-path 1: se já temos cf_clearance no CookieManager, tenta fetch direto no WebView autenticado
         val existingCookies = runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull().orEmpty()
         if (existingCookies.contains("cf_clearance")) {
-            val fast = tryFastHttpGet(url, existingCookies)
+            val fast = tryFastWebViewFetch(url)
             if (!fast.isNullOrBlank()) {
-                Log.i(TAG, "[CF] Fast HTTP GET sem WebView teve sucesso para $url (len=${fast.length})")
+                Log.i(TAG, "[CF] Fast WebView Fetch teve sucesso para $url (len=${fast.length})")
                 capturedHtmlByUrl[url] = fast
                 return fast
             }
         }
 
-        val interactiveHtml = solveInteractive(url, timeoutMs = 45000L, force = false)
+        val interactiveHtml = solveInteractive(url, timeoutMs = 60000L, force = false)
         // v229b: solveInteractiveLocked agora retorna player pages (whitelist interna) —
         // aceitar aqui também, não só via !isChallengeContent.
         val interactiveIsPlayer = !interactiveHtml.isNullOrBlank() &&
@@ -880,7 +909,7 @@ object CloudflareSolver {
             html.contains("__RC__/proxy") || html.contains("server.php"))
 
     @SuppressLint("SetJavaScriptEnabled")
-    suspend fun solveInteractive(url: String, timeoutMs: Long = 25000L, force: Boolean = false): String? {
+    suspend fun solveInteractive(url: String, timeoutMs: Long = 60000L, force: Boolean = false): String? {
         capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() && (!isChallengeContent(it) || isPlayerPage(it)) }?.let {
             Log.i(TAG, "[CF] HTML do cache da sessão (outro REQ capturou) url=$url len=${it.length}")
             return it
@@ -928,7 +957,21 @@ object CloudflareSolver {
     """
 
     private fun decodeCapturedHtml(value: String?): String? = runCatching {
-        value?.let { org.json.JSONTokener(it).nextValue() as? String }
+        if (value.isNullOrBlank() || value == "null") null
+        else {
+            try {
+                org.json.JSONTokener(value).nextValue() as? String
+            } catch (_: Throwable) {
+                if (value.startsWith("\"") && value.endsWith("\"") && value.length >= 2) {
+                    value.substring(1, value.length - 1)
+                        .replace("\\\"", "\"")
+                        .replace("\\n", "\n")
+                        .replace("\\r", "\r")
+                        .replace("\\t", "\t")
+                        .replace("\\\\", "\\")
+                } else value
+            }
+        }
     }.getOrNull()?.takeIf { it.isNotBlank() }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -957,6 +1000,7 @@ object CloudflareSolver {
         var lastTurnstileTapAt = 0L
         var tapJitterIndex = 0
         var pollAttempts = 0
+        var postClearanceWaitCount = 0
         var isPollScheduled = false
         var isPollRunning = false
         var hasTriggeredPostClearanceLoad = false
@@ -1090,30 +1134,84 @@ object CloudflareSolver {
             }
         }
 
+        // P0-3: fallback por teclado (técnica `tabs_till_verify` do FlareSolverr).
+        // Quando o rect do iframe vem 0x0/calibrado (widget não monta — caso Xvfb),
+        // o toque por coordenada não atinge o checkbox; TAB até o foco + Espaço
+        // ativa o widget via caminho de acessibilidade em vez de hit-test.
+        // Disparado no máximo 1x a cada 3 taps (cooldown herdado do tryTapTurnstile).
+        var tabFallbackCounter = 0
+        fun tryKeyboardActivate(view: WebView, reason: String) {
+            if (!isPollingActive.get() || !view.isAttachedToWindow) return
+            tabFallbackCounter++
+            if (tabFallbackCounter % 3 != 0) return
+            Log.i(TAG, "[CF] fallback teclado TAB+Espaço | motivo=$reason | n=$tabFallbackCounter")
+            view.post {
+                try {
+                    // foco no primeiro elemento focável e TABs até o widget
+                    repeat(6) {
+                        view.dispatchKeyEvent(
+                            android.view.KeyEvent(
+                                SystemClock.uptimeMillis(), SystemClock.uptimeMillis(),
+                                android.view.KeyEvent.ACTION_DOWN,
+                                android.view.KeyEvent.KEYCODE_TAB, 0
+                            )
+                        )
+                        view.dispatchKeyEvent(
+                            android.view.KeyEvent(
+                                SystemClock.uptimeMillis(), SystemClock.uptimeMillis(),
+                                android.view.KeyEvent.ACTION_UP,
+                                android.view.KeyEvent.KEYCODE_TAB, 0
+                            )
+                        )
+                    }
+                    view.postDelayed({
+                        if (!isPollingActive.get() || !view.isAttachedToWindow) return@postDelayed
+                        view.dispatchKeyEvent(
+                            android.view.KeyEvent(
+                                SystemClock.uptimeMillis(), SystemClock.uptimeMillis(),
+                                android.view.KeyEvent.ACTION_DOWN,
+                                android.view.KeyEvent.KEYCODE_SPACE, 0
+                            )
+                        )
+                        view.dispatchKeyEvent(
+                            android.view.KeyEvent(
+                                SystemClock.uptimeMillis(), SystemClock.uptimeMillis(),
+                                android.view.KeyEvent.ACTION_UP,
+                                android.view.KeyEvent.KEYCODE_SPACE, 0
+                            )
+                        )
+                    }, 400L)
+                } catch (e: Throwable) {
+                    Log.w(TAG, "[CF] fallback teclado falhou: ${e.message}")
+                }
+            }
+        }
+
         fun pollAndCapture(cv: WebView?) {
             isPollScheduled = false
-            if (!isPollingActive.get() || cv == null || isPollRunning) return
+            if (!isPollingActive.get() || cv == null) return
             isPollRunning = true
             cv.evaluateJavascript(
                 """(function() {
-                    var cards = document.querySelectorAll('.pm-video-thumb, .pm-li-video, .video-thumb, article, div[class*="video-thumb"], .entry-item, li.video-item').length;
+                    var cards = document.querySelectorAll('#pm-grid > li, li.col-xs-6, li.col-sm-4, li.col-md-3, li.col-lg-3, li.pm-li-video, article.pm-video-item, .pm-video-thumb, .pm-category-browse li, .entry-item, li.video-item, div.pm-li-video').length;
                     var hasPlayer = (document.querySelector('.entry-title, #video, iframe[src*="server"], iframe[src*="play"], .player-wrapper, #pm-video-description, #player, .captcha_button, #submit, button, form') || typeof window.rcPreloadPlayer === 'function' || location.pathname.indexOf('server.php') !== -1 || location.pathname.indexOf('play.php') !== -1) ? 1 : 0;
                     var links = document.querySelectorAll('a[href]').length;
                     var title = (document.title || '').replace(/[|\"']/g, ' ');
                     var htmlLen = (document.documentElement ? document.documentElement.outerHTML.length : 0);
-                    var bodySnip = '';
-                    try { bodySnip = (document.body ? document.body.innerText.substring(0, 500) : '').replace(/[|]/g, ' '); } catch(e) {}
-                    var isChal = /Just a moment|Checking your browser|challenge-platform|cf-turnstile|Um momento|Aguarde|Verificando|security verification|security service|not a bot/i.test(title + ' ' + bodySnip);
+                    var hasChallengeForm = (document.querySelector('form#challenge-form, iframe[src*="challenges.cloudflare.com"]') !== null);
+                    var isChal = hasChallengeForm || /Just a moment|Checking your browser|Um momento|Verificando/i.test(title);
                     
                     var isTarget = location.hostname.indexOf('redecanais') !== -1;
                     if (!isTarget) {
                         return '0|0|Offsite|0|1|0';
                     }
-                    var searchPending = $SEARCH_PENDING_JS;
-                    if (!searchPending && !isChal && (cards > 0 || hasPlayer > 0 || (links >= 5 && htmlLen >= 1000 && (title.indexOf('RedeCanais') !== -1 || bodySnip.indexOf('redecanais') !== -1)))) {
+                    var isUnpacking = (document.title && document.title.indexOf('Carregando') !== -1);
+                    var searchPending = (location.pathname.indexOf('search.php') !== -1 && document.querySelectorAll('.listagem > div, #pm-grid > li, .entry-item, a[href*=".html"]').length === 0);
+                    if (!searchPending && !isChal && !isUnpacking && (cards > 0 || hasPlayer > 0 || (links >= 5 && htmlLen >= 1000))) {
                         if (window.HTMLOUT && typeof window.HTMLOUT.onHtmlCaptured === 'function') {
                             if (document.querySelector('#search-input')) document.documentElement.setAttribute('data-cs-search-ready', 'true');
                             window.HTMLOUT.onHtmlCaptured(location.href, document.documentElement ? document.documentElement.outerHTML : '');
+                            return cards + '|' + links + '|' + title + '|' + htmlLen + '|' + (isChal ? '1' : '0') + '|' + hasPlayer;
                         }
                     }
                     return cards + '|' + links + '|' + title + '|' + htmlLen + '|' + (isChal ? '1' : '0') + '|' + hasPlayer;
@@ -1138,20 +1236,30 @@ object CloudflareSolver {
                 val c3 = CookieManager.getInstance().getCookie("https://redecanais.af") ?: ""
                 val cookies = "$c1; $c2; $c3"
                 val hasClearance = cookies.contains("cf_clearance")
-                if (hasClearance && !hasTriggeredPostClearanceLoad && (isChallenge || (cardCount == 0 && !hasPlayer))) {
-                    // v228: reload imediato — o delay de 800ms custava 2 ciclos de poll (700ms)
-                    // por MISS serializado no mutex; a página alvo no WebView da mesma sessão
-                    // resolve em ~1 load (~4s) em vez de challenge+poll+reload.
-                    hasTriggeredPostClearanceLoad = true
-                    Log.i(TAG, "[CF] cf_clearance obtido! Recarregando página alvo: $url")
-                    cv.loadUrl(url)
+                
+                if (hasClearance) {
+                    if (!isChallenge && (cardCount > 0 || hasPlayer || (linkCount >= 5 && htmlLen >= 1000))) {
+                        // Conteúdo pronto após clearance!
+                    } else {
+                        postClearanceWaitCount++
+                        if (postClearanceWaitCount >= 10 && !hasTriggeredPostClearanceLoad) {
+                            hasTriggeredPostClearanceLoad = true
+                            Log.i(TAG, "[CF] cf_clearance obtido e timeout de auto-navegação atingido! Recarregando página alvo: $url")
+                            cv.loadUrl(url)
+                        }
+                    }
                 }
-
                 if (isChallenge && isPollingActive.get()) {
                     val now = SystemClock.uptimeMillis()
                     val cooldown = 3200L
                     if (pollAttempts >= 3 && (now - lastTurnstileTapAt >= cooldown)) {
                         tryTapTurnstile(cv, "poll_$pollAttempts")
+                        // P0-3: se o probe só devolve fallback calibrado (widget não
+                        // monta — rect 0x0), o toque por coordenada não atinge nada;
+                        // tenta também o caminho por teclado.
+                        if (lastTapType == "iframe_rect") {
+                            tryKeyboardActivate(cv, "poll_${pollAttempts}_calibrated")
+                        }
                     }
                 }
 
@@ -1217,11 +1325,11 @@ object CloudflareSolver {
                     // MATCH_PARENT dá viewport real 720x1280; mutex garante 1 WebView
                     // por vez (vida curta, destruído pós-capture).
                     visibility = android.view.View.VISIBLE
-                    alpha = 0.01f
-                    isFocusable = false
-                    isFocusableInTouchMode = false
-                    isClickable = false
-                    isLongClickable = false
+                    alpha = 1.0f
+                    isFocusable = true
+                    isFocusableInTouchMode = true
+                    isClickable = true
+                    isLongClickable = true
                     setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
                     layoutParams = FrameLayout.LayoutParams(
                         FrameLayout.LayoutParams.MATCH_PARENT,
@@ -1245,11 +1353,19 @@ object CloudflareSolver {
                         mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                         setSupportMultipleWindows(false)
                     }
-                    val defaultUA = android.webkit.WebSettings.getDefaultUserAgent(activity)
-                    val desktopUA = challengeUserAgent(defaultUA)
-                    lastUserAgent = desktopUA
-                    settings.userAgentString = desktopUA
-                    Log.i(TAG, "[CF] WebView BG User-Agent: $desktopUA")
+                    // P0-4 (auditoria UA): o aviso do FlareSolverr vale aqui — o clearance
+                    // é amarrado ao UA do emissor. Se lastUserAgent já existe (vindo de
+                    // currentUserAgent() ou de solve anterior), RESPEITA; só deriva do
+                    // default do device quando ainda não há nenhum. Antes este bloco
+                    // sobrescrevia sempre, divergindo do UA que requestDoc/stealthHeaders
+                    // usaram na primeira tentativa.
+                    val existingUA = lastUserAgent?.takeIf { it.isNotBlank() }
+                    val unifiedUA = existingUA ?: challengeUserAgent(
+                        android.webkit.WebSettings.getDefaultUserAgent(activity)
+                    )
+                    lastUserAgent = unifiedUA
+                    settings.userAgentString = unifiedUA
+                    Log.i(TAG, "[CF] WebView BG User-Agent: $unifiedUA (preexistente=${existingUA != null})")
 
                     addJavascriptInterface(object {
                         @android.webkit.JavascriptInterface
@@ -1260,6 +1376,11 @@ object CloudflareSolver {
                                 (!isChallengeContent(html) || isPlayerPage(html))) {
                                 val clean = cleanHtmlForCache(html)
                                 capturedHtmlByUrl[pageUrl] = clean
+                                capturedHtmlByUrl[url] = clean
+                                lastSolvedHtml = clean
+                                targetLoaded.set(true)
+                                isPollingActive.set(false)
+                                htmlCaptureDone.complete(true)
                                 Log.i(TAG, "[CF_JS_INTERFACE] HTML capturado via fetch assíncrono: len=${clean.length} url=$pageUrl")
                                 runCatching { persistCapturedHtmlToDisk() }
                             }
@@ -1329,6 +1450,7 @@ object CloudflareSolver {
 
                         override fun onPageStarted(view: WebView?, startedUrl: String?, favicon: android.graphics.Bitmap?) {
                             super.onPageStarted(view, startedUrl, favicon)
+                            isPollRunning = false
                             view?.evaluateJavascript(ANTI_DETECTION_JS, null)
                             if (startedUrl != null && startedUrl != "about:blank") {
                                 currentUrl = startedUrl
@@ -1337,6 +1459,7 @@ object CloudflareSolver {
 
                         override fun onPageFinished(view: WebView?, finishedUrl: String?) {
                             super.onPageFinished(view, finishedUrl)
+                            isPollRunning = false
                             CookieManager.getInstance().flush()
                             val cookies = CookieManager.getInstance().getCookie(finishedUrl ?: url) ?: ""
                             val hasClearance = cookies.contains("cf_clearance")
@@ -1350,6 +1473,20 @@ object CloudflareSolver {
 
                             Log.d(TAG, "[CF] onPageFinished url=$finishedUrl | clearance=$hasClearance | target_url=$isTargetUrl")
                             if (hasClearance && isTargetUrl) {
+                                view?.evaluateJavascript("""
+                                    (function() {
+                                        try {
+                                            if (window.HTMLOUT && typeof window.HTMLOUT.onHtmlCaptured === 'function') {
+                                                var isUnpacking = (document.title && document.title.indexOf('Carregando') !== -1);
+                                                var isSearchPending = (location.pathname.indexOf('search.php') !== -1 && document.querySelectorAll('.listagem > div, #pm-grid > li, .entry-item, a[href*=".html"]').length === 0);
+                                                var html = document.documentElement ? document.documentElement.outerHTML : '';
+                                                if (html.length > 1000 && !isUnpacking && !isSearchPending && !document.querySelector('form#challenge-form, #cf-turnstile')) {
+                                                    window.HTMLOUT.onHtmlCaptured(location.href, html);
+                                                }
+                                            }
+                                        } catch(e) {}
+                                    })();
+                                """.trimIndent(), null)
                                 // v233: mesma barreira de prontidão da busca + decode JSON único
                                 view?.evaluateJavascript(CAPTURE_READY_HTML_JS) { htmlVal ->
                                     if (!isPollingActive.get()) return@evaluateJavascript

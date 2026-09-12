@@ -70,4 +70,33 @@ class TestRedeCanaisAFV139 {
         )
         assertEquals("custom-agent", CloudflareSolver.challengeUserAgent("custom-agent"))
     }
+
+    // P0: travas da rodada comunidade (2026-09-11).
+    @Test
+    fun challengeUserAgentIsStableAcrossCalls() {
+        // P0-4: o UA unificado (requestDoc + stealthHeaders + WebView BG) deve ser
+        // determinístico — requestDoc usa lastUserAgent e o WebView BG agora respeita
+        // o preexistente em vez de sobrescrever. Mesma entrada → mesma saída.
+        val raw = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Version/4.0 Chrome/133.0.0.0 Mobile Safari/537.36"
+        val once = CloudflareSolver.challengeUserAgent(raw)
+        val twice = CloudflareSolver.challengeUserAgent(once)
+        assertEquals(once, twice)
+        assertFalse(once.contains("; wv"))
+        assertFalse(once.contains("Version/4.0"))
+    }
+
+    @Test
+    fun calibratedFallbackProbeIsDetectable() {
+        // P0-3: o fallback calibrado retorna tipo iframe_rect com rect fixo
+        // (16,358 328x65). O poll usa lastTapType == "iframe_rect" para decidir o
+        // fallback TAB+Espaço — o probe precisa continuar emitindo esse tipo.
+        val probe = "\"iframe_rect|16|358|328|65|720|1280\""
+        assertEquals("iframe_rect", probe.trim().removeSurrounding("\"").split('|').first())
+        // iframe_rect mira o CHECKBOX (left+36 quando width>=200, centro vertical),
+        // não o centro do rect: cssX=16+36=52, cssY=358+32.5=390.5 (escala 1.0).
+        val point = CloudflareSolver.turnstileTapPoint(probe, viewWidth = 720, viewHeight = 1280)
+        assertEquals(52f, point!!.first, 1f)
+        assertEquals(390.5f, point.second, 1f)
+    }
 }

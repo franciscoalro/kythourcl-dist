@@ -1,7 +1,9 @@
 # 📑 Dossiê Técnico Mestre: Engenharia Reversa e Arquitetura do RedeCanais (`RedeCanais`)
 
-**Repositório Fonte:** [`https://github.com/franciscoalro/kythourcl`](https://github.com/franciscoalro/kythourcl)  
-**Repositório de Distribuição:** [`https://github.com/franciscoalro/kythourcl-dist`](https://github.com/franciscoalro/kythourcl-dist)  
+**Repositório Fonte:** ~~[`https://github.com/franciscoalro/kythourcl`](https://github.com/franciscoalro/kythourcl)~~
+☠️ **MORTO (404 desde ~09/2026, verificado via API GitHub)** — todo o material verificável vive no dist abaixo.  
+**Repositório de Distribuição (fonte atual):** [`https://github.com/franciscoalro/kythourcl-dist`](https://github.com/franciscoalro/kythourcl-dist)  
+(`main` = fonte Kotlin + docs; `builds` = `.cs3` + `repo.json`/`plugins.json`; link de instalação antigo do README aponta p/ o repo morto)  
 **Domínio Oficial Ativo:** `https://www3.redecanais.vip` (Espelho ativo com bypass de WAF do `redecanais.af`)  
 **Data do Dossiê:** 21/08/2026  
 **Versão do Plugin:** `v43`

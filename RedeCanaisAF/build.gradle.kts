@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v255: fix block offsite redirects in CloudflareSolver WebViewClient + guard pollAndCapture
+// v272: HtmlBridge fast fetch in authenticated WebView context
 cloudstream {
-    version = 255
+    version = 272
 }
