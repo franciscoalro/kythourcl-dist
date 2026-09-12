@@ -618,7 +618,8 @@ class RedeCanaisAF : MainAPI() {
 
         if (rawTitle.isBlank()) return null
         val title = RedeCanaisAFText.cleanMediaTitle(rawTitle)
-        if (title.isBlank() || title.equals("Watch Later", true) || title.equals("Novo", true)) return null
+        if (title.isBlank() || title.equals("Watch Later", true) || title.equals("Novo", true) ||
+            RedeCanaisAFText.isJunkText(rawTitle) || RedeCanaisAFText.isJunkText(title)) return null
 
         val img = element.selectFirst("img")
         val rawPoster = img?.attr("data-cs-poster")

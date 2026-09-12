@@ -175,7 +175,7 @@ object WebViewStreamProxy {
                 cookieManager.setAcceptCookie(true)
                 val view = WebView(activity).apply {
                     visibility = android.view.View.VISIBLE
-                    alpha = 1.0f
+                    alpha = 0.01f
                     isFocusable = true
                     isFocusableInTouchMode = true
                     isClickable = true
@@ -405,7 +405,7 @@ object WebViewStreamProxy {
                 // (E2E v242: 4 embeds x 20s sem 1 LEGACY_NAV; mesmo bug v229).
                 val view = WebView(activity).apply {
                     visibility = android.view.View.VISIBLE
-                    alpha = 1.0f
+                    alpha = 0.01f
                     isFocusable = true
                     isFocusableInTouchMode = true
                     isClickable = true
@@ -663,7 +663,7 @@ object WebViewStreamProxy {
                 // transiente não pressiona o LMK como os permanentes da v228.
                 val view = WebView(activity).apply {
                     visibility = android.view.View.VISIBLE
-                    alpha = 1.0f
+                    alpha = 0.01f
                     isFocusable = true
                     isFocusableInTouchMode = true
                     isClickable = true

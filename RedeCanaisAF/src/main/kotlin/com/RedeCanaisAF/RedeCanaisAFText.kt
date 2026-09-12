@@ -33,7 +33,9 @@ internal object RedeCanaisAFText {
             "redecanais", "rede canais", "todos os direitos reservados",
             "reportar erro", "clique aqui", "navegador recomendado",
             "baixe o app", "grupo telegram", "compartilhe com seus amigos",
-            "lista de episódios", "todas as temporadas"
+            "lista de episódios", "todas as temporadas",
+            "web server is returning", "error code 520", "error code 522",
+            "error code 524", "just a moment", "checking your browser", "attention required"
         )
         return junk.any { lower.contains(it) } && text.length < 150
     }

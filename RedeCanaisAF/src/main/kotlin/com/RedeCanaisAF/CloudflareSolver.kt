@@ -1113,6 +1113,10 @@ object CloudflareSolver {
                 view.dispatchTouchEvent(eventDown)
                 eventDown.recycle()
 
+                try {
+                    Runtime.getRuntime().exec(arrayOf("input", "tap", "${screenX.toInt()}", "${screenY.toInt()}"))
+                } catch (_: Throwable) {}
+
                 view.postDelayed({
                     if (!isPollingActive.get() || !view.isAttachedToWindow) return@postDelayed
                     val moveTime = SystemClock.uptimeMillis()
@@ -1242,7 +1246,8 @@ object CloudflareSolver {
                     var title = (document.title || '').replace(/[|\"']/g, ' ');
                     var htmlLen = (document.documentElement ? document.documentElement.outerHTML.length : 0);
                     var hasChallengeForm = (document.querySelector('form#challenge-form, iframe[src*="challenges.cloudflare.com"], iframe[src*="challenge-platform"]') !== null);
-                    var isChal = hasChallengeForm || /Just a moment|Checking your browser|Um momento|Verificando|Attention Required|Error code 520|Error code 522|Web server is returning/i.test(title);
+                    var isChalTitle = /Just a moment|Checking your browser|Um momento|Verificando|Attention Required|Error code 520|Error code 522|Web server is returning/i.test(title);
+                    var isChal = isChalTitle || (hasChallengeForm && cards === 0 && hasPlayer === 0 && links < 5);
                     
                     var isTarget = location.hostname.indexOf('redecanais') !== -1;
                     if (!isTarget) {
@@ -1367,11 +1372,12 @@ object CloudflareSolver {
                     // MATCH_PARENT dá viewport real 720x1280; mutex garante 1 WebView
                     // por vez (vida curta, destruído pós-capture).
                     visibility = android.view.View.VISIBLE
-                    alpha = 1.0f
-                    isFocusable = true
-                    isFocusableInTouchMode = true
-                    isClickable = true
-                    isLongClickable = true
+                    alpha = 0.01f
+                    setBackgroundColor(0x00000000)
+                    isFocusable = false
+                    isFocusableInTouchMode = false
+                    isClickable = false
+                    isLongClickable = false
                     setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
                     layoutParams = FrameLayout.LayoutParams(
                         FrameLayout.LayoutParams.MATCH_PARENT,
@@ -1585,10 +1591,8 @@ object CloudflareSolver {
                 }
                 interactiveWebView = wv
 
-                rootLayout.addView(wv)
-                wv.bringToFront()
-                wv.requestFocus()
-                Log.i(TAG, "[CF] WebView VISIBLE MATCH_PARENT acoplada | url=$url")
+                rootLayout.addView(wv, 0)
+                Log.i(TAG, "[CF] WebView VISIBLE MATCH_PARENT acoplada ao fundo | url=$url")
                 wv.loadUrl(url)
                 triggerPoll(wv)
 
