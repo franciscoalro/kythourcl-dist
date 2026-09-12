@@ -57,21 +57,49 @@ object CloudflareSolver {
         CommonActivity.activity?.getSharedPreferences(PREF_NAME, android.content.Context.MODE_PRIVATE)
     }.getOrNull()
 
+    fun extractClearance(cookieHeader: String?): String? {
+        if (cookieHeader.isNullOrBlank()) return null
+        return Regex("""\bcf_clearance=([^;\s]+)""").findAll(cookieHeader)
+            .map { it.groupValues[1].trim().removeSurrounding("\"") }
+            .filter { it.isNotBlank() && it.length > 20 && it != "deleted" && it != "\"\"" }
+            .lastOrNull()
+    }
+
+    fun hasValidClearance(cookieHeader: String?): Boolean {
+        return extractClearance(cookieHeader) != null
+    }
+
+    fun sanitizeCookies(raw: String): String {
+        if (raw.isBlank()) return ""
+        val map = LinkedHashMap<String, String>()
+        raw.split(";").forEach { part ->
+            val trimmed = part.trim()
+            val eq = trimmed.indexOf('=')
+            if (eq > 0) {
+                val name = trimmed.substring(0, eq).trim()
+                val value = trimmed.substring(eq + 1).trim()
+                if (name.isNotBlank() && value.isNotBlank() && value != "\"\"" && value != "deleted") {
+                    map[name] = value
+                }
+            }
+        }
+        return map.entries.joinToString("; ") { "${it.key}=${it.value}" }
+    }
+
     fun saveClearanceFromCookieManager(url: String) {
         try {
             val raw = CookieManager.getInstance().getCookie(url) ?: return
-            val clearance = Regex("cf_clearance=([^;]+)").find(raw)?.groupValues?.get(1)
-            val cfBm = Regex("__cf_bm=([^;]+)").find(raw)?.groupValues?.get(1)
-            val rcip = Regex("RCIP=([^;]+)").find(raw)?.groupValues?.get(1)
-            val rcsess = Regex("RCSESS=([^;]+)").find(raw)?.groupValues?.get(1)
+            val clearance = extractClearance(raw)
+            val cfBm = Regex("""\b__cf_bm=([^;\s]+)""").findAll(raw).lastOrNull()?.groupValues?.get(1)?.removeSurrounding("\"")?.takeIf { it.isNotBlank() && it != "deleted" }
+            val rcip = Regex("""\bRCIP=([^;\s]+)""").findAll(raw).lastOrNull()?.groupValues?.get(1)?.removeSurrounding("\"")?.takeIf { it.isNotBlank() && it != "deleted" }
+            val rcsess = Regex("""\bRCSESS=([^;\s]+)""").findAll(raw).lastOrNull()?.groupValues?.get(1)?.removeSurrounding("\"")?.takeIf { it.isNotBlank() && it != "deleted" }
             if (clearance.isNullOrBlank() && rcip.isNullOrBlank() && rcsess.isNullOrBlank()) return
             val now = System.currentTimeMillis()
             val ed = prefs()?.edit()
             if (!clearance.isNullOrBlank()) ed?.putString(KEY_CF_CLEARANCE, clearance)
-            if (!cfBm.isNullOrBlank()) ed?.putString(KEY_CF_BM, cfBm) else if (cfBm == null) { /* keep previous */ }
+            if (!cfBm.isNullOrBlank()) ed?.putString(KEY_CF_BM, cfBm)
             if (!rcip.isNullOrBlank()) ed?.putString(KEY_RCIPE, rcip)
             if (!rcsess.isNullOrBlank()) ed?.putString(KEY_RCSESS, rcsess)
-            // always update saved_at when we have anything new (keeps RCSESS TTL fresh)
             if (!clearance.isNullOrBlank() || !rcip.isNullOrBlank() || !rcsess.isNullOrBlank()) {
                 ed?.putLong(KEY_SAVED_AT, now)
             }
@@ -83,9 +111,10 @@ object CloudflareSolver {
     }
 
     fun restoreClearanceIfValid(mainUrl: String): Boolean {
+        val canonicalUrl = if (mainUrl.endsWith("/")) mainUrl else "$mainUrl/"
         if (persistenceRestoreDone) {
-            val existing = runCatching { CookieManager.getInstance().getCookie(mainUrl) ?: "" }.getOrNull() ?: ""
-            if (existing.contains("cf_clearance")) return true
+            val existing = runCatching { CookieManager.getInstance().getCookie(canonicalUrl) ?: "" }.getOrNull() ?: ""
+            if (hasValidClearance(existing)) return true
         }
         try {
             val p = prefs() ?: return false
@@ -99,28 +128,22 @@ object CloudflareSolver {
                 persistenceRestoreDone = true
                 return false
             }
-            val clearance = p.getString(KEY_CF_CLEARANCE, null)
-            val cfBm = p.getString(KEY_CF_BM, null)
-            val rcip = p.getString(KEY_RCIPE, null)
-            val rcsess = p.getString(KEY_RCSESS, null)
+            val clearance = p.getString(KEY_CF_CLEARANCE, null)?.takeIf { it.length > 20 && it != "deleted" }
+            val cfBm = p.getString(KEY_CF_BM, null)?.takeIf { it.isNotBlank() && it != "deleted" }
+            val rcip = p.getString(KEY_RCIPE, null)?.takeIf { it.isNotBlank() && it != "deleted" }
+            val rcsess = p.getString(KEY_RCSESS, null)?.takeIf { it.isNotBlank() && it != "deleted" }
             val hasRcsessValid = !rcsess.isNullOrBlank() && age < RCSESS_TTL_MS
             if (clearance.isNullOrBlank() && rcip.isNullOrBlank() && rcsess.isNullOrBlank()) return false
             val cm = CookieManager.getInstance()
-            // restaura no CookieManager para o host canônico e para redecanaistv (player)
-            fun setFor(url: String) {
-                if (!clearance.isNullOrBlank()) cm.setCookie(url, "cf_clearance=$clearance; Path=/; Domain=.redecanais.af; Secure; SameSite=None")
-                if (!cfBm.isNullOrBlank()) cm.setCookie(url, "__cf_bm=$cfBm; Path=/; Domain=.redecanais.af; Secure; SameSite=None")
-                if (!rcip.isNullOrBlank() && hasRcsessValid) cm.setCookie(url, "RCIP=$rcip; Path=/; Domain=.redecanais.af; Secure; HttpOnly; SameSite=None")
-                if (!rcsess.isNullOrBlank() && hasRcsessValid) cm.setCookie(url, "RCSESS=$rcsess; Path=/; Domain=.redecanais.af; Secure; HttpOnly; SameSite=None")
-                // flags de player que evitam modal/ads bloqueando o captcha_button
-                cm.setCookie(url, "adsCompleted=1; Path=/; Domain=.redecanais.af")
-                cm.setCookie(url, "modalVisited=true; Path=/; Domain=.redecanais.af")
-                cm.setCookie(url, "pm_elastic_player=normal; Path=/; Domain=.redecanais.af")
-            }
-            setFor(mainUrl)
-            setFor("https://redecanaistv.af/")
-            // também para domínio do player atual e neosoro (evita 520)
-            setFor("https://redecanais.af/")
+            cm.setAcceptCookie(true)
+
+            if (!clearance.isNullOrBlank()) cm.setCookie("https://redecanais.af/", "cf_clearance=$clearance; Path=/; Domain=.redecanais.af; Secure; SameSite=None")
+            if (!cfBm.isNullOrBlank()) cm.setCookie("https://redecanais.af/", "__cf_bm=$cfBm; Path=/; Domain=.redecanais.af; Secure; SameSite=None")
+            if (!rcip.isNullOrBlank() && hasRcsessValid) cm.setCookie("https://redecanais.af/", "RCIP=$rcip; Path=/; Domain=.redecanais.af; Secure; HttpOnly; SameSite=None")
+            if (!rcsess.isNullOrBlank() && hasRcsessValid) cm.setCookie("https://redecanais.af/", "RCSESS=$rcsess; Path=/; Domain=.redecanais.af; Secure; HttpOnly; SameSite=None")
+            cm.setCookie("https://redecanais.af/", "adsCompleted=1; Path=/; Domain=.redecanais.af")
+            cm.setCookie("https://redecanais.af/", "modalVisited=true; Path=/; Domain=.redecanais.af")
+            cm.setCookie("https://redecanais.af/", "pm_elastic_player=normal; Path=/; Domain=.redecanais.af")
             cm.flush()
             persistenceRestoreDone = true
             Log.i(TAG, "[CF_PERSIST] cf_clearance restaurado age=${age / 1000}s clr=${!clearance.isNullOrBlank()} cf_bm=${cfBm != null} rcip=${rcip != null} rcsess=${hasRcsessValid} (rawAge=${age/1000}s)")
@@ -171,11 +194,11 @@ object CloudflareSolver {
             val cookieManager = CookieManager.getInstance()
             cookieManager.setCookie(
                 url,
-                "cf_clearance=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; Domain=.redecanais.af; Secure; SameSite=None"
+                "cf_clearance=deleted; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; Domain=.redecanais.af; Secure; SameSite=None"
             )
             cookieManager.setCookie(
                 url,
-                "__cf_bm=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; Domain=.redecanais.af; Secure; SameSite=None"
+                "__cf_bm=deleted; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; Domain=.redecanais.af; Secure; SameSite=None"
             )
             cookieManager.flush()
             Log.w(TAG, "[CF] cf_clearance e __cf_bm invalidados para $url")
@@ -183,6 +206,7 @@ object CloudflareSolver {
             Log.w(TAG, "[CF] Falha ao invalidar cf_clearance: ${e.message}")
         }
         clearPersistedClearance()
+        capturedHtmlByUrl.remove(url)
     }
 
     // v130: cache de HTML capturado por URL dentro da MESMA sessão TLS do diálogo. O Turnstile
@@ -286,12 +310,26 @@ object CloudflareSolver {
 
                 val js = """(async () => {
                     try {
-                        const r = await fetch(${org.json.JSONObject.quote(url)}, { credentials: 'include' });
+                        const targetUrl = ${org.json.JSONObject.quote(url)};
+                        const r = await fetch(targetUrl, { credentials: 'include' });
                         if (r.ok) {
                             const t = await r.text();
-                            if (t.length > 300 && !t.includes('id="challenge-form"') && !t.includes('<title>Just a moment')) {
+                            const isChal = t.includes('challenge-platform') || 
+                                           t.includes('Just a moment') || 
+                                           t.includes('Ray ID:') || 
+                                           t.includes('id="challenge-form"') ||
+                                           t.includes('Attention Required');
+                            const hasContent = t.includes('pm-video') || 
+                                               t.includes('pm-li-video') || 
+                                               t.includes('entry-title') || 
+                                               t.includes('server.php') || 
+                                               t.includes('rcPreloadPlayer') || 
+                                               t.includes('player') || 
+                                               t.includes('lista-filmes') ||
+                                               t.includes('iframe');
+                            if (t.length > 500 && !isChal && hasContent) {
                                 if (window.HtmlBridge) {
-                                    window.HtmlBridge.postHtml(${org.json.JSONObject.quote(url)}, t);
+                                    window.HtmlBridge.postHtml(targetUrl, t);
                                     return;
                                 }
                             }
@@ -317,9 +355,9 @@ object CloudflareSolver {
         return withContext(Dispatchers.IO) {
             try {
                 val headers = stealthHeaders(if (url.contains("redecanais.af")) "https://redecanais.af/" else "https://redecanais.af/")
-                if (cookies.isNotBlank()) headers["Cookie"] = cookies
+                val cleanCookie = sanitizeCookies(cookies)
+                if (cleanCookie.isNotBlank()) headers["Cookie"] = cleanCookie
                 val client = app.baseClient.newBuilder()
-                    .proxy(java.net.Proxy.NO_PROXY) // v227-dual: PRODUÇÃO (comente para análise mitmproxy/ZAP)
                     .retryOnConnectionFailure(true)
                     .followRedirects(true)
                     .followSslRedirects(true)
@@ -769,6 +807,9 @@ object CloudflareSolver {
         // v227: página "Offline ou Block!" é stale, não é challenge mas também não serve
         if (content.contains("Offline ou Block", ignoreCase = true) ||
             content.contains("RedeCanais - Offline", ignoreCase = true) ||
+            content.contains("Webpage not available", ignoreCase = true) ||
+            content.contains("ERR_PROXY_CONNECTION_FAILED", ignoreCase = true) ||
+            content.contains("net::ERR_", ignoreCase = true) ||
             content.contains("<title>Carregando", ignoreCase = true)) {
             return true
         }
@@ -804,12 +845,14 @@ object CloudflareSolver {
             content.contains("Verificando", ignoreCase = true) ||
             content.contains("security verification", ignoreCase = true) ||
             content.contains("verifies you are not a bot", ignoreCase = true) ||
+            content.contains("Attention Required", ignoreCase = true) ||
             content.contains("Ray ID:", ignoreCase = true) ||
             content.contains("Error code 520", ignoreCase = true) ||
             content.contains("Error code 522", ignoreCase = true) ||
             content.contains("Error code 524", ignoreCase = true) ||
             content.contains("Web server is returning", ignoreCase = true) ||
             content.contains("challenge-platform", ignoreCase = true) ||
+            content.contains("cdn-cgi/content", ignoreCase = true) ||
             content.contains("id=\"challenge-form\"", ignoreCase = true)
     }
 
@@ -871,9 +914,9 @@ object CloudflareSolver {
 
         // Fast-path 1: se já temos cf_clearance no CookieManager, tenta fetch direto no WebView autenticado
         val existingCookies = runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull().orEmpty()
-        if (existingCookies.contains("cf_clearance")) {
+        if (hasValidClearance(existingCookies)) {
             val fast = tryFastWebViewFetch(url)
-            if (!fast.isNullOrBlank()) {
+            if (!fast.isNullOrBlank() && !isChallengeContent(fast) && (isPlayerPage(fast) || fast.contains("pm-video") || fast.contains("entry-title") || fast.contains("iframe") || fast.contains("pm-li-video"))) {
                 Log.i(TAG, "[CF] Fast WebView Fetch teve sucesso para $url (len=${fast.length})")
                 capturedHtmlByUrl[url] = fast
                 return fast
@@ -976,9 +1019,9 @@ object CloudflareSolver {
 
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun solveInteractiveLocked(url: String, timeoutMs: Long, force: Boolean): String? {
+        capturedHtmlByUrl.remove(url)
         val initialCookies = CookieManager.getInstance().getCookie(url) ?: ""
-        val initialClearance = Regex("""cf_clearance=([^;]+)""").find(initialCookies)?.groupValues?.get(1).orEmpty()
-        val hasClearanceBefore = initialClearance.isNotBlank()
+        val hasClearanceBefore = hasValidClearance(initialCookies)
         Log.d(TAG, "[CF] clearance_present=$hasClearanceBefore (before interactive)")
 
         // v228: solve() já fez tryFastHttpGet fora do lock — não repetir aqui
@@ -1194,12 +1237,12 @@ object CloudflareSolver {
             cv.evaluateJavascript(
                 """(function() {
                     var cards = document.querySelectorAll('#pm-grid > li, li.col-xs-6, li.col-sm-4, li.col-md-3, li.col-lg-3, li.pm-li-video, article.pm-video-item, .pm-video-thumb, .pm-category-browse li, .entry-item, li.video-item, div.pm-li-video').length;
-                    var hasPlayer = (document.querySelector('.entry-title, #video, iframe[src*="server"], iframe[src*="play"], .player-wrapper, #pm-video-description, #player, .captcha_button, #submit, button, form') || typeof window.rcPreloadPlayer === 'function' || location.pathname.indexOf('server.php') !== -1 || location.pathname.indexOf('play.php') !== -1) ? 1 : 0;
+                    var hasPlayer = (document.querySelector('.entry-title, #video, iframe[src*="server"], iframe[src*="play"], .player-wrapper, #pm-video-description, .pm-video-description, #pm-video-watch-wrap, #player, .captcha_button') || typeof window.rcPreloadPlayer === 'function' || location.pathname.indexOf('server.php') !== -1 || location.pathname.indexOf('play.php') !== -1 || location.pathname.indexOf('watch.php') !== -1) ? 1 : 0;
                     var links = document.querySelectorAll('a[href]').length;
                     var title = (document.title || '').replace(/[|\"']/g, ' ');
                     var htmlLen = (document.documentElement ? document.documentElement.outerHTML.length : 0);
-                    var hasChallengeForm = (document.querySelector('form#challenge-form, iframe[src*="challenges.cloudflare.com"]') !== null);
-                    var isChal = hasChallengeForm || /Just a moment|Checking your browser|Um momento|Verificando/i.test(title);
+                    var hasChallengeForm = (document.querySelector('form#challenge-form, iframe[src*="challenges.cloudflare.com"], iframe[src*="challenge-platform"]') !== null);
+                    var isChal = hasChallengeForm || /Just a moment|Checking your browser|Um momento|Verificando|Attention Required|Error code 520|Error code 522|Web server is returning/i.test(title);
                     
                     var isTarget = location.hostname.indexOf('redecanais') !== -1;
                     if (!isTarget) {
@@ -1227,7 +1270,7 @@ object CloudflareSolver {
                 val htmlLen = parts.getOrNull(3)?.toIntOrNull() ?: 0
                 val isChalFlag = parts.getOrNull(4) == "1"
                 val hasPlayer = parts.getOrNull(5) == "1"
-                val isChallenge = isChalFlag || isChallengeContent(title)
+                val isChallenge = if (isChalFlag || isChallengeContent(title)) true else (cardCount == 0 && !hasPlayer && linkCount < 5)
                 pollAttempts++
                 Log.d(TAG, "[CF] polling cards=$cardCount links=$linkCount isChallenge=$isChallenge (tentativa $pollAttempts) | url=$currentUrl")
 
@@ -1235,16 +1278,15 @@ object CloudflareSolver {
                 val c2 = CookieManager.getInstance().getCookie(url) ?: ""
                 val c3 = CookieManager.getInstance().getCookie("https://redecanais.af") ?: ""
                 val cookies = "$c1; $c2; $c3"
-                val hasClearance = cookies.contains("cf_clearance")
+                val hasClearance = hasValidClearance(cookies)
                 
                 if (hasClearance) {
                     if (!isChallenge && (cardCount > 0 || hasPlayer || (linkCount >= 5 && htmlLen >= 1000))) {
                         // Conteúdo pronto após clearance!
                     } else {
                         postClearanceWaitCount++
-                        if (postClearanceWaitCount >= 10 && !hasTriggeredPostClearanceLoad) {
-                            hasTriggeredPostClearanceLoad = true
-                            Log.i(TAG, "[CF] cf_clearance obtido e timeout de auto-navegação atingido! Recarregando página alvo: $url")
+                        if (postClearanceWaitCount in listOf(4, 12, 24)) {
+                            Log.i(TAG, "[CF] cf_clearance obtido! Recarregando página alvo (tentativa $postClearanceWaitCount): $url")
                             cv.loadUrl(url)
                         }
                     }
@@ -1330,7 +1372,7 @@ object CloudflareSolver {
                     isFocusableInTouchMode = true
                     isClickable = true
                     isLongClickable = true
-                    setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
+                    setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
                     layoutParams = FrameLayout.LayoutParams(
                         FrameLayout.LayoutParams.MATCH_PARENT,
                         FrameLayout.LayoutParams.MATCH_PARENT
@@ -1403,6 +1445,9 @@ object CloudflareSolver {
                         override fun onProgressChanged(view: WebView?, newProgress: Int) {
                             super.onProgressChanged(view, newProgress)
                             view?.evaluateJavascript(ANTI_DETECTION_JS, null)
+                            if (newProgress >= 70) {
+                                triggerPoll(view)
+                            }
                         }
                     }
                     webViewClient = object : WebViewClient() {
@@ -1462,7 +1507,7 @@ object CloudflareSolver {
                             isPollRunning = false
                             CookieManager.getInstance().flush()
                             val cookies = CookieManager.getInstance().getCookie(finishedUrl ?: url) ?: ""
-                            val hasClearance = cookies.contains("cf_clearance")
+                            val hasClearance = hasValidClearance(cookies)
                             val isTargetUrl = finishedUrl?.contains("redecanais.af") == true &&
                                     !finishedUrl.contains("challenge-platform") &&
                                     finishedUrl != "about:blank"
@@ -1540,11 +1585,12 @@ object CloudflareSolver {
                 }
                 interactiveWebView = wv
 
-                // v236: VISIBLE MATCH_PARENT alpha 0.01 — ver comentário do apply
-                // acima. Adiciona no fundo (index 0); mutex garante 1 WebView por vez.
-                rootLayout.addView(wv, 0)
-                Log.i(TAG, "[CF] WebView VISIBLE MATCH_PARENT alpha 0.01 acoplada em background | url=$url")
+                rootLayout.addView(wv)
+                wv.bringToFront()
+                wv.requestFocus()
+                Log.i(TAG, "[CF] WebView VISIBLE MATCH_PARENT acoplada | url=$url")
                 wv.loadUrl(url)
+                triggerPoll(wv)
 
                 Log.i(TAG, "[CF] WebView interativa carregando url=$url")
             } catch (e: Throwable) {
@@ -1571,7 +1617,7 @@ object CloudflareSolver {
             }
         }
         val finalCookies = CookieManager.getInstance().getCookie(url) ?: ""
-        val finalClearance = finalCookies.contains("cf_clearance")
+        val finalClearance = hasValidClearance(finalCookies)
         Log.i(TAG, "[CF] clearance_present=$finalClearance | target_page_loaded=${targetLoaded.get()} (finished)")
         // v145: persiste cf_clearance válido (resolver Turnstile uma vez libera cold starts seguintes)
         if (finalClearance) saveClearanceFromCookieManager(url)

@@ -132,12 +132,17 @@ internal object RedeCanaisAFText {
     }
 
     fun isPlaceholderImage(url: String): Boolean {
-        if (url.isBlank()) return true
-        if (url.startsWith("data:image/", ignoreCase = true)) {
-            return url.startsWith("data:image/svg+xml", ignoreCase = true) && url.length < 200
+        val trimmed = url.trim()
+        if (trimmed.isBlank() || trimmed == "/" || trimmed == "#" ||
+            trimmed == "https://redecanais.af" || trimmed == "https://redecanais.af/" ||
+            trimmed == "http://redecanais.af" || trimmed == "http://redecanais.af/" ||
+            trimmed.endsWith(".html", ignoreCase = true) ||
+            trimmed.endsWith(".php", ignoreCase = true)) return true
+        if (trimmed.startsWith("data:image/", ignoreCase = true)) {
+            return trimmed.startsWith("data:image/svg+xml", ignoreCase = true) && trimmed.length < 200
         }
-        if (url.startsWith("data:image/svg+xml", ignoreCase = true) && url.length < 200) return true
-        return PLACEHOLDER_PATTERNS.any { url.contains(it, ignoreCase = true) }
+        if (trimmed.startsWith("data:image/svg+xml", ignoreCase = true) && trimmed.length < 200) return true
+        return PLACEHOLDER_PATTERNS.any { trimmed.contains(it, ignoreCase = true) }
     }
 
     fun parseSrcset(srcset: String, fixUrl: (String) -> String = { it }): String {

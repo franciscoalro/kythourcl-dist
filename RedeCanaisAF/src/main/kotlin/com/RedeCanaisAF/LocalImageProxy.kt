@@ -61,7 +61,12 @@ object LocalImageProxy {
     fun startServer() {
         if (serverSocket != null && !serverSocket!!.isClosed) return
         try {
-            val s = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+            val preferredPort = 43691
+            val s = try {
+                ServerSocket(preferredPort, 50, InetAddress.getByName("127.0.0.1"))
+            } catch (_: Throwable) {
+                ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+            }
             serverSocket = s
             port = s.localPort
             Log.i(TAG, "[IMG_PROXY] Servidor iniciado com sucesso na porta $port")
@@ -87,8 +92,14 @@ object LocalImageProxy {
     }
 
     fun wrapUrl(url: String): String {
-        if (url.isBlank() || url.startsWith("http://127.0.0.1") || url.startsWith("data:")) {
+        if (url.isBlank() || url.startsWith("data:")) {
             return url
+        }
+        var actualUrl = url
+        if (actualUrl.contains("/img?url=")) {
+            try {
+                actualUrl = URLDecoder.decode(actualUrl.substringAfter("/img?url="), "UTF-8")
+            } catch (_: Throwable) {}
         }
         if (port <= 0) {
             startServer()
@@ -101,7 +112,7 @@ object LocalImageProxy {
             }
         }
 
-        val encoded = URLEncoder.encode(url, "UTF-8")
+        val encoded = URLEncoder.encode(actualUrl, "UTF-8")
         return "http://127.0.0.1:$port/img?url=$encoded"
     }
 
@@ -140,7 +151,11 @@ object LocalImageProxy {
             }
 
             val rawEncoded = path.substringAfter("/img?url=")
-            val targetUrl = URLDecoder.decode(rawEncoded, "UTF-8")
+            var targetUrl = try { URLDecoder.decode(rawEncoded, "UTF-8") } catch (_: Throwable) { rawEncoded }
+            if (targetUrl.contains("/img?url=")) {
+                try { targetUrl = URLDecoder.decode(targetUrl.substringAfter("/img?url="), "UTF-8") } catch (_: Throwable) {}
+            }
+            targetUrl = targetUrl.replace(" ", "%20").replace("%2520", "%20")
             if (targetUrl.isBlank()) {
                 send404(socket)
                 return
@@ -206,9 +221,9 @@ object LocalImageProxy {
 
     private fun tryDirectOkHttp(url: String): ByteArray? {
         return try {
-            val cookies = runCatching {
+            val cookies = CloudflareSolver.sanitizeCookies(runCatching {
                 CookieManager.getInstance().getCookie("https://redecanais.af")
-            }.getOrNull().orEmpty()
+            }.getOrNull().orEmpty())
             val stealth = CloudflareSolver.stealthHeaders("https://redecanais.af/")
             val reqBuilder = Request.Builder().url(url)
             for ((k, v) in stealth) {
@@ -295,30 +310,37 @@ object LocalImageProxy {
             val js = """(async () => {
                 const targetUrl = ${JSONObject.quote(url)};
                 
-                // 1. Tenta Fetch direto no contexto do site
+                function arrayBufferToBase64(buffer) {
+                    let binary = '';
+                    const bytes = new Uint8Array(buffer);
+                    const len = bytes.byteLength;
+                    const chunkSize = 8192;
+                    for (let i = 0; i < len; i += chunkSize) {
+                        const sub = bytes.subarray(i, Math.min(i + chunkSize, len));
+                        binary += String.fromCharCode.apply(null, sub);
+                    }
+                    return btoa(binary);
+                }
+
+                // 1. Tenta Fetch direto no contexto do site (credenciais do navegador)
                 try {
                     const r = await fetch(targetUrl, {
                         credentials: 'include'
                     });
                     if (r.ok) {
-                        const blob = await r.blob();
-                        const fr = new FileReader();
-                        fr.onload = () => {
-                            const res = fr.result || '';
-                            const idx = res.indexOf(',');
-                            const b64 = idx >= 0 ? res.substring(idx + 1) : '';
-                            if (b64 && window.ImageBridge) {
-                                window.ImageBridge.postImage(targetUrl, b64);
-                            }
-                        };
-                        fr.readAsDataURL(blob);
-                        return;
+                        const buffer = await r.arrayBuffer();
+                        const b64 = arrayBufferToBase64(buffer);
+                        if (b64 && window.ImageBridge) {
+                            window.ImageBridge.postImage(targetUrl, b64);
+                            return;
+                        }
                     }
                 } catch(e) {}
 
-                // 2. Fallback: Image Tag + Canvas Draw (same-origin, no CORS restriction)
+                // 2. Fallback: Image Tag + Canvas Draw
                 try {
                     const img = new Image();
+                    img.crossOrigin = 'anonymous';
                     img.onload = () => {
                         try {
                             const canvas = document.createElement('canvas');
@@ -342,7 +364,7 @@ object LocalImageProxy {
                     img.src = targetUrl;
                     setTimeout(() => {
                         if (window.ImageBridge) window.ImageBridge.postError(targetUrl, 'timeout');
-                    }, 10000);
+                    }, 8000);
                 } catch(e) {
                     if (window.ImageBridge) window.ImageBridge.postError(targetUrl, e.message);
                 }

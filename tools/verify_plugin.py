@@ -59,10 +59,14 @@ def main():
     # 3.1 Instalar plugin no diretório do CloudStream
     if os.path.exists(cs3_path):
         dest_path = f"/sdcard/Cloudstream3/plugins/{plugin}.cs3"
-        print(f"\nInstalando plugin no emulador: {dest_path}...")
+        dest_internal = f"/data/media/0/Android/data/com.lagradost.cloudstream3.prerelease/files/plugins/{plugin}.cs3"
+        print(f"\nInstalando plugin no emulador: {dest_path} e {dest_internal}...")
         run(f"adb -s {dev} shell mkdir -p /sdcard/Cloudstream3/plugins", check=False)
         run(f"adb -s {dev} push {cs3_path} {dest_path}", check=False)
-        run(f"docker exec redroid rm -rf /data/media/0/Android/data/com.lagradost.cloudstream3.prerelease/files/plugins/{plugin}.cs3", check=False)
+        run(f"docker exec redroid mkdir -p /data/media/0/Android/data/com.lagradost.cloudstream3.prerelease/files/plugins", check=False)
+        run(f"docker exec redroid cp {dest_path} {dest_internal}", check=False)
+        run(f"docker exec redroid chown -R 10087:10087 /data/media/0/Android/data/com.lagradost.cloudstream3.prerelease/files/plugins", check=False)
+        run(f"docker exec redroid chmod 444 {dest_internal}", check=False)
 
     # 4. Iniciar CloudStream no emulador
     print("\n3. Iniciando CloudStream no Redroid...")

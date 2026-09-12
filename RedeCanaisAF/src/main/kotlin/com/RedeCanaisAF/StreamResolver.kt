@@ -70,7 +70,7 @@ internal class StreamResolver(
             val iframeElements = doc.select(
                 ".pm-video-watch-wrap iframe, #player iframe, div.player iframe, " +
                     ".player-wrapper iframe, #player-embed iframe, .video-player iframe, " +
-                    "iframe[src*='player'], iframe[src*='server.php'], iframe[src*='play.php'], iframe[src*='embed']"
+                    "iframe[src*='player'], iframe[src*='server.php'], iframe[src*='play.php'], iframe[src*='embed'], iframe"
             )
 
             val embedCandidates = mutableListOf<Pair<String, String>>()
@@ -707,13 +707,13 @@ internal class StreamResolver(
             ?: WebViewResolver.webViewUserAgent
             ?: "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Mobile Safari/537.36"
 
-        val cookies = try {
+        val cookies = CloudflareSolver.sanitizeCookies(try {
             CookieManager.getInstance().getCookie(referer)
                 ?: CookieManager.getInstance().getCookie(mainUrl)
                 ?: ""
         } catch (_: Throwable) {
             ""
-        }
+        })
 
         val headers = mutableMapOf(
             "Referer" to referer,

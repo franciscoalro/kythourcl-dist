@@ -69,7 +69,7 @@ class RedeCanaisAF : MainAPI() {
         private fun logCookieState(stage: String, url: String, reqId: Int) {
             try {
                 val cookies = CookieManager.getInstance().getCookie(url) ?: "none"
-                val hasClearance = cookies.contains("cf_clearance")
+                val hasClearance = CloudflareSolver.hasValidClearance(cookies)
                 val hasCfBm = cookies.contains("__cf_bm")
                 Log.d(TAG, "[REQ#$reqId][$stage] Cookies | clearance=$hasClearance | __cf_bm=$hasCfBm | rawLen=${cookies.length}")
             } catch (e: Throwable) {
@@ -80,15 +80,11 @@ class RedeCanaisAF : MainAPI() {
 
     private val cleanClient by lazy {
         val baseBuilder = app.baseClient.newBuilder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(10, TimeUnit.SECONDS)
-            .writeTimeout(10, TimeUnit.SECONDS)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
-            // v227-dual: PRODUÇÃO usa NO_PROXY (FAST_GET>80%), ANÁLISE descomente abaixo
-            // Para interceptar via mitmproxy/ZAP: comente a linha NO_PROXY e descomente o bloco INTERCEPT
-            .proxy(java.net.Proxy.NO_PROXY)
-            // INTERCEPT_ANALYSIS: deixe NO_PROXY comentado e use http_proxy=172.17.0.3:8080 (mitm->ZAP)
             .retryOnConnectionFailure(true)
             .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
 
@@ -103,6 +99,10 @@ class RedeCanaisAF : MainAPI() {
             for ((k, v) in stealth) {
                 if (orig.header(k) == null) b.header(k, v)
             }
+            val origCookie = orig.header("Cookie")
+            if (!origCookie.isNullOrBlank()) {
+                b.header("Cookie", CloudflareSolver.sanitizeCookies(origCookie))
+            }
             // preserva Cookie/User-Agent já setados por requestDoc
             chain.proceed(b.build())
         }
@@ -115,9 +115,9 @@ class RedeCanaisAF : MainAPI() {
      * Headers customizados para carregar imagens e capas protegidas pelo Cloudflare.
      */
     internal fun posterHeaders(): Map<String, String> {
-        val cookies = runCatching {
+        val cookies = CloudflareSolver.sanitizeCookies(runCatching {
             CookieManager.getInstance().getCookie(mainUrl)
-        }.getOrNull().orEmpty()
+        }.getOrNull().orEmpty())
 
         val userAgent = CloudflareSolver.lastUserAgent
             ?: WebViewResolver.webViewUserAgent
@@ -158,9 +158,9 @@ class RedeCanaisAF : MainAPI() {
 
         logCookieState("BEFORE_REQ", fixedUrl, reqId)
 
-        val cookie = runCatching {
+        val cookie = CloudflareSolver.sanitizeCookies(runCatching {
             CookieManager.getInstance().getCookie(fixedUrl)
-        }.getOrNull().orEmpty()
+        }.getOrNull().orEmpty())
 
         val headers = mutableMapOf(
             "User-Agent" to (CloudflareSolver.lastUserAgent ?: WebViewResolver.webViewUserAgent ?: DEFAULT_USER_AGENT),
@@ -172,7 +172,7 @@ class RedeCanaisAF : MainAPI() {
             headers["Cookie"] = cookie
         }
 
-        val hasClearance = cookie.contains("cf_clearance")
+        val hasClearance = CloudflareSolver.hasValidClearance(cookie)
         val initialTimeout = if (hasClearance) 10L else 5L
 
         val res = try {
@@ -236,9 +236,9 @@ class RedeCanaisAF : MainAPI() {
             return Jsoup.parse(ramHtml, fixedUrl)
         }
 
-        val cookieAfter = runCatching {
+        val cookieAfter = CloudflareSolver.sanitizeCookies(runCatching {
             CookieManager.getInstance().getCookie(fixedUrl)
-        }.getOrNull().orEmpty()
+        }.getOrNull().orEmpty())
         if (cookieAfter.isNotBlank()) {
             headers["Cookie"] = cookieAfter
             val retryRes = try {
@@ -385,9 +385,9 @@ class RedeCanaisAF : MainAPI() {
                         "Referer" to "$mainUrl/",
                         "Accept-Language" to "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
                     )
-                    val searchCookie = runCatching {
+                    val searchCookie = CloudflareSolver.sanitizeCookies(runCatching {
                         CookieManager.getInstance().getCookie(mainUrl)
-                    }.getOrNull().orEmpty()
+                    }.getOrNull().orEmpty())
                     if (searchCookie.isNotBlank()) {
                         searchHeaders["Cookie"] = searchCookie
                     }
