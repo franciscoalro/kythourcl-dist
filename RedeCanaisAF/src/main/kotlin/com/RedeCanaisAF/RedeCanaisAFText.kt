@@ -30,10 +30,9 @@ internal object RedeCanaisAFText {
         val lower = text.lowercase()
         val junk = listOf(
             "caso o vídeo", "se o vídeo não", "problema para assistir",
-            "redecanais", "rede canais", "todos os direitos reservados",
+            "todos os direitos reservados",
             "reportar erro", "clique aqui", "navegador recomendado",
             "baixe o app", "grupo telegram", "compartilhe com seus amigos",
-            "lista de episódios", "todas as temporadas",
             "web server is returning", "error code 520", "error code 522",
             "error code 524", "just a moment", "checking your browser", "attention required"
         )
@@ -201,6 +200,10 @@ internal object RedeCanaisAFText {
         }
 
         val rawUrl = absoluteUrl.replace(" ", "%20")
+        val stripped = rawUrl.trimEnd('/')
+        if (stripped == "https://redecanais.af" || stripped == "http://redecanais.af" || isPlaceholderImage(rawUrl)) {
+            return ""
+        }
         return if (rawUrl.contains("redecanais.af") || rawUrl.contains("/imgs-videos/")) {
             LocalImageProxy.wrapUrl(rawUrl)
         } else {

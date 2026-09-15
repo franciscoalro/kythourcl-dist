@@ -19,9 +19,11 @@ import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.network.WebViewResolver
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -233,21 +235,7 @@ object CloudflareSolver {
         return try { File(ctx.filesDir, DISK_HTML_FILE) } catch (_: Throwable) { null }
     }
 
-    fun cleanHtmlForCache(html: String): String {
-        if (html.length < 50000) return html
-        return try {
-            html.replace(Regex("""<script\b[^>]*>([\s\S]*?)</script>""", RegexOption.IGNORE_CASE)) { mr ->
-                val body = mr.groupValues.getOrNull(1).orEmpty()
-                if (body.length > 2000 && !body.contains("video", true) && !body.contains("player", true) && !body.contains("file", true)) {
-                    "<script>// stripped large ad/tracking script</script>"
-                } else {
-                    mr.value
-                }
-            }
-        } catch (_: Throwable) {
-            html
-        }
-    }
+    fun cleanHtmlForCache(html: String): String = html
 
     // v225-stealth: headers indetectáveis nivel browser real (Sec-CH-UA, Sec-Fetch-*, Accept com q-values)
     internal fun stealthHeaders(referer: String): MutableMap<String, String> {
@@ -611,6 +599,31 @@ object CloudflareSolver {
     private fun emptyResource(): WebResourceResponse =
         WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
 
+    // v237: classificador de challenge. O modo MANAGED automático (sem checkbox,
+    // só "Performing security verification") NÃO responde a toques — tocar ~50x
+    // só queima o IP e estoura o deadline do framework. Distingue:
+    //  - "checkbox": widget interativo (iframe/button/checkbox presente) → toques valem
+    //  - "managed": verificação silenciosa → NÃO tocar, só aguardar com timeout curto
+    //  - "banned": Error 1006/ban → fail-fast imediato (abrir WebView só piora)
+    //  - "ready": conteúdo real (cards/player) → capturar
+    internal const val CHALLENGE_CLASSIFY_JS = """
+        (function() {
+            try {
+                var html = document.documentElement ? document.documentElement.outerHTML : '';
+                if (/Error 1006|banned your IP|Access denied/i.test(html)) return 'banned';
+                var cards = document.querySelectorAll('#pm-grid > li, li.col-xs-6, li.col-sm-4, li.col-md-3, li.col-lg-3, li.pm-li-video, article.pm-video-item, .pm-video-thumb, .pm-category-browse li, .entry-item, li.video-item, div.pm-li-video').length;
+                var hasPlayer = (document.querySelector('.entry-title, #video, iframe[src*="server"], iframe[src*="play"], .player-wrapper, #pm-video-description, .pm-video-description, #pm-video-watch-wrap, #player, .captcha_button') || typeof window.rcPreloadPlayer === 'function' || location.pathname.indexOf('server.php') !== -1 || location.pathname.indexOf('play.php') !== -1 || location.pathname.indexOf('watch.php') !== -1) ? 1 : 0;
+                if (cards > 0 || hasPlayer > 0) return 'ready';
+                var hasWidget = document.querySelector('iframe[src*="challenge-platform"], iframe[src*="challenges.cloudflare.com"], input[type="checkbox"], .cf-turnstile, [class*="turnstile"], button') !== null;
+                var title = document.title || '';
+                if (/Just a moment|Checking your browser|Um momento|Verificando|security verification|Attention Required/i.test(title + ' ' + html.slice(0, 2000))) {
+                    return hasWidget ? 'checkbox' : 'managed';
+                }
+                return 'unknown|' + (location.href || '').slice(0, 100) + '|' + title.slice(0, 80) + '|' + html.slice(0, 300).replace(/\n/g, ' ');
+            } catch(err) { return 'probe_error:' + err.message; }
+        })();
+    """
+
     // v144: o Turnstile managed renderiza o widget em iframe CROSS-ORIGIN
     // (challenges.cloudflare.com / challenge-platform). O JS do documento pai NAO pode ler o
     // conteudo do iframe (SecurityError), mas pode ler o RETANGULO dele via getBoundingClientRect.
@@ -846,11 +859,6 @@ object CloudflareSolver {
             content.contains("security verification", ignoreCase = true) ||
             content.contains("verifies you are not a bot", ignoreCase = true) ||
             content.contains("Attention Required", ignoreCase = true) ||
-            content.contains("Ray ID:", ignoreCase = true) ||
-            content.contains("Error code 520", ignoreCase = true) ||
-            content.contains("Error code 522", ignoreCase = true) ||
-            content.contains("Error code 524", ignoreCase = true) ||
-            content.contains("Web server is returning", ignoreCase = true) ||
             content.contains("challenge-platform", ignoreCase = true) ||
             content.contains("cdn-cgi/content", ignoreCase = true) ||
             content.contains("id=\"challenge-form\"", ignoreCase = true)
@@ -899,7 +907,23 @@ object CloudflareSolver {
         }
     }
 
+    // v237: orçamento total adaptativo — 1ª URL do ciclo pode gastar até 60s
+    // (managed auto-resolve ou checkbox), mas REQs seguintes no MESMO ciclo
+    // usam orçamento curto (20s): o mutex serializa e o framework estoura 180s
+    // se 4 categorias gastarem 60s cada. Reseta quando há sucesso.
+    @Volatile private var consecutiveSolverFails = 0
+    private fun interactiveBudgetMs(): Long =
+        if (consecutiveSolverFails == 0) 60000L else 20000L
+
     suspend fun solve(url: String): String {
+        // v237: fail-fast de ban ANTES de qualquer fetch/WebView. Se o CookieManager
+        // ou o cache da RAM já mostra 1006/ban para este host, abrir WebView só
+        // re-bane o IP e queima 60s. Retorna "" direto (ciclo fecha rápido).
+        val preBanHint = runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull().orEmpty()
+        if (preBanHint.contains("cf_clearance=deleted") || isIpBannedContent(capturedHtmlByUrl[url].orEmpty())) {
+            Log.w(TAG, "[CF] ban pré-detectado (1006) para $url — fail-fast sem WebView")
+            return ""
+        }
         capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() }?.let { cached ->
             // v229: aceita player pages (rcPreloadPlayer/captcha_button/__RC__) mesmo se o
             // validador antigo as marcasse como challenge — o server.php resolvido era
@@ -923,16 +947,18 @@ object CloudflareSolver {
             }
         }
 
-        val interactiveHtml = solveInteractive(url, timeoutMs = 60000L, force = false)
-        // v229b: solveInteractiveLocked agora retorna player pages (whitelist interna) —
+        val interactiveHtml = solveInteractive(url, timeoutMs = interactiveBudgetMs(), force = false)        // v229b: solveInteractiveLocked agora retorna player pages (whitelist interna) —
         // aceitar aqui também, não só via !isChallengeContent.
         val interactiveIsPlayer = !interactiveHtml.isNullOrBlank() &&
             (interactiveHtml.contains("rcPreloadPlayer") || interactiveHtml.contains("captcha_button") ||
                 interactiveHtml.contains("__RC__/proxy") || interactiveHtml.contains("server.php"))
         if (!interactiveHtml.isNullOrBlank() && (!isChallengeContent(interactiveHtml) || interactiveIsPlayer)) {
+            consecutiveSolverFails = 0
             if (interactiveIsPlayer) Log.i(TAG, "[CF] HTML player retornado do interactive url=$url len=${interactiveHtml.length}")
             return interactiveHtml
         }
+        consecutiveSolverFails++
+        Log.w(TAG, "[CF] solve falhou ($consecutiveSolverFails seguidas) url=$url — próximo REQ usa orçamento curto")
         // v229: mesmo fallback player-page aqui — solveInteractive armazena na RAM
         // mas o validador antigo descartava antes de retornar.
         capturedHtmlByUrl[url]?.takeIf { it.isNotBlank() }?.let { cached ->
@@ -1044,6 +1070,7 @@ object CloudflareSolver {
         var tapJitterIndex = 0
         var pollAttempts = 0
         var postClearanceWaitCount = 0
+        var managedPolls = 0
         var isPollScheduled = false
         var isPollRunning = false
         var hasTriggeredPostClearanceLoad = false
@@ -1112,10 +1139,6 @@ object CloudflareSolver {
                 )
                 view.dispatchTouchEvent(eventDown)
                 eventDown.recycle()
-
-                try {
-                    Runtime.getRuntime().exec(arrayOf("input", "tap", "${screenX.toInt()}", "${screenY.toInt()}"))
-                } catch (_: Throwable) {}
 
                 view.postDelayed({
                     if (!isPollingActive.get() || !view.isAttachedToWindow) return@postDelayed
@@ -1238,7 +1261,37 @@ object CloudflareSolver {
             isPollScheduled = false
             if (!isPollingActive.get() || cv == null) return
             isPollRunning = true
-            cv.evaluateJavascript(
+            // v237: classifica o modo do challenge ANTES de decidir tocar. No modo
+            // managed (sem widget) os toques são inúteis — só aguardar com limite.
+            cv.evaluateJavascript(CHALLENGE_CLASSIFY_JS.trimIndent()) { modeRaw ->
+                if (!isPollingActive.get()) return@evaluateJavascript
+                val mode = modeRaw?.trim()?.removeSurrounding("\"").orEmpty()
+                if (mode.startsWith("unknown")) {
+                    Log.d(TAG, "[CF] DEBUG unknown mode: $mode")
+                }
+                if (mode == "banned") {
+                    // v237: fail-fast — IP banido (1006). WebView só piora (re-bane).
+                    Log.w(TAG, "[CF] IP banido detectado (1006) — abortando sem tocar")
+                    isPollingActive.set(false)
+                    htmlCaptureDone.complete(false)
+                    return@evaluateJavascript
+                }
+                if (mode == "managed") {
+                    managedPolls++
+                    // v237: modo silencioso — sem toques. Limite próprio curto (20 polls
+                    // ≈ 10s): se não auto-resolveu, não vai resolver; libera o mutex
+                    // para o próximo REQ/ciclo em vez de queimar 60-180s.
+                    if (managedPolls == 1) Log.i(TAG, "[CF] challenge managed (sem checkbox) — aguardando auto-resolução, sem toques")
+                    if (managedPolls >= 20) {
+                        Log.w(TAG, "[CF] managed sem auto-resolução após ~10s — fail-fast")
+                        isPollingActive.set(false)
+                        htmlCaptureDone.complete(false)
+                        return@evaluateJavascript
+                    }
+                } else if (mode == "ready") {
+                    // conteúdo pronto — segue para captura abaixo via poll normal
+                }
+                cv.evaluateJavascript(
                 """(function() {
                     var cards = document.querySelectorAll('#pm-grid > li, li.col-xs-6, li.col-sm-4, li.col-md-3, li.col-lg-3, li.pm-li-video, article.pm-video-item, .pm-video-thumb, .pm-category-browse li, .entry-item, li.video-item, div.pm-li-video').length;
                     var hasPlayer = (document.querySelector('.entry-title, #video, iframe[src*="server"], iframe[src*="play"], .player-wrapper, #pm-video-description, .pm-video-description, #pm-video-watch-wrap, #player, .captcha_button') || typeof window.rcPreloadPlayer === 'function' || location.pathname.indexOf('server.php') !== -1 || location.pathname.indexOf('play.php') !== -1 || location.pathname.indexOf('watch.php') !== -1) ? 1 : 0;
@@ -1275,9 +1328,10 @@ object CloudflareSolver {
                 val htmlLen = parts.getOrNull(3)?.toIntOrNull() ?: 0
                 val isChalFlag = parts.getOrNull(4) == "1"
                 val hasPlayer = parts.getOrNull(5) == "1"
-                val isChallenge = if (isChalFlag || isChallengeContent(title)) true else (cardCount == 0 && !hasPlayer && linkCount < 5)
+                val isChallenge = isChalFlag || isChallengeContent(title)
                 pollAttempts++
-                Log.d(TAG, "[CF] polling cards=$cardCount links=$linkCount isChallenge=$isChallenge (tentativa $pollAttempts) | url=$currentUrl")
+                // v237: classificador já contou managedPolls; mantém log com modo
+                Log.d(TAG, "[CF] polling cards=$cardCount links=$linkCount isChallenge=$isChallenge mode=$mode title='$title' htmlLen=$htmlLen (tentativa $pollAttempts) | url=$currentUrl")
 
                 val c1 = CookieManager.getInstance().getCookie(currentUrl) ?: ""
                 val c2 = CookieManager.getInstance().getCookie(url) ?: ""
@@ -1290,8 +1344,8 @@ object CloudflareSolver {
                         // Conteúdo pronto após clearance!
                     } else {
                         postClearanceWaitCount++
-                        if (postClearanceWaitCount in listOf(4, 12, 24)) {
-                            Log.i(TAG, "[CF] cf_clearance obtido! Recarregando página alvo (tentativa $postClearanceWaitCount): $url")
+                        if (postClearanceWaitCount == 20) {
+                            Log.i(TAG, "[CF] cf_clearance obtido mas timeout suave atingido — recarregando $url")
                             cv.loadUrl(url)
                         }
                     }
@@ -1299,7 +1353,11 @@ object CloudflareSolver {
                 if (isChallenge && isPollingActive.get()) {
                     val now = SystemClock.uptimeMillis()
                     val cooldown = 3200L
-                    if (pollAttempts >= 3 && (now - lastTurnstileTapAt >= cooldown)) {
+                    // v237: só toca no modo checkbox (widget real). No managed/unknown
+                    // os toques são inúteis e queimam o IP — apenas aguarda.
+                    if (mode != "checkbox") {
+                        if (pollAttempts % 10 == 0) Log.d(TAG, "[CF] sem widget (mode=$mode) — sem toques, só aguardando")
+                    } else if (pollAttempts >= 3 && (now - lastTurnstileTapAt >= cooldown)) {
                         tryTapTurnstile(cv, "poll_$pollAttempts")
                         // P0-3: se o probe só devolve fallback calibrado (widget não
                         // monta — rect 0x0), o toque por coordenada não atinge nada;
@@ -1340,6 +1398,12 @@ object CloudflareSolver {
                         Log.w(TAG, "[CF] polling limite atingido (90s) | isChallenge=$isChallenge")
                         isPollingActive.set(false)
                         htmlCaptureDone.complete(false)
+                    } else if (mode == "managed") {
+                        // v237: managed já tem limite próprio (20 polls); aqui só reagenda
+                        if (isPollingActive.get() && !isPollScheduled) {
+                            isPollScheduled = true
+                            cv.postDelayed({ pollAndCapture(cv) }, 500)
+                        }
                     } else {
                         if (isPollingActive.get() && !isPollScheduled) {
                             isPollScheduled = true
@@ -1347,7 +1411,8 @@ object CloudflareSolver {
                         }
                     }
                 }
-            }
+            } // v237: fecha callback do poll interno
+        } // v237: fecha callback do classificador (mode)
         }
 
         fun triggerPoll(cv: WebView?) {
@@ -1372,13 +1437,12 @@ object CloudflareSolver {
                     // MATCH_PARENT dá viewport real 720x1280; mutex garante 1 WebView
                     // por vez (vida curta, destruído pós-capture).
                     visibility = android.view.View.VISIBLE
-                    alpha = 0.01f
+                    alpha = 1.0f
                     setBackgroundColor(0x00000000)
-                    isFocusable = false
-                    isFocusableInTouchMode = false
-                    isClickable = false
-                    isLongClickable = false
-                    setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
+                    isFocusable = true
+                    isFocusableInTouchMode = true
+                    isClickable = true
+                    isLongClickable = true
                     layoutParams = FrameLayout.LayoutParams(
                         FrameLayout.LayoutParams.MATCH_PARENT,
                         FrameLayout.LayoutParams.MATCH_PARENT
@@ -1424,12 +1488,16 @@ object CloudflareSolver {
                                 (!isChallengeContent(html) || isPlayerPage(html))) {
                                 val clean = cleanHtmlForCache(html)
                                 capturedHtmlByUrl[pageUrl] = clean
-                                capturedHtmlByUrl[url] = clean
-                                lastSolvedHtml = clean
-                                targetLoaded.set(true)
-                                isPollingActive.set(false)
-                                htmlCaptureDone.complete(true)
-                                Log.i(TAG, "[CF_JS_INTERFACE] HTML capturado via fetch assíncrono: len=${clean.length} url=$pageUrl")
+                                val normPage = pageUrl.substringBefore("?").trimEnd('/')
+                                val normTarget = url.substringBefore("?").trimEnd('/')
+                                if (normPage == normTarget) {
+                                    capturedHtmlByUrl[url] = clean
+                                    lastSolvedHtml = clean
+                                    targetLoaded.set(true)
+                                    isPollingActive.set(false)
+                                    htmlCaptureDone.complete(true)
+                                }
+                                Log.i(TAG, "[CF_JS_INTERFACE] HTML capturado via fetch assíncrono: len=${clean.length} url=$pageUrl targetMatch=${normPage == normTarget}")
                                 runCatching { persistCapturedHtmlToDisk() }
                             }
                         }
@@ -1604,7 +1672,12 @@ object CloudflareSolver {
         }
 
         try {
-            withTimeoutOrNull(timeoutMs) { htmlCaptureDone.await() }
+            // v237: watchdog absoluto — mesmo que o poll trave sem completar o
+            // deferred, a WebView é destruída no timeout (evita WebViews órfãs
+            // acumulando e matando o app por OOM após vários ciclos).
+            val budget = timeoutMs.coerceAtMost(90000L)
+            Log.i(TAG, "[CF] orçamento interactive=${budget}ms fails=$consecutiveSolverFails url=$url")
+            withTimeoutOrNull(budget) { htmlCaptureDone.await() }
         } finally {
             isPollingActive.set(false)
             withContext(NonCancellable + Dispatchers.Main) {

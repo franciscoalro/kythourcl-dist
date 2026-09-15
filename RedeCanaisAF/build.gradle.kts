@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v272: HtmlBridge fast fetch in authenticated WebView context
+// v273: WebView challenge classification, dynamic budget, HTML stream fallback & MIME type detection
 cloudstream {
-    version = 272
+    version = 273
 }

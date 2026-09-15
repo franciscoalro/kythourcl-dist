@@ -110,6 +110,30 @@ internal class StreamResolver(
                 }
             }
 
+            // 2.5 Regex fallback no HTML bruto caso seletores DOM não encontrem
+            val rawHtml = doc.outerHtml()
+            if (rawHtml.isNotBlank()) {
+                val regexMatches = Regex("""(?i)(?:src|href|data-src)=["']([^"']*(?:server\.php|play\.php|player|embed|watch\.php)[^"']*)["']""").findAll(rawHtml)
+                for (m in regexMatches) {
+                    val src = m.groupValues[1]
+                    if (src.isNotBlank() && !isNonVideoUrl(src) && !src.contains("about:blank", true) && !src.endsWith(".js", true) && !src.endsWith(".css", true)) {
+                        embedCandidates.add(fixUrl(src) to "Player HTML")
+                    }
+                }
+            }
+
+            // 2.6 Fallback automático por ID da URL do detalhe/episódio
+            if (embedCandidates.isEmpty()) {
+                val shortId = Regex("""_([0-9a-fA-F]{6,12})\.html""").find(cleanUrl)?.groupValues?.getOrNull(1)
+                    ?: Regex("""[?&]vid=([^&]+)""", RegexOption.IGNORE_CASE).find(cleanUrl)?.groupValues?.getOrNull(1)
+                if (!shortId.isNullOrBlank()) {
+                    Log.i(TAG, "[AUTO_CANDIDATE] Gerando candidatos para ID=$shortId a partir de $cleanUrl")
+                    embedCandidates.add("$mainUrl/server.php?vid=$shortId" to "Principal")
+                    embedCandidates.add("$mainUrl/embed.php?vid=$shortId" to "Embed")
+                    embedCandidates.add("$mainUrl/play.php?vid=$shortId" to "Play")
+                }
+            }
+
             // 3. Resolução de cada candidato a player/iframe
             for ((embedUrl, label) in embedCandidates.distinctBy { it.first }) {
                 // v122: fluxo recap -> rcPreloadPlayer -> __RC__/proxy (TLS-bound) -> proxy local.

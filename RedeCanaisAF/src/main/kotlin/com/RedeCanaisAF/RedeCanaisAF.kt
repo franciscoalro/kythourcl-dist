@@ -201,26 +201,18 @@ class RedeCanaisAF : MainAPI() {
         if (mitigatedHeader) {
             Log.w(TAG, "[REQ#$reqId] Header cf-mitigated: challenge detectado (code=$code) — indo direto ao solver")
         }
-        val isChallenge = mitigatedHeader || code in 400..599 || CloudflareSolver.isPendingSearchContent(body) ||
+        val isChallenge = mitigatedHeader || code !in 200..299 || CloudflareSolver.isPendingSearchContent(body) ||
             body.contains("Just a moment...", true) ||
             body.contains("Checking your browser", true) ||
             body.contains("cf-browser-verification", true) ||
             body.contains("challenge-platform", true)
 
-        if (res != null && !isChallenge && body.isNotBlank()) {
+        if (res != null && code in 200..299 && !isChallenge && body.isNotBlank()) {
             Log.d(TAG, "[REQ#$reqId] HTTP $code OK bodyLen=${body.length}")
             return Jsoup.parse(body, fixedUrl)
         }
 
         Log.w(TAG, "[REQ#$reqId] Cloudflare ativo (code=$code, isChallenge=$isChallenge, mitigated=$mitigatedHeader). Resolvendo via CloudflareSolver...")
-        // P0-2: 402 com cf_clearance presente = Precursor rebaixou a sessão
-        // (docs Cloudflare: clearance revalidada continuamente; comportamento suspeito
-        // invalida e re-desafia MESMO com cookie válido). Trata como "re-resolver":
-        // invalida o cookie morto UMA vez e deixa o solver emitir sessão nova.
-        if (code == 402 && hasClearance) {
-            Log.w(TAG, "[REQ#$reqId] 402 com clearance presente → sessão rebaixada pelo Precursor; invalidando e re-resolvendo")
-            runCatching { CloudflareSolver.invalidateClearance(fixedUrl) }
-        }
         val solverHtml = CloudflareSolver.solve(fixedUrl)
         if (solverHtml.isNotBlank()) {
             Log.i(TAG, "[REQ#$reqId] Cloudflare resolvido via WebView! len=${solverHtml.length}")
@@ -264,7 +256,7 @@ class RedeCanaisAF : MainAPI() {
                 retryBody.contains("cf-browser-verification", true) ||
                 retryBody.contains("challenge-platform", true)
 
-            if (retryRes != null && !isRetryChallenge && retryBody.isNotBlank()) {
+            if (retryRes != null && retryRes.code in 200..299 && !isRetryChallenge && retryBody.isNotBlank()) {
                 Log.i(TAG, "[REQ#$reqId] Retry com cookies após solver OK! code=${retryRes.code} len=${retryBody.length}")
                 return Jsoup.parse(retryBody, fixedUrl)
             }

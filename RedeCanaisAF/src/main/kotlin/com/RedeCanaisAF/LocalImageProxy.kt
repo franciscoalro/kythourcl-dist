@@ -250,15 +250,30 @@ object LocalImageProxy {
     }
 
     private fun ByteArray.isHtmlResponse(): Boolean {
-        if (size < 15) return false
-        val prefix = String(take(15).toByteArray(), Charsets.UTF_8).lowercase()
-        return prefix.contains("<!doctype") || prefix.contains("<html")
+        if (size < 15) return true
+        val isJpeg = size > 3 && this[0] == 0xFF.toByte() && this[1] == 0xD8.toByte() && this[2] == 0xFF.toByte()
+        val isPng = size > 4 && this[0] == 0x89.toByte() && this[1] == 0x50.toByte() && this[2] == 0x4E.toByte() && this[3] == 0x57.toByte()
+        val isWebp = size > 12 && this[0] == 'R'.code.toByte() && this[1] == 'I'.code.toByte() && this[2] == 'F'.code.toByte() && this[3] == 'F'.code.toByte()
+        val isGif = size > 3 && this[0] == 'G'.code.toByte() && this[1] == 'I'.code.toByte() && this[2] == 'F'.code.toByte()
+        if (isJpeg || isPng || isWebp || isGif) return false
+
+        val prefix = String(take(64).toByteArray(), Charsets.UTF_8).trimStart().lowercase()
+        return prefix.startsWith("<!doctype") || prefix.startsWith("<html") || prefix.startsWith("<?xml") ||
+               prefix.startsWith("{") || prefix.startsWith("<head") || prefix.startsWith("<body") ||
+               prefix.contains("challenge") || prefix.contains("error") || prefix.contains("forbidden")
     }
 
     private fun sendResponse(socket: Socket, data: ByteArray) {
         val out = socket.getOutputStream()
+        val mime = when {
+            data.size > 3 && data[0] == 0xFF.toByte() && data[1] == 0xD8.toByte() && data[2] == 0xFF.toByte() -> "image/jpeg"
+            data.size > 4 && data[0] == 0x89.toByte() && data[1] == 0x50.toByte() && data[2] == 0x4E.toByte() && data[3] == 0x47.toByte() -> "image/png"
+            data.size > 12 && data[0] == 'R'.code.toByte() && data[1] == 'I'.code.toByte() && data[2] == 'F'.code.toByte() && data[3] == 'F'.code.toByte() -> "image/webp"
+            data.size > 3 && data[0] == 'G'.code.toByte() && data[1] == 'I'.code.toByte() && data[2] == 'F'.code.toByte() -> "image/gif"
+            else -> "image/jpeg"
+        }
         val header = "HTTP/1.1 200 OK\r\n" +
-                "Content-Type: image/jpeg\r\n" +
+                "Content-Type: $mime\r\n" +
                 "Content-Length: ${data.size}\r\n" +
                 "Access-Control-Allow-Origin: *\r\n" +
                 "Connection: close\r\n\r\n"
@@ -340,7 +355,6 @@ object LocalImageProxy {
                 // 2. Fallback: Image Tag + Canvas Draw
                 try {
                     const img = new Image();
-                    img.crossOrigin = 'anonymous';
                     img.onload = () => {
                         try {
                             const canvas = document.createElement('canvas');
