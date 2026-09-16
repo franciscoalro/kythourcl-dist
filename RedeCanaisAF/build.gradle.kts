@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v273: WebView challenge classification, dynamic budget, HTML stream fallback & MIME type detection
+// v274: multi-domínio (.af/.pk fallback), 402=re-resolver, detector cf-mitigated no retry
 cloudstream {
-    version = 273
+    version = 274
 }

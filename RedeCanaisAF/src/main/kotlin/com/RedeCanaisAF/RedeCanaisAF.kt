@@ -57,7 +57,12 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 272
+        const val BUILD_VERSION = 274
+        // v274: multi-domínio — .af é o principal, .pk o fallback (mesmo CMS PHP Melody,
+        // provado via Patchright: .pk serve challenge solúvel onde .af dá 1106).
+        // canonicalDomain() escolhe por tentativa: usa o primeiro que não estiver banido.
+        val MIRROR_DOMAINS = listOf("https://redecanais.af", "https://redecanais.pk")
+        @Volatile var activeMirrorIdx = 0
         private const val TAG = "RedeCanaisAF-Trace"
         private const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/AP1A.240505.005) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Mobile Safari/537.36"
 
@@ -189,6 +194,13 @@ class RedeCanaisAF : MainAPI() {
 
         val code = res?.code ?: 0
         val body = res?.text.orEmpty()
+        // v274: 402 com cf_clearance = Precursor rebaixou a sessão (cookie presente mas
+        // inválido — provado via Patchright: clearance emitido mas edge re-desafia).
+        // Invalida e cai no solver em vez de retornar falha total.
+        if (code == 402) {
+            Log.w(TAG, "[REQ#$reqId] 402 com possível clearance rebaixado — invalidando e re-resolvendo")
+            CloudflareSolver.invalidateClearance(fixedUrl)
+        }
         // P0-1: detector via header. REFINO (TS NET-01, 2026-09-11): o CF envia
         // `cf-mitigated: challenge` em TODA resposta, inclusive 200 (robots.txt
         // prova). O header sozinho NÃO prova challenge — só vale com code != 200.
@@ -263,6 +275,19 @@ class RedeCanaisAF : MainAPI() {
         }
 
         Log.e(TAG, "[REQ#$reqId] Falha total ao carregar $fixedUrl")
+        // v274: failover de domínio — se este host está banido (1006/1106), tenta o
+        // espelho antes de desistir. Troca mainUrl + activeMirrorIdx (sticky até falhar).
+        val failedMirror = MIRROR_DOMAINS[activeMirrorIdx]
+        if (fixedUrl.startsWith(failedMirror) && CloudflareSolver.isIpBannedContent(body)) {
+            val nextIdx = (activeMirrorIdx + 1) % MIRROR_DOMAINS.size
+            if (nextIdx != activeMirrorIdx) {
+                activeMirrorIdx = nextIdx
+                val mirrorBase = MIRROR_DOMAINS[nextIdx]
+                mainUrl = mirrorBase
+                Log.w(TAG, "[REQ#$reqId] Failover $failedMirror -> $mirrorBase (ban detectado)")
+                return requestDoc(url.replace(failedMirror, mirrorBase), referer.replace(failedMirror, mirrorBase))
+            }
+        }
         return Jsoup.parse(body.ifBlank { "<html><body></body></html>" }, fixedUrl)
     }
 
