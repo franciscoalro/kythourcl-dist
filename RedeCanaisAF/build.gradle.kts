@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v274: multi-domínio (.af/.pk fallback), 402=re-resolver, detector cf-mitigated no retry
+// v275: WebView invisível, prefetch OkHttp, bloqueio navegação externa, diagnóstico player vazio
 cloudstream {
-    version = 274
+    version = 275
 }

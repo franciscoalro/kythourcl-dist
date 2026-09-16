@@ -267,6 +267,15 @@ internal class StreamResolver(
         }
 
         Log.i(TAG, "[LOADLINKS_DONE] foundAny=$foundAny")
+        // v275: diagnóstico honesto quando nada foi achado — distingue as 3 causas
+        // reais (challenge não resolvido vs página sem players vs origem morta) em
+        // vez de silêncio. O usuário vê "nenhum link" sem saber o motivo.
+        if (!foundAny) {
+            val cookies = runCatching { CookieManager.getInstance().getCookie(cleanUrl) }.getOrNull().orEmpty()
+            val hasClearance = CloudflareSolver.hasValidClearance(cookies)
+            Log.w(TAG, "[LOADLINKS_EMPTY] url=$cleanUrl clearance=$hasClearance " +
+                "causa=${if (!hasClearance) "CHALLENGE_NAO_RESOLVIDO (IP sob challenge/ban — troque de rede ou aguarde)" else "PLAYERS_VAZIOS (página abriu mas sem iframe/server.php — origem pode estar fora do ar)"}")
+        }
         return foundAny
     }
 

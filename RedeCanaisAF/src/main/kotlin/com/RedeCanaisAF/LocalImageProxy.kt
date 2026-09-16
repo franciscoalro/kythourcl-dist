@@ -105,13 +105,11 @@ object LocalImageProxy {
             startServer()
         }
 
-        // Pré-aquece o helper WebView na Activity
-        CommonActivity.activity?.let { act ->
-            if (!act.isFinishing && !act.isDestroyed && helperWebView == null) {
-                act.runOnUiThread { ensureHelperWebView(act) }
-            }
-        }
-
+        // v275: NÃO pré-aquece o helper WebView por imagem — wrapUrl é chamado
+        // 1x por capa (dezenas por Home); cada ensureHelperWebView postava na UI
+        // thread e o helper GONE 1x1 competia com o solver. O helper só é criado
+        // sob demanda no fallback fetchImageBytes (quando o OkHttp falha).
+        // Capas com clearance válido resolvem via OkHttp em ms, sem WebView.
         val encoded = URLEncoder.encode(actualUrl, "UTF-8")
         return "http://127.0.0.1:$port/img?url=$encoded"
     }

@@ -377,6 +377,30 @@ object CloudflareSolver {
         }
     }
 
+    // v275: prefetch do catálogo via OkHttp + cookies (Dispatchers.IO), SEM
+    // WebView — o fetch() via evaluateJavascript navegava a view visível e
+    // repintava a tela a cada URL (pisca). Chamado 1x por ciclo após o solve.
+    private suspend fun prefetchCatalogViaHttp(solvedUrl: String) {
+        try {
+            val pending = catalogUrls.filter { it != solvedUrl && !capturedHtmlByUrl.containsKey(it) }
+            if (pending.isEmpty()) return
+            val cookies = runCatching { CookieManager.getInstance().getCookie(solvedUrl) }.getOrNull().orEmpty()
+            if (!hasValidClearance(cookies)) return
+            Log.i(TAG, "[CF_PREFETCH_HTTP] ${pending.size} URLs via OkHttp (sem WebView)")
+            for (u in pending) {
+                val html = tryFastHttpGet(u, cookies)
+                if (!html.isNullOrBlank() && !isChallengeContent(html) && html.length > 1000) {
+                    capturedHtmlByUrl[u] = html
+                    diskHtmlTsByUrl[u] = System.currentTimeMillis()
+                    Log.i(TAG, "[CF_PREFETCH_HTTP] OK len=${html.length} url=$u")
+                }
+            }
+            runCatching { persistCapturedHtmlToDisk() }
+        } catch (e: Throwable) {
+            Log.w(TAG, "[CF_PREFETCH_HTTP] falhou: ${e.message}")
+        }
+    }
+
     private val persistLock = Any()
 
     fun persistCapturedHtmlToDisk() {
@@ -955,6 +979,9 @@ object CloudflareSolver {
         if (!interactiveHtml.isNullOrBlank() && (!isChallengeContent(interactiveHtml) || interactiveIsPlayer)) {
             consecutiveSolverFails = 0
             if (interactiveIsPlayer) Log.i(TAG, "[CF] HTML player retornado do interactive url=$url len=${interactiveHtml.length}")
+            // v275: prefetch das demais URLs do catálogo via OkHttp + cookies
+            // (fora do WebView — o fetch() via JS repintava a view visível).
+            prefetchCatalogViaHttp(url)
             return interactiveHtml
         }
         consecutiveSolverFails++
@@ -1431,14 +1458,17 @@ object CloudflareSolver {
                 val rootLayout = activity.findViewById<ViewGroup>(android.R.id.content)
 
                 val wv = WebView(activity).apply {
-                    // v236-pentest: VISIBLE MATCH_PARENT alpha 0.01 HARDWARE — GONE 1x1
-                    // quebra Turnstile managed (cTplV:5): view 1x1 => scale 1/720 =>
-                    // touchY fora da view => scaleToView null ("toque sem alvo" 30x).
-                    // MATCH_PARENT dá viewport real 720x1280; mutex garante 1 WebView
-                    // por vez (vida curta, destruído pós-capture).
+                    // v275: INVISÍVEL de verdade — VISIBLE MATCH_PARENT alpha 1.0
+                    // pintava o challenge POR CIMA da UI (pisca a cada redirect).
+                    // alpha 0.01 + HARDWARE = viewport real p/ Turnstile (cTplV:5
+                    // exige escala válida) mas pixels imperceptíveis. Mesmo padrão
+                    // do WebViewStreamProxy (linha ~178). TOQUES SINTÉTICOS
+                    // (dispatchTouchEvent) NÃO precisam de visibilidade real —
+                    // o Turnstile valida coordenadas, não pixels na tela.
                     visibility = android.view.View.VISIBLE
-                    alpha = 1.0f
+                    alpha = 0.01f
                     setBackgroundColor(0x00000000)
+                    setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
                     isFocusable = true
                     isFocusableInTouchMode = true
                     isClickable = true
@@ -1529,11 +1559,23 @@ object CloudflareSolver {
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val target = request?.url?.toString() ?: return false
                             val host = request.url?.host?.lowercase().orEmpty()
-                            if (host.contains("cloudflare.com") && !host.contains("challenges.cloudflare.com") && !host.contains("challenge-platform")) {
-                                Log.w(TAG, "[CF_BLOCK_NAV] Bloqueando navegação externa do Cloudflare: $target")
+                            // v275: bloqueia TODA navegação fora do site + infra do
+                            // challenge. Antes só cloudflare.com era barrado — o
+                            // WebView "tentava abrir links" (ads/redirects do
+                            // challenge) por cima da UI, um por pisca.
+                            // shouldOverrideUrlLoading=false = WebView trata
+                            // internamente; true = bloqueia. NUNCA delegar ao
+                            // navegador externo (sem startActivity aqui).
+                            val allowed = host.contains("redecanais.") ||
+                                host.contains("challenges.cloudflare.com") ||
+                                host.contains("challenge-platform") ||
+                                host.contains("cloudflareinsights.com") ||
+                                target == "about:blank"
+                            if (!allowed) {
+                                Log.w(TAG, "[CF_BLOCK_NAV] Bloqueando navegação externa: ${target.take(120)}")
                                 return true
                             }
-                            return super.shouldOverrideUrlLoading(view, request)
+                            return false
                         }
 
                         override fun onReceivedSslError(view: WebView?, handler: android.webkit.SslErrorHandler?, error: android.net.http.SslError?) {
@@ -1623,30 +1665,11 @@ object CloudflareSolver {
                                             Log.i(TAG, "[CF] HTML capturado no onPageFinished! len=${decoded.length} | url=$finishedUrl")
                                             runCatching { persistCapturedHtmlToDisk() }
 
-                                            // Prefetch catálogo no MESMO WebView (sessão TLS já válida) — preenche as 5 URLs restantes
-                                            try {
-                                                val catalogForPrefetch = catalogUrls.ifEmpty {
-                                                    listOf(
-                                                        "https://redecanais.af/browse-filmes-videos-1-date.html",
-                                                        "https://redecanais.af/browse-series-videos-1-date.html",
-                                                        "https://redecanais.af/browse-animes-videos-1-date.html",
-                                                        "https://redecanais.af/browse-desenhos-videos-1-date.html",
-                                                        "https://redecanais.af/browse-filmes-videos-1-views.html",
-                                                        "https://redecanais.af/topvideos.html"
-                                                    )
-                                                }
-                                                val pending = catalogForPrefetch.filter { it != finishedUrl && it != url && !capturedHtmlByUrl.containsKey(it) }
-                                                if (pending.isNotEmpty()) {
-                                                    val prefetchJs = buildString {
-                                                        append("(function(){var targets=[")
-                                                        append(pending.joinToString(",") { "'$it'" })
-                                                        append("];targets.forEach(function(u,i){setTimeout(function(){fetch(u,{credentials:'include'}).then(function(r){return r.text();}).then(function(html){if(html&&window.HTMLOUT&&window.HTMLOUT.onHtmlCaptured)window.HTMLOUT.onHtmlCaptured(u,html);}).catch(function(){});},i*400);});})();")
-                                                    }
-                                                    view?.evaluateJavascript(prefetchJs, null)
-                                                    Log.i(TAG, "[CF_PREFETCH] disparado para ${pending.size} URLs restantes")
-                                                }
-                                            } catch (_: Throwable) {}
-
+                                            // v275: prefetch via evaluateJavascript fetch() REMOVIDO —
+                                            // cada fetch navegava o WebView VISÍVEL (repintava a
+                                            // tela = pisca). O prefetch agora é feito via
+                                            // OkHttp com cookies (prefetchCatalogViaHttp),
+                                            // sem tocar no WebView. Só completa o deferred.
                                             isPollingActive.set(false)
                                             htmlCaptureDone.complete(true)
                                         }

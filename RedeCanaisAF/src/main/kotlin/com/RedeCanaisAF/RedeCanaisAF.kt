@@ -57,7 +57,10 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 274
+        const val BUILD_VERSION = 275
+        // v275: WebView invisível (alpha 0.01), prefetch via OkHttp, bloqueio de
+        // navegação externa, sem pré-aquecimento do helper por capa, diagnóstico
+        // honesto no player vazio.
         // v274: multi-domínio — .af é o principal, .pk o fallback (mesmo CMS PHP Melody,
         // provado via Patchright: .pk serve challenge solúvel onde .af dá 1106).
         // canonicalDomain() escolhe por tentativa: usa o primeiro que não estiver banido.
