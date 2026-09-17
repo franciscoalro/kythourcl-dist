@@ -17,6 +17,11 @@ class RedeCanaisAFProvider: Plugin() {
             CloudflareSolver.restoreDiskCacheIfNeeded()
             CloudflareSolver.restoreClearanceIfValid(api.mainUrl)
         } catch (_: Throwable) {}
+        // v276: LogBridge — escutador de logs via HTTP local (127.0.0.1:17531/logs)
+        // para leitura remota através de túnel. Sem alteração nos Log.* existentes.
+        try {
+            LogBridge.start()
+        } catch (_: Throwable) {}
         // v228: SEM warm-up de rede no boot — o getMainPage silencioso duplicava o
         // tráfego (6 REQs do framework + 1 do warmup disputando o mutex do solver =
         // WebViews extras de 5MB cada). Com host em 91% RAM + LMK ativo, cada WebView

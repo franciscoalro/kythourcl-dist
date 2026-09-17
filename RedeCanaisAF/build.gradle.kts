@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v275: WebView invisível, prefetch OkHttp, bloqueio navegação externa, diagnóstico player vazio
+// v276: LogBridge (escuta de logs via HTTP local 127.0.0.1:17531/logs)
 cloudstream {
-    version = 275
+    version = 276
 }

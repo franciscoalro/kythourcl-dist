@@ -57,7 +57,8 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 275
+        const val BUILD_VERSION = 276
+        // v276: LogBridge (HTTP local p/ leitura remota de logs via túnel).
         // v275: WebView invisível (alpha 0.01), prefetch via OkHttp, bloqueio de
         // navegação externa, sem pré-aquecimento do helper por capa, diagnóstico
         // honesto no player vazio.
