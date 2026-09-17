@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v278: boot instantâneo (prewarm home do disco + socket proxy antecipado + delay 300ms)
+// v279: nunca cacheia home vazia (categorias com nomes mas sem cards)
 cloudstream {
-    version = 278
+    version = 279
 }

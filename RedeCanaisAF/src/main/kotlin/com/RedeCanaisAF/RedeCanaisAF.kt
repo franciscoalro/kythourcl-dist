@@ -60,7 +60,10 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 278
+        const val BUILD_VERSION = 279
+        // v279: NUNCA cacheia home vazia — lista vazia (challenge) não vai ao
+        // homeCache, então a próxima abertura tenta de novo em vez de mostrar só
+        // os nomes das categorias por 30min.
         // v278: boot instantâneo — prewarm da home em background (homeCache do HTML
         // de disco, sem rede/WebView), socket do proxy pré-aberto no boot, delay
         // sequencial 800→300ms. A tela inicial renderiza na hora via HOME_CACHE_HIT.
@@ -346,6 +349,14 @@ class RedeCanaisAF : MainAPI() {
         // "HOME_TIMEOUT_EMPTY" (lista vazia) ou cancelava o WebView no meio da
         // captura — foi isso que gerou o "Timed out waiting for 120000 ms" na UI.
         val (homeList, hasNext) = parseHomeDoc(url, requestDoc(url))
+        // v279: NUNCA cacheia lista vazia — getMainPage com challenge/tela vazia
+        // gravava HomePageResponse vazio por 30min e a home mostrava só os nomes
+        // das categorias. Lista vazia = retorna sem cachear (próxima abertura
+        // tenta de novo com clearance novo).
+        if (homeList.isEmpty()) {
+            Log.w(TAG, "[HOME_EMPTY_NOCACHE] Cat=${request.name} veio vazia (challenge?) — sem cachear")
+            return newHomePageResponse(listOf(HomePageList(request.name, homeList)), hasNext = hasNext)
+        }
         val response = newHomePageResponse(
             listOf(HomePageList(request.name, homeList)),
             hasNext = hasNext
