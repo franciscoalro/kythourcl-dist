@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v277: proxy local de sessão (porta preferida 17532) — corrige 2001/CONNECTION_REFUSED
+// v278: boot instantâneo (prewarm home do disco + socket proxy antecipado + delay 300ms)
 cloudstream {
-    version = 277
+    version = 278
 }

@@ -22,6 +22,22 @@ class RedeCanaisAFProvider: Plugin() {
         try {
             LogBridge.start()
         } catch (_: Throwable) {}
+        // v278: pré-aquecimento em background (leve, sem rede/WebView):
+        // (1) homeCache montado do HTML de disco → getMainPage vira HOME_CACHE_HIT
+        // (0ms) e a tela inicial renderiza na hora;
+        // (2) socket do proxy pré-aberto na porta 17532 → player nunca pega
+        // CONNECTION_REFUSED mesmo com LoadResponse cacheado.
+        // Thread daemon separada: load() do plugin retorna imediatamente.
+        try {
+            Thread({
+                try {
+                    api.prewarmHomeCache()
+                } catch (_: Throwable) {}
+                try {
+                    WebViewStreamProxy.prewarmLocalServer()
+                } catch (_: Throwable) {}
+            }, "RC-Prewarm").apply { isDaemon = true }.start()
+        } catch (_: Throwable) {}
         // v228: SEM warm-up de rede no boot — o getMainPage silencioso duplicava o
         // tráfego (6 REQs do framework + 1 do warmup disputando o mutex do solver =
         // WebViews extras de 5MB cada). Com host em 91% RAM + LMK ativo, cada WebView

@@ -28,8 +28,11 @@ class RedeCanaisAF : MainAPI() {
     // paralelo; cada requestDoc() fora do cache abre um WebView de 5-8MB e o agregado
     // estoura o LMK do redroid (signal 9, "Timed out waiting for 120000 ms" na UI).
     // Sequencial: 1 WebView por vez, catálogo completo em ~6-10s, app vivo.
+    // v278: delay 800→300ms — com o prewarm do boot (homeCache já montado a
+    // partir do HTML de disco) o getMainPage quase sempre é HOME_CACHE_HIT, então
+    // o intervalo entre categorias pode ser curto sem risco de LMK.
     override var sequentialMainPage = true
-    override var sequentialMainPageDelay = 800L
+    override var sequentialMainPageDelay = 300L
     override var getMainPageTimeoutMs: Long? = 180_000L
     override var searchTimeoutMs: Long? = 120_000L
     override var loadTimeoutMs: Long? = 120_000L
@@ -57,7 +60,10 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 277
+        const val BUILD_VERSION = 278
+        // v278: boot instantâneo — prewarm da home em background (homeCache do HTML
+        // de disco, sem rede/WebView), socket do proxy pré-aberto no boot, delay
+        // sequencial 800→300ms. A tela inicial renderiza na hora via HOME_CACHE_HIT.
         // v277: proxy local de SESSÃO (porta preferida 17532, vivo até o fim do
         // app). Corrige o erro 2001/ERR_CONNECTION_REFUSED: o app cacheia o
         // LoadResponse (LOAD_CACHE_HIT) e reentrega a URL 127.0.0.1:<porta> após
@@ -339,41 +345,7 @@ class RedeCanaisAF : MainAPI() {
         // framework foi elevado para 180s. Envolver em timeout de 6-45s só produzia
         // "HOME_TIMEOUT_EMPTY" (lista vazia) ou cancelava o WebView no meio da
         // captura — foi isso que gerou o "Timed out waiting for 120000 ms" na UI.
-        val homeList = mutableListOf<SearchResponse>()
-        val seenUrls = HashSet<String>()
-        var hasNext = false
-
-        try {
-            val doc = requestDoc(url)
-            val elements = doc.select(
-                "#pm-grid > li, li.col-xs-6, li.col-sm-4, li.col-md-3, li.col-lg-3, " +
-                "li.pm-li-video, article.pm-video-item, .pm-video-thumb, .pm-category-browse li, " +
-                ".entry-item, li.video-item, div.pm-li-video"
-            )
-            Log.i(TAG, "[HOME_RAW_CARDS] Cat=${request.name} | found=${elements.size}")
-
-            for (el in elements) {
-                val card = parseCard(el) ?: continue
-                if (seenUrls.add(card.url)) {
-                    homeList.add(card)
-                }
-            }
-
-            hasNext = doc.select(".pagination a[rel='next'], .pagination a.next, a:contains(Próximo), a:contains(»)")
-                .isNotEmpty() || homeList.size >= 12
-        } catch (e: Throwable) {
-            Log.w(TAG, "[HOME_ERR] Cat=${request.name} err=${e.message} — tentando cache de disco")
-            val diskHtml = CloudflareSolver.getDiskCachedHtml(url)
-            if (!diskHtml.isNullOrBlank()) {
-                val doc = Jsoup.parse(diskHtml, url)
-                val elements = doc.select("#pm-grid > li, li.col-xs-6, li.col-sm-4, li.col-md-3, li.col-lg-3, li.pm-li-video, article.pm-video-item, .pm-video-thumb, .pm-category-browse li, .entry-item, li.video-item, div.pm-li-video")
-                for (el in elements) {
-                    val card = parseCard(el) ?: continue
-                    if (seenUrls.add(card.url)) homeList.add(card)
-                }
-            }
-        }
-
+        val (homeList, hasNext) = parseHomeDoc(url, requestDoc(url))
         val response = newHomePageResponse(
             listOf(HomePageList(request.name, homeList)),
             hasNext = hasNext
@@ -382,6 +354,64 @@ class RedeCanaisAF : MainAPI() {
         Log.i(TAG, "[HOME_RETURN] Cat=${request.name} | totalItems=${homeList.size} | hasNext=$hasNext")
         homeCache[url] = android.os.SystemClock.elapsedRealtime() to response
         return response
+    }
+
+    /**
+     * v278: pré-aquecimento da home no boot — monta o homeCache das 6 categorias a
+     * partir do HTML de disco/RAM (SEM rede, SEM WebView, SEM parse de rede).
+     * O Provider chama em background logo no load(); quando o framework disparar
+     * getMainPage, cai em HOME_CACHE_HIT (0ms) e a tela inicial renderiza na hora.
+     * Categorias sem HTML em disco são ignoradas (o getMainPage busca normal).
+     */
+    fun prewarmHomeCache() {
+        try {
+            val cats = mainPage.toList()
+            if (cats.isEmpty()) return
+            var warmed = 0
+            for (req in cats) {
+                try {
+                    val url = req.data
+                    if (homeCache[url] != null) continue
+                    val html = CloudflareSolver.getDiskCachedHtml(url)
+                    if (html.isNullOrBlank() || CloudflareSolver.isChallengeContent(html)) continue
+                    val doc = Jsoup.parse(html, url)
+                    val (homeList, hasNext) = parseHomeDoc(url, doc)
+                    if (homeList.isEmpty()) continue
+                    val response = newHomePageResponse(
+                        listOf(HomePageList(req.name, homeList)),
+                        hasNext = hasNext
+                    )
+                    homeCache[url] = android.os.SystemClock.elapsedRealtime() to response
+                    warmed++
+                } catch (_: Throwable) {}
+            }
+            Log.i(TAG, "[HOME_PREWARM] categorias montadas do disco: $warmed/${cats.size}")
+        } catch (e: Throwable) {
+            Log.w(TAG, "[HOME_PREWARM] err=${e.message}")
+        }
+    }
+
+    /** v278: parse de cards da home extraído do getMainPage para reuso no prewarm. */
+    private fun parseHomeDoc(url: String, doc: Document): Pair<MutableList<SearchResponse>, Boolean> {
+        val homeList = mutableListOf<SearchResponse>()
+        val seenUrls = HashSet<String>()
+        var hasNext = false
+        try {
+            val elements = doc.select(
+                "#pm-grid > li, li.col-xs-6, li.col-sm-4, li.col-md-3, li.col-lg-3, " +
+                    "li.pm-li-video, article.pm-video-item, .pm-video-thumb, .pm-category-browse li, " +
+                    ".entry-item, li.video-item, div.pm-li-video"
+            )
+            for (el in elements) {
+                val card = parseCard(el) ?: continue
+                if (seenUrls.add(card.url)) {
+                    homeList.add(card)
+                }
+            }
+            hasNext = doc.select(".pagination a[rel='next'], .pagination a.next, a:contains(Próximo), a:contains(»)")
+                .isNotEmpty() || homeList.size >= 12
+        } catch (_: Throwable) {}
+        return homeList to hasNext
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse> = emptyList()

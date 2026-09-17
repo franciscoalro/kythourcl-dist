@@ -83,6 +83,71 @@ object WebViewStreamProxy {
     @Volatile private var localPort = -1
 
     /**
+     * v278: abre o ServerSocket de sessão ANTECIPADO no boot (sem target ainda).
+     * Conexões antes do primeiro loadLinks recebem 503 + Retry-After (player mostra
+     * "carregando" em vez de CONNECTION_REFUSED). Quando o loadLinks captura o
+     * __RC__/proxy, startLocalServer() só troca o target — mesma porta, sem gap.
+     * Seguro chamar 1x no boot; se a porta estiver ocupada tenta de novo no 1º play.
+     */
+    fun prewarmLocalServer() {
+        synchronized(this) {
+            val live = serverSocket?.let { !it.isClosed && it.isBound } == true
+            if (live) return
+        }
+        try {
+            val server = try {
+                ServerSocket(PREFERRED_PORT, 16, java.net.InetAddress.getByName("127.0.0.1"))
+            } catch (_: Throwable) {
+                return // ocupada — startLocalServer tenta efêmera no 1º play
+            }
+            serverSocket = server
+            isServing = true
+            localPort = server.localPort
+            thread(isDaemon = true, name = "RCProxy-Accept") {
+                while (isServing && !server.isClosed) {
+                    try {
+                        val client = server.accept()
+                        val target = sessionTargetUrl
+                        thread(isDaemon = true, name = "RCProxy-Conn") {
+                            if (target.isNullOrBlank()) serveWaiting(client)
+                            else handleConnection(client, target)
+                        }
+                    } catch (e: Exception) {
+                        if (isServing) Log.w(TAG, "[PROXY] accept err: ${e.message}")
+                        break
+                    }
+                }
+            }
+            Log.i(TAG, "[PROXY] Socket de sessão pré-aberto no boot: http://127.0.0.1:$localPort/stream.mp4 (aguardando 1º target)")
+        } catch (e: Throwable) {
+            Log.w(TAG, "[PROXY] prewarm falhou: ${e.message}")
+        }
+    }
+
+    /** v278: resposta de espera — player operante mas sem vídeo ainda (503). */
+    private fun serveWaiting(socket: Socket) {
+        try {
+            socket.use { sock ->
+                val reader = BufferedReader(InputStreamReader(sock.getInputStream(), Charsets.ISO_8859_1))
+                reader.readLine() ?: return
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    if (line.isBlank()) break
+                }
+                val body = "waiting for stream"
+                val head =
+                    "HTTP/1.1 503 Service Unavailable\r\n" +
+                        "Content-Type: text/plain\r\n" +
+                        "Content-Length: ${body.length}\r\n" +
+                        "Retry-After: 2\r\n" +
+                        "Cache-Control: no-store\r\n" +
+                        "Connection: close\r\n\r\n$body"
+                sock.getOutputStream().write(head.toByteArray(Charsets.ISO_8859_1))
+                sock.getOutputStream().flush()
+            }
+        } catch (_: Exception) {}
+    }
+    /**
      * v251: registra ServiceWorker globalmente — o site usa /sw.js para
      * interceptar fetch de serverforms.api/__RC__/proxy e enriquecer a sessão
      * (extra credenciais/cookies que o app não monta). No WebView de
