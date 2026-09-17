@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v276: LogBridge (escuta de logs via HTTP local 127.0.0.1:17531/logs)
+// v277: proxy local de sessão (porta preferida 17532) — corrige 2001/CONNECTION_REFUSED
 cloudstream {
-    version = 276
+    version = 277
 }

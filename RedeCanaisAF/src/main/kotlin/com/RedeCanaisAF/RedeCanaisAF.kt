@@ -57,7 +57,12 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 276
+        const val BUILD_VERSION = 277
+        // v277: proxy local de SESSÃO (porta preferida 17532, vivo até o fim do
+        // app). Corrige o erro 2001/ERR_CONNECTION_REFUSED: o app cacheia o
+        // LoadResponse (LOAD_CACHE_HIT) e reentrega a URL 127.0.0.1:<porta> após
+        // o shutdown() da captura ter fechado o ServerSocket. shutdown() agora
+        // é leve (não fecha o socket); teardown real só em shutdownAll().
         // v276: LogBridge (HTTP local p/ leitura remota de logs via túnel).
         // v275: WebView invisível (alpha 0.01), prefetch via OkHttp, bloqueio de
         // navegação externa, sem pré-aquecimento do helper por capa, diagnóstico

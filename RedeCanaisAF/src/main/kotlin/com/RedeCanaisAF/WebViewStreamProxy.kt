@@ -69,6 +69,18 @@ object WebViewStreamProxy {
     @Volatile private var streamUrl: String? = null
     @Volatile private var isServing = false
     @Volatile private var swInstalled = false
+    // v277: proxy local SEMPRE servido na porta preferida PREFERRED_PORT (fallback
+    // efêmero se ocupada) por um ServerSocket de SESSÃO — aberto 1x, vivo até o
+    // fim do app. Cada loadLinks só troca o targetUrl servido. Isso corrige o
+    // erro 2001/ERR_CONNECTION_REFUSED do log do celular: o app cacheava o
+    // LoadResponse (LOAD_CACHE_HIT) e o RepoLinkGenerator reentregava a URL
+    // 127.0.0.1:<porta-antiga>/stream.mp4 quando o ServerSocket já tinha sido
+    // fechado no shutdown() da sessão anterior. Com socket persistente + mesma
+    // porta, a URL cacheada continua respondendo (novo target). Sem shutdown em
+    // startLocalServer/capture — só no teardown do app.
+    private const val PREFERRED_PORT = 17532
+    @Volatile private var sessionTargetUrl: String? = null
+    @Volatile private var localPort = -1
 
     /**
      * v251: registra ServiceWorker globalmente — o site usa /sw.js para
@@ -2098,20 +2110,45 @@ object WebViewStreamProxy {
 
     /**
      * Inicia o ServerSocket local que o ExoPlayer consome (http://127.0.0.1:porta/stream.mp4).
+     * v277: socket de SESSÃO — aberto 1x na porta preferida, vivo até o fim do app.
+     * Cada chamada só troca o targetUrl servido (sessionTargetUrl) e retorna a mesma
+     * URL local. startLocalServer NUNCA fecha socket nem destrói WebView.
      */
     private fun startLocalServer(targetUrl: String): String? {
+        sessionTargetUrl = targetUrl
+        synchronized(this) {
+            val live = serverSocket?.let { !it.isClosed && it.isBound } == true
+            if (live) {
+                val port = localPort.takeIf { it > 0 } ?: serverSocket!!.localPort
+                val local = "http://127.0.0.1:$port/stream.mp4"
+                Log.i(TAG, "[PROXY] Servidor de sessão reaproveitado: $local -> $targetUrl")
+                return local
+            }
+        }
         return try {
-            val server = ServerSocket(0, 16, java.net.InetAddress.getByName("127.0.0.1"))
+            val server = try {
+                ServerSocket(PREFERRED_PORT, 16, java.net.InetAddress.getByName("127.0.0.1")).also {
+                    Log.i(TAG, "[PROXY] Porta preferida $PREFERRED_PORT livre — sessão fixa nela")
+                }
+            } catch (_: Throwable) {
+                ServerSocket(0, 16, java.net.InetAddress.getByName("127.0.0.1")).also {
+                    Log.w(TAG, "[PROXY] Porta $PREFERRED_PORT ocupada — sessão na efêmera ${it.localPort}")
+                }
+            }
             serverSocket = server
             isServing = true
             val port = server.localPort
+            localPort = port
 
             thread(isDaemon = true, name = "RCProxy-Accept") {
                 while (isServing && !server.isClosed) {
                     try {
                         val client = server.accept()
+                        // v277: target lido por conexão (sessão pode ter trocado de
+                        // vídeo entre o loadLinks e o play do ExoPlayer).
+                        val target = sessionTargetUrl ?: targetUrl
                         thread(isDaemon = true, name = "RCProxy-Conn") {
-                            handleConnection(client, targetUrl)
+                            handleConnection(client, target)
                         }
                     } catch (e: Exception) {
                         if (isServing) Log.w(TAG, "[PROXY] accept err: ${e.message}")
@@ -2201,7 +2238,33 @@ object WebViewStreamProxy {
      * (credentials include + Range) — mesmo TLS/fingerprint do cf_clearance.
      */
     private fun fetchChunk(url: String, start: Long, end: Long): ByteArray? {
-        val wv = webView ?: return null
+        // v277: fallback defensivo — se o WebView foi destruído (shutdownAll) mas o
+        // socket de sessão ainda recebe conexões do player, tenta capturar o
+        // WebView recriado pela hierarchy em vez de falhar silencioso.
+        var wv = webView
+        if (wv == null) {
+            wv = synchronized(this) {
+                webView ?: runCatching {
+                    val act = CommonActivity.activity
+                    val root = act?.findViewById<ViewGroup>(android.R.id.content)
+                    var found: WebView? = null
+                    if (root != null) {
+                        fun findWv(g: ViewGroup): WebView? {
+                            for (i in 0 until g.childCount) {
+                                val v = g.getChildAt(i)
+                                if (v is WebView) return v
+                                if (v is ViewGroup) { val f = findWv(v); if (f != null) return f }
+                            }
+                            return null
+                        }
+                        found = findWv(root)
+                        if (found != null) webView = found
+                    }
+                    found
+                }.getOrNull()
+            }
+            if (wv == null) return null
+        }
         val future = CompletableFuture<String>()
         try {
             wv.post {
@@ -2258,11 +2321,24 @@ object WebViewStreamProxy {
         }
     }
 
-    /** Encerra servidor e WebView (thread-safe, pode ser chamado de qualquer thread). */
+    /** Encerra servidor e WebView (thread-safe, pode ser chamado de qualquer thread).
+     * v277: shutdown() NÃO fecha mais o ServerSocket de sessão nem destrói o WebView
+     * — só limpa o streamUrl pendente. O socket de sessão fica vivo até o fim do
+     * app para que URLs locais cacheadas (LOAD_CACHE_HIT) continuem respondendo.
+     * O teardown real acontece em shutdownAll() (fim do app). */
     fun shutdown() {
+        streamUrl = null
+        Log.d(TAG, "[PROXY] shutdown leve: sessão local preservada (port=$localPort)")
+    }
+
+    /** Teardown real: fecha o ServerSocket de sessão + destrói o WebView. Chamar
+     * apenas no fim do app / troca de provider. */
+    fun shutdownAll() {
         isServing = false
         try { serverSocket?.close() } catch (_: Throwable) {}
         serverSocket = null
+        localPort = -1
+        sessionTargetUrl = null
         streamUrl = null
         // Capture ownership before clearing the singleton. Dispatch independently
         // of CommonActivity: the Activity may already be gone during shutdown.
