@@ -60,7 +60,8 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 280
+        const val BUILD_VERSION = 281
+        // v281: failover .af→.pk também em falha de REDE/DNS (antes só em ban).
         // v280: diagnóstico de home vazia ([HOME_DIAG] title/htmlLen/challenge/
         // clearance + contagens por seletor). Só loga — sem mudança de comportamento.
         // v279: NUNCA cacheia home vazia — lista vazia (challenge) não vai ao
@@ -297,14 +298,19 @@ class RedeCanaisAF : MainAPI() {
         Log.e(TAG, "[REQ#$reqId] Falha total ao carregar $fixedUrl")
         // v274: failover de domínio — se este host está banido (1006/1106), tenta o
         // espelho antes de desistir. Troca mainUrl + activeMirrorIdx (sticky até falhar).
+        // v281: estende o failover para falha de REDE/DNS (code=0, body vazio,
+        // timeout/UnknownHost no OkHttp, ou WebView com ERR_NAME_NOT_RESOLVED). Antes
+        // só ban (1006) trocava de espelho — DNS falhando no .af ficava preso nele.
         val failedMirror = MIRROR_DOMAINS[activeMirrorIdx]
-        if (fixedUrl.startsWith(failedMirror) && CloudflareSolver.isIpBannedContent(body)) {
+        val networkDead = code == 0 || (body.isBlank() && code !in 200..299)
+        if (fixedUrl.startsWith(failedMirror) &&
+            (CloudflareSolver.isIpBannedContent(body) || networkDead)) {
             val nextIdx = (activeMirrorIdx + 1) % MIRROR_DOMAINS.size
             if (nextIdx != activeMirrorIdx) {
                 activeMirrorIdx = nextIdx
                 val mirrorBase = MIRROR_DOMAINS[nextIdx]
                 mainUrl = mirrorBase
-                Log.w(TAG, "[REQ#$reqId] Failover $failedMirror -> $mirrorBase (ban detectado)")
+                Log.w(TAG, "[REQ#$reqId] Failover $failedMirror -> $mirrorBase (ban=${CloudflareSolver.isIpBannedContent(body)} redeMorta=$networkDead)")
                 return requestDoc(url.replace(failedMirror, mirrorBase), referer.replace(failedMirror, mirrorBase))
             }
         }

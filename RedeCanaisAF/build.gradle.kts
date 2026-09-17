@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v280: diagnóstico de home vazia (só logs, sem mudança de comportamento)
+// v281: failover .af→.pk também em falha de rede/DNS (antes só em ban)
 cloudstream {
-    version = 280
+    version = 281
 }
