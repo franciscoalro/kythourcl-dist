@@ -1,0 +1,8 @@
+{
+  "name": "Kythour Repository (v279 fixo)",
+  "description": "Repositório temporário pinado na v279 — contorna o cache do raw.githubusercontent preso na v276",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@d5a1dbb96080606c0f581a0f807b3a54158d1b84/builds/plugins.json"
+  ]
+}
