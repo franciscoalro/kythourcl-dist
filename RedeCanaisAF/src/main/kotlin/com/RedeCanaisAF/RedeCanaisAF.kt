@@ -60,7 +60,9 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 279
+        const val BUILD_VERSION = 280
+        // v280: diagnóstico de home vazia ([HOME_DIAG] title/htmlLen/challenge/
+        // clearance + contagens por seletor). Só loga — sem mudança de comportamento.
         // v279: NUNCA cacheia home vazia — lista vazia (challenge) não vai ao
         // homeCache, então a próxima abertura tenta de novo em vez de mostrar só
         // os nomes das categorias por 30min.
@@ -348,12 +350,31 @@ class RedeCanaisAF : MainAPI() {
         // framework foi elevado para 180s. Envolver em timeout de 6-45s só produzia
         // "HOME_TIMEOUT_EMPTY" (lista vazia) ou cancelava o WebView no meio da
         // captura — foi isso que gerou o "Timed out waiting for 120000 ms" na UI.
-        val (homeList, hasNext) = parseHomeDoc(url, requestDoc(url))
+        val doc = requestDoc(url)
+        val (homeList, hasNext) = parseHomeDoc(url, doc)
         // v279: NUNCA cacheia lista vazia — getMainPage com challenge/tela vazia
         // gravava HomePageResponse vazio por 30min e a home mostrava só os nomes
         // das categorias. Lista vazia = retorna sem cachear (próxima abertura
         // tenta de novo com clearance novo).
         if (homeList.isEmpty()) {
+            // v280: diagnóstico de lista vazia — sem isso era impossível saber se
+            // o HTML veio challenge, vazio, ou com markup novo (seletores velhos).
+            try {
+                val title = doc.selectFirst("title")?.text()?.take(80).orEmpty()
+                val htmlLen = doc.html().length
+                val cGrid = doc.select("#pm-grid > li").size
+                val cCol = doc.select("li.col-xs-6").size
+                val cPmLi = doc.select("li.pm-li-video").size
+                val cThumb = doc.select(".pm-video-thumb").size
+                val cEntry = doc.select(".entry-item").size
+                val cLinksHtml = doc.select("a[href*='.html']").size
+                val cLinks = doc.select("a[href]").size
+                val hasChal = CloudflareSolver.isChallengeContent(doc.html())
+                val cookies = runCatching { android.webkit.CookieManager.getInstance().getCookie(url) }.getOrNull().orEmpty()
+                val hasClr = CloudflareSolver.hasValidClearance(cookies)
+                Log.w(TAG, "[HOME_DIAG] Cat=${request.name} title='$title' htmlLen=$htmlLen challenge=$hasChal clearance=$hasClr url=$url")
+                Log.w(TAG, "[HOME_DIAG] counts grid=$cGrid colxs6=$cCol pmli=$cPmLi thumb=$cThumb entry=$cEntry linksHtml=$cLinksHtml linksTotal=$cLinks")
+            } catch (_: Throwable) {}
             Log.w(TAG, "[HOME_EMPTY_NOCACHE] Cat=${request.name} veio vazia (challenge?) — sem cachear")
             return newHomePageResponse(listOf(HomePageList(request.name, homeList)), hasNext = hasNext)
         }

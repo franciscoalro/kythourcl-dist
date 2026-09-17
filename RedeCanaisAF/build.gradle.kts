@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v279: nunca cacheia home vazia (categorias com nomes mas sem cards)
+// v280: diagnóstico de home vazia (só logs, sem mudança de comportamento)
 cloudstream {
-    version = 279
+    version = 280
 }
