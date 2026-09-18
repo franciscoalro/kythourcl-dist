@@ -413,13 +413,14 @@ class AnimeFire : MainAPI() {
                             q.contains("360", true) -> Qualities.P360.value
                             else -> Qualities.Unknown.value
                         }
-                        val isM3u8 = streamUrl.contains(".m3u8")
+                        // v153: stream.url da API é playlist HLS (player usa type
+                        // application/vnd.apple.mpegurl) mesmo sem extensão .m3u8
                         callback.invoke(
                             newExtractorLink(
                                 source = name,
                                 name = "AnimeFire ($q)",
                                 url = streamUrl,
-                                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                type = ExtractorLinkType.M3U8
                             ) {
                                 // v152: akumast.net valida Referer/Origin do site + UA mobile
                                 this.referer = "$mainUrl/"
