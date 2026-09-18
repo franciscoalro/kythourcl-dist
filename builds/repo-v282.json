@@ -1,0 +1,8 @@
+{
+  "name": "Kythour Repository (v282 fixo)",
+  "description": "Reposit\u00f3rio tempor\u00e1rio pinado na v282 MANUAL-FIRST \u2014 contorna o cache do raw.githubusercontent preso na v276",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@a136798b0fd81601586ee0c1a19b968da2f0fd1b/builds/plugins.json"
+  ]
+}
