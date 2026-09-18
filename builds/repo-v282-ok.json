@@ -1,0 +1,8 @@
+{
+  "name": "Kythour Repository (v282 OK)",
+  "description": "v282 MANUAL-FIRST com download corrigido (cs3 via jsDelivr pinado)",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@fa4a58de189cf008c161c7d327b5dedcb10f69f6/builds/plugins.json"
+  ]
+}
