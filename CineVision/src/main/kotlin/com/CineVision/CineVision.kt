@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
+import com.lagradost.cloudstream3.network.WebViewResolver
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -231,14 +232,59 @@ class CineVision : MainAPI() {
         return ""
     }
 
+    // v150: Abyss (playembedapi.site) — descriptografia AES-CTR via WebCrypto do
+    // próprio WebView do app. O lite.bundle.js exige DOM/IndexedDB/WS reais, então
+    // Nível 2 (Node isolado) foi descartado; o player do site usa SoTrym(datas)
+    // com expandKey(user_id:slug:md5_id) + decrypt AES-CTR. Aqui delegamos ao
+    // WebViewResolver: carrega o embed e intercepta a playlist HLS que o player
+    // monta após descriptografar.
+    private suspend fun resolveAbyssViaWebView(
+        playembedUrl: String,
+        referer: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        return try {
+            val intercept = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""")
+            val resp = app.get(
+                playembedUrl,
+                headers = mapOf("User-Agent" to USER_AGENT, "Referer" to referer),
+                interceptor = WebViewResolver(intercept, timeout = 25000L)
+            )
+            val html = try { resp.text } catch (_: Throwable) { "" }
+            val found = mutableSetOf<String>()
+            intercept.findAll(html).forEach { found.add(it.value) }
+            intercept.find(resp.url)?.let { found.add(it.value) }
+            for (m3u8 in found) {
+                if (m3u8.contains("googlesyndication") || m3u8.contains("morphify")) continue
+                callback.invoke(
+                    newExtractorLink(
+                        source = "Abyss",
+                        name = "Abyss (HLS)",
+                        url = m3u8,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = playembedUrl
+                        this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to playembedUrl)
+                        this.quality = Qualities.P1080.value
+                    }
+                )
+            }
+            found.isNotEmpty()
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private suspend fun extractSeriesEpisodes(embedUrl: String, seriesPageUrl: String, seriesMediaId: String): List<Episode> {
         val episodes = mutableListOf<Episode>()
-        try {
-            val embedHtml = app.get(
+        val embedHtml = try {
+            app.get(
                 embedUrl,
                 headers = mapOf("User-Agent" to USER_AGENT, "Referer" to seriesPageUrl)
             ).text
-
+        } catch (_: Exception) { return emptyList() }
+        // v150 fallback: painel injeta episódios via $.get('/episodio/') — regex no HTML bruto
+        try {
             val soup = Jsoup.parse(embedHtml)
 
             val seasonsMap = mutableMapOf<String, Int>()
@@ -273,7 +319,44 @@ class CineVision : MainAPI() {
                     }
                 )
             }
+
+            // v150: regex direto no HTML bruto (cobre markup fora de <li>)
+            if (episodes.isEmpty()) {
+                val seasonById = mutableMapOf<String, Int>()
+                Regex("""data-season-id="(\d+)"[^>]*data-season-number="(\d+)"""").findAll(embedHtml).forEach {
+                    seasonById[it.groupValues[1]] = it.groupValues[2].toIntOrNull() ?: 1
+                }
+                Regex("""data-episode-id="(\d+)"[^>]*data-season-id="(\d+)"|data-season-id="(\d+)"[^>]*data-episode-id="(\d+)"""").findAll(embedHtml).forEach {
+                    val epId = it.groupValues[1].ifBlank { it.groupValues[4] }
+                    val sId = it.groupValues[2].ifBlank { it.groupValues[3] }
+                    if (epId.isBlank()) return@forEach
+                    val sNum = seasonById[sId] ?: 1
+                    episodes.add(
+                        newEpisode("https://www.painel-aso.sbs/episodio/$epId#tmdb=$seriesMediaId&season=$sNum&episode=1") {
+                            this.name = "Episódio $epId"
+                            this.season = sNum
+                            this.episode = 1
+                        }
+                    )
+                }
+            }
         } catch (_: Exception) {}
+
+        // v150: tenta /episodio/ direto via app.js quando lista vem vazia
+        if (episodes.isEmpty()) {
+            try {
+                val epIds = Regex("""/episodio/(\d+)""").findAll(embedHtml).map { it.groupValues[1] }.distinct().toList()
+                for ((idx, epId) in epIds.withIndex()) {
+                    episodes.add(
+                        newEpisode("https://www.painel-aso.sbs/episodio/$epId#tmdb=$seriesMediaId&season=1&episode=${idx + 1}") {
+                            this.name = "Episódio ${idx + 1}"
+                            this.season = 1
+                            this.episode = idx + 1
+                        }
+                    )
+                }
+            } catch (_: Exception) {}
+        }
         return episodes.distinctBy { it.data }
     }
 
@@ -321,7 +404,7 @@ class CineVision : MainAPI() {
                 val buttons = soup.select("button[data-source], [data-source]")
                     .map { it.attr("data-source") to it.text().trim().ifBlank { "Player" } }
                     .filter { it.first.isNotBlank() }
-                    .sortedByDescending { it.first.contains("loadvid.com") }
+                    .sortedByDescending { it.first.contains("playembedapi.site") || it.first.contains("ok.ru") }
 
                 for ((src, label) in buttons) {
                     if (resolveStreamOrExtractor(src, label, cleanEpUrl, subtitleCallback, callback)) {
@@ -359,7 +442,7 @@ class CineVision : MainAPI() {
                     val buttons = soup.select("button[data-source], [data-source]")
                         .map { it.attr("data-source") to it.text().trim().ifBlank { "Player" } }
                         .filter { it.first.isNotBlank() }
-                        .sortedByDescending { it.first.contains("loadvid.com") }
+                        .sortedByDescending { it.first.contains("playembedapi.site") || it.first.contains("ok.ru") }
 
                     for ((src, label) in buttons) {
                         if (resolveStreamOrExtractor(src, label, embedUrl, subtitleCallback, callback)) {
@@ -371,15 +454,17 @@ class CineVision : MainAPI() {
         }
 
         // 2. Resolução Multi-Server Direta de Fallback (MegaEmbed, SuperFlix, PlayerFlix)
-        if (!mediaIdParam.isNullOrBlank()) {
+        // v150: só usa mediaId se for TMDB numérico (tt/imdb e id interno /embed/N geram 404)
+        val tmdbNumeric = mediaIdParam?.takeIf { it.matches(Regex("""\d+""")) }
+        if (!tmdbNumeric.isNullOrBlank()) {
             if (seasonParam != null && episodeParam != null) {
-                if (resolveMegaEmbed("https://megaembed.com/embed/$mediaIdParam/$seasonParam/$episodeParam", callback)) foundAny = true
-                if (resolveSuperFlix("https://superflixapi.pro/serie/$mediaIdParam/$seasonParam/$episodeParam", callback)) foundAny = true
-                if (resolvePlayerFlix("https://playerflixapi.com/serie/$mediaIdParam/$seasonParam/$episodeParam", callback)) foundAny = true
+                if (resolveMegaEmbed("https://megaembed.com/embed/$tmdbNumeric/$seasonParam/$episodeParam", callback)) foundAny = true
+                if (resolveSuperFlix("https://superflixapi.pro/serie/$tmdbNumeric/$seasonParam/$episodeParam", callback)) foundAny = true
+                if (resolvePlayerFlix("https://playerflixapi.com/serie/$tmdbNumeric/$seasonParam/$episodeParam", callback)) foundAny = true
             } else {
-                if (resolveMegaEmbed("https://megaembed.com/embed/$mediaIdParam", callback)) foundAny = true
-                if (resolveSuperFlix("https://superflixapi.pro/filme/$mediaIdParam", callback)) foundAny = true
-                if (resolvePlayerFlix("https://playerflixapi.com/filme/$mediaIdParam", callback)) foundAny = true
+                if (resolveMegaEmbed("https://megaembed.com/embed/$tmdbNumeric", callback)) foundAny = true
+                if (resolveSuperFlix("https://superflixapi.pro/filme/$tmdbNumeric", callback)) foundAny = true
+                if (resolvePlayerFlix("https://playerflixapi.com/filme/$tmdbNumeric", callback)) foundAny = true
             }
         }
 
@@ -531,23 +616,35 @@ class CineVision : MainAPI() {
             }
         }
 
-        // 2. Resolução Especial: PlayEmbed / Abyss
+        // 2. Resolução Especial: PlayEmbed / Abyss (v150: WebView descriptografa
+        // SoTrym e intercepta HLS; loadExtractor genérico não resolve `datas`)
         if (streamOrEmbedUrl.contains("playembedapi.site")) {
-            val vParam = Regex("""[?&]v=([^&]+)""").find(streamOrEmbedUrl)?.groupValues?.getOrNull(1)
-            if (!vParam.isNullOrBlank()) {
-                val abyssUrl = "https://abyss.to/?v=$vParam"
-                try {
-                    if (loadExtractor(abyssUrl, referer, subtitleCallback, callback)) {
-                        success = true
-                    }
-                } catch (_: Exception) {}
-            }
+            try {
+                if (resolveAbyssViaWebView(streamOrEmbedUrl, referer, callback)) {
+                    return true
+                }
+            } catch (_: Exception) {}
+            // fallback: tenta extrator nativo com a URL ORIGINAL (não convertida)
+            try {
+                if (loadExtractor(streamOrEmbedUrl, referer, subtitleCallback, callback)) {
+                    success = true
+                }
+            } catch (_: Exception) {}
         }
 
-        // 3. Resolução Especial: VidSrc
-        if (streamOrEmbedUrl.contains("vidsrcme.su")) {
-            val vidsrcMe = streamOrEmbedUrl.replace("vidsrcme.su", "vidsrc.me")
-            val vidsrcTo = streamOrEmbedUrl.replace("vidsrcme.su", "vidsrc.to")
+        // 2b. ok.ru dedicado (extrator OkRu existe; referer do painel exigido)
+        if (streamOrEmbedUrl.contains("ok.ru/videoembed/")) {
+            try {
+                if (loadExtractor(streamOrEmbedUrl, referer, subtitleCallback, callback)) {
+                    return true
+                }
+            } catch (_: Exception) {}
+        }
+
+        // 3. Resolução Especial: VidSrc (v150: +vidsrc.sh, destino do 301 de vidsrcme.su)
+        if (streamOrEmbedUrl.contains("vidsrcme.su") || streamOrEmbedUrl.contains("vidsrc.sh")) {
+            val vidsrcMe = streamOrEmbedUrl.replace("vidsrcme.su", "vidsrc.me").replace("vidsrc.sh", "vidsrc.me")
+            val vidsrcTo = streamOrEmbedUrl.replace("vidsrcme.su", "vidsrc.to").replace("vidsrc.sh", "vidsrc.to")
             try {
                 if (loadExtractor(vidsrcMe, referer, subtitleCallback, callback) ||
                     loadExtractor(vidsrcTo, referer, subtitleCallback, callback)) {
