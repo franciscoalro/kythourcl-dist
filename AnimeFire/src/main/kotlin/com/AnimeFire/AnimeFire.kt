@@ -24,6 +24,57 @@ class AnimeFire : MainAPI() {
     )
 
     companion object {
+        // v151: espelhos failover — .one principal (abre em IP residencial),
+        // .plus e .io reservas (mesmo CMS, IPs distintos). Troca sticky automática
+        // em 403/challenge: getMirror() tenta o ativo, falha rotaciona.
+        val MIRRORS = listOf(
+            "https://animefire.one",
+            "https://animefire.plus",
+            "https://animefire.io"
+        )
+        @Volatile var activeMirrorIdx = 0
+
+        private fun isBlockedResponse(code: Int, body: String): Boolean {
+            if (code == 403 || code == 503) return true
+            return body.contains("Just a moment", true) ||
+                body.contains("Attention Required", true) ||
+                body.contains("challenge-platform", true) ||
+                body.contains("cf-error-details", true)
+        }
+
+        /** GET com failover de espelho: tenta o ativo, em 403/challenge rotaciona. */
+        suspend fun mirrorGet(url: String, headers: Map<String, String>) = mirrorGetImpl(url, headers)
+
+        private suspend fun mirrorGetImpl(url: String, headers: Map<String, String>) = app.get(urlForMirror(url, MIRRORS[activeMirrorIdx]), headers = headers).let { first ->
+            val firstBody = try { first.text } catch (_: Throwable) { "" }
+            if (!isBlockedResponse(first.code, firstBody)) return@let first
+            // bloqueado: rotaciona espelhos
+            var result = first
+            for (i in 1 until MIRRORS.size) {
+                activeMirrorIdx = (activeMirrorIdx + 1) % MIRRORS.size
+                val base = MIRRORS[activeMirrorIdx]
+                val fixed = urlForMirror(url, base)
+                val h = headers.toMutableMap()
+                h["Referer"] = "$base/"
+                try {
+                    val res = app.get(fixed, headers = h)
+                    result = res
+                    val body = try { res.text } catch (_: Throwable) { "" }
+                    if (!isBlockedResponse(res.code, body)) break
+                } catch (_: Throwable) {}
+            }
+            result
+        }
+
+        /** Reescreve qualquer espelho conhecido para a base dada. */
+        fun urlForMirror(url: String, base: String): String {
+            var out = url
+            for (m in MIRRORS) {
+                if (out.startsWith(m)) return base + out.substring(m.length)
+            }
+            return out
+        }
+
         val BROWSER_HEADERS = mapOf(
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -93,7 +144,7 @@ class AnimeFire : MainAPI() {
         }
 
         return try {
-            val doc = app.get(url, headers = BROWSER_HEADERS).document
+            val doc = mirrorGet(url, BROWSER_HEADERS).document
             val items = doc.select("article.card, .cardUltimosEps, .divCardUltimosEps, .anime-item, .row article, div.card, .divCardTop").mapNotNull {
                 it.toSearchResult()
             }.distinctBy { it.url }
@@ -110,7 +161,7 @@ class AnimeFire : MainAPI() {
 
         return try {
             val url = "$mainUrl/pesquisar/$cleanSlug"
-            val doc = app.get(url, headers = BROWSER_HEADERS).document
+            val doc = mirrorGet(url, BROWSER_HEADERS).document
 
             doc.select("article.card, .cardUltimosEps, .divCardUltimosEps, .anime-item, .row article, div.card, .divCardTop").mapNotNull {
                 it.toSearchResult()
@@ -121,13 +172,13 @@ class AnimeFire : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        var doc = app.get(url, headers = BROWSER_HEADERS).document
+        var doc = mirrorGet(url, BROWSER_HEADERS).document
 
         // Se a URL for de um episódio específico (ex: /animes/slug/9) e houver link para 'todos-os-episodios', carrega a página completa da série
         val todosOsEpsHref = doc.selectFirst("a[href*='todos-os-episodios']")?.attr("href")
         if (!todosOsEpsHref.isNullOrBlank() && Regex("""/\d+$""").containsMatchIn(url)) {
             try {
-                val seriesDoc = app.get(fixUrl(todosOsEpsHref), headers = BROWSER_HEADERS).document
+                val seriesDoc = mirrorGet(fixUrl(todosOsEpsHref), BROWSER_HEADERS).document
                 doc = seriesDoc
             } catch (_: Exception) {}
         }
@@ -292,7 +343,7 @@ class AnimeFire : MainAPI() {
     ): Boolean {
         var found = false
         val doc = try {
-            app.get(data, headers = BROWSER_HEADERS).document
+            mirrorGet(data, BROWSER_HEADERS).document
         } catch (e: Exception) {
             return false
         }
@@ -333,9 +384,9 @@ class AnimeFire : MainAPI() {
 
         for (apiUrl in candidateApis.distinct()) {
             try {
-                val response = app.get(
+                val response = mirrorGet(
                     apiUrl,
-                    headers = API_HEADERS + mapOf("Referer" to data)
+                    API_HEADERS + mapOf("Referer" to data)
                 )
 
                 if (response.text.trim().startsWith("{")) {
@@ -406,18 +457,23 @@ class AnimeFire : MainAPI() {
         }
 
         // 5. Mecanismo de WebViewResolver na página original do episódio (Fallback)
+        // v151: tenta cada espelho no WebView (o ativo pode estar 403 no OkHttp
+        // mas abrir no Chromium, como no navegador do usuário).
         if (!found) {
             val interceptRegex = Regex("""https?://.*(?:googlevideo\.com/videoplayback|lightspeedst\.net|blogger\.com/video-play|.*\.mp4|.*\.m3u8).*""")
 
-            try {
-                val wvResp = app.get(
-                    data,
-                    headers = BROWSER_HEADERS,
-                    interceptor = WebViewResolver(
-                        interceptUrl = interceptRegex,
-                        timeout = 15000L
+            val wvMirrors = (0 until MIRRORS.size).map { MIRRORS[(activeMirrorIdx + it) % MIRRORS.size] }
+            for (wvBase in wvMirrors) {
+                try {
+                    val wvData = urlForMirror(data, wvBase)
+                    val wvResp = app.get(
+                        wvData,
+                        headers = BROWSER_HEADERS.toMutableMap().also { it["Referer"] = "$wvBase/" },
+                        interceptor = WebViewResolver(
+                            interceptUrl = interceptRegex,
+                            timeout = 15000L
+                        )
                     )
-                )
 
                 val interceptedUrl = wvResp.url
                 val htmlContent = wvResp.text
@@ -438,13 +494,15 @@ class AnimeFire : MainAPI() {
                             url = streamUrl,
                             type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
-                            this.referer = if (isGoogleVideo) "https://www.blogger.com/" else "$mainUrl/"
+                            this.referer = if (isGoogleVideo) "https://www.blogger.com/" else "$wvBase/"
                             this.quality = Qualities.P720.value
                         }
                     )
                     found = true
+                    break
                 }
-            } catch (_: Exception) {}
+                } catch (_: Exception) {}
+            }
         }
 
         return found
