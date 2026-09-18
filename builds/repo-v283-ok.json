@@ -1,0 +1,8 @@
+{
+  "name": "Kythour Repository (v283 OK)",
+  "description": "v283 fim do loop 402 + download via jsDelivr pinado",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@4dcd7cacc815235d3d9346cc4239c9715c0071c3/builds/plugins.json"
+  ]
+}
