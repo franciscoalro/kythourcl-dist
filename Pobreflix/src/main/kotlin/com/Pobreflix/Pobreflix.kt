@@ -3,12 +3,13 @@ package com.Pobreflix
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.network.WebViewResolver
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
 class Pobreflix : MainAPI() {
-    override var mainUrl = "https://www.pobreflixtv.locker"
+    override var mainUrl = "https://www.pobreflixtv.futbol"
     override var name = "Pobreflix"
     override val hasMainPage = true
     override var lang = "pt-br"
@@ -253,6 +254,45 @@ class Pobreflix : MainAPI() {
         }
     }
 
+    // v150: Byse SPA ("Byse Frontend" shell vazio) — sem API pública; WebView
+    // carrega o embed real e intercepta o .m3u8 montado pelo player Vite.
+    private suspend fun resolveByseViaWebView(
+        byseUrl: String,
+        referer: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        return try {
+            val intercept = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""")
+            val resp = app.get(
+                byseUrl,
+                headers = mapOf("User-Agent" to USER_AGENT, "Referer" to referer),
+                interceptor = WebViewResolver(intercept)
+            )
+            val html = try { resp.text } catch (_: Throwable) { "" }
+            val found = mutableSetOf<String>()
+            intercept.findAll(html).forEach { found.add(it.value) }
+            intercept.find(resp.url)?.let { found.add(it.value) }
+            for (m3u8 in found) {
+                if (m3u8.contains("googlesyndication") || m3u8.contains("morphify")) continue
+                callback.invoke(
+                    newExtractorLink(
+                        source = "Byse",
+                        name = "Byse (HLS)",
+                        url = m3u8,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = byseUrl
+                        this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to byseUrl)
+                        this.quality = Qualities.P1080.value
+                    }
+                )
+            }
+            found.isNotEmpty()
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -270,18 +310,24 @@ class Pobreflix : MainAPI() {
 
         if (videoId.isNullOrBlank()) return false
 
-        val playerDataUrl = "$mainUrl/index.php?app=videobox&module=video&controller=view&do=playerData&id=$videoId"
-        val response = try {
-            app.get(
-                playerDataUrl,
-                headers = BROWSER_HEADERS + mapOf(
-                    "X-Requested-With" to "XMLHttpRequest",
-                    "Referer" to data
-                )
-            ).parsedSafe<PlayerDataResponse>()
-        } catch (_: Exception) {
-            null
-        } ?: return false
+        // v150: retry — playerData responde 200 porém vazio em ~1/6 (CF cache)
+        var response: PlayerDataResponse? = null
+        repeat(6) {
+            try {
+                val r = app.get(
+                    "$mainUrl/index.php?app=videobox&module=video&controller=view&do=playerData&id=$videoId",
+                    headers = BROWSER_HEADERS + mapOf(
+                        "X-Requested-With" to "XMLHttpRequest",
+                        "Referer" to data
+                    )
+                ).parsedSafe<PlayerDataResponse>()
+                if (!r?.players.isNullOrEmpty()) {
+                    response = r
+                    return@repeat
+                }
+            } catch (_: Exception) {}
+        }
+        val resp = response ?: return false
 
         val playersMap = response.players?.associate { 
             (it.label?.lowercase() ?: "") to (it.url ?: "")
@@ -303,7 +349,14 @@ class Pobreflix : MainAPI() {
         for ((_, embedUrl) in serverList) {
             if (embedUrl.isBlank()) continue
             try {
-                if (loadExtractor(embedUrl, mainUrl, subtitleCallback, callback)) {
+                // v150: Byse shell vazio via HTTP — WebView primeiro
+                if (embedUrl.contains("bysebuho.com") || embedUrl.contains("byse")) {
+                    if (resolveByseViaWebView(embedUrl, data, callback)) {
+                        loaded = true
+                        continue
+                    }
+                }
+                if (loadExtractor(embedUrl, data, subtitleCallback, callback)) {
                     loaded = true
                 }
             } catch (_: Exception) {}
@@ -313,7 +366,7 @@ class Pobreflix : MainAPI() {
     }
 
     private fun resolveEmbedUrl(server: String, token: String, playersMap: Map<String, String>): String {
-        val base = playersMap[server] ?: when (server) {
+        val base = playersMap[server.lowercase()] ?: playersMap[server] ?: when (server.lowercase()) {
             "mixdrop" -> "https://mixdrop.top/e/"
             "streamtape" -> "https://streamtape.com/e/"
             "doodstream" -> "https://playmogo.com/e/"
