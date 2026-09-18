@@ -28,17 +28,17 @@
         "name": "CineVision"
     },
     {
-        "fileHash": "sha256-da2adda6e5a776eff7b8d5956d649a64a30c935263496a9df2794d5b9d8f4406",
+        "fileHash": "sha256-21682b5cf420486ec83c182b4b961b81adc91b3b705f5a41b864f3edbe1680c4",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 53391,
+        "fileSize": 53388,
         "status": 3,
         "authors": [
             "franciscoalro"
         ],
-        "version": 149,
+        "version": 150,
         "internalName": "NetCine",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/NetCine.cs3",
+        "url": "PLACEHOLDER",
         "name": "NetCine"
     },
     {

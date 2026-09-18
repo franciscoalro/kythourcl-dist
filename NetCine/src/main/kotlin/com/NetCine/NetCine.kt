@@ -11,7 +11,7 @@ import org.jsoup.Jsoup
 import android.util.Base64
 
 class NetCine : MainAPI() {
-    override var mainUrl = "https://nnn1.lat"
+    override var mainUrl = "https://netcineso.lat"
     override var name = "NetCine"
     override val hasMainPage = true
     override var lang = "pt-br"
