@@ -1,0 +1,8 @@
+{
+  "name": "Kythour Repository (v284 OK)",
+  "description": "v284 HTTP puro invis\u00edvel + slim disco + download via jsDelivr pinado",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@58b356d40da0a3aafc46bf26295023d9323a167f/builds/plugins.json"
+  ]
+}
