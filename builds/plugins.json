@@ -38,7 +38,7 @@
         ],
         "version": 150,
         "internalName": "NetCine",
-        "url": "PLACEHOLDER",
+        "url": "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@b1d9005ed4bf1fd815dff690be3601285f4dde8e/builds/NetCine.cs3",
         "name": "NetCine"
     },
     {
@@ -80,7 +80,7 @@
         ],
         "version": 284,
         "internalName": "RedeCanaisAF",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/RedeCanaisAF.cs3",
+        "url": "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@58b356d40da0a3aafc46bf26295023d9323a167f/builds/RedeCanaisAF.cs3",
         "name": "RedeCanaisAF"
     },
     {
