@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.network.WebViewResolver
+import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import org.jsoup.nodes.Element
 import java.text.Normalizer
 
@@ -24,9 +25,9 @@ class AnimeFire : MainAPI() {
     )
 
     companion object {
-        // v151: espelhos failover — .one principal (abre em IP residencial),
-        // .plus e .io reservas (mesmo CMS, IPs distintos). Troca sticky automática
-        // em 403/challenge: getMirror() tenta o ativo, falha rotaciona.
+        // v152: site virou SPA Angular — HTML é shell vazio, conteúdo via api.animefire.one.
+        // Home/busca/detalhe/episódio por JSON; espelhos failover mantidos.
+        const val API_URL = "https://api.animefire.one"
         val MIRRORS = listOf(
             "https://animefire.one",
             "https://animefire.plus",
@@ -40,6 +41,28 @@ class AnimeFire : MainAPI() {
                 body.contains("Attention Required", true) ||
                 body.contains("challenge-platform", true) ||
                 body.contains("cf-error-details", true)
+        }
+
+        val JSON_HEADERS = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+            "Accept" to "application/json, text/plain, */*",
+            "Accept-Language" to "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Origin" to "https://animefire.one",
+            "Referer" to "https://animefire.one/"
+        )
+
+        /** GET JSON na api com retry (WAF barra ~2/3 por IP datacenter; insiste até passar). */
+        suspend fun apiGet(path: String, maxTries: Int = 8): String? {
+            repeat(maxTries) {
+                try {
+                    val res = app.get("$API_URL$path", headers = JSON_HEADERS, timeout = 20)
+                    val body = try { res.text } catch (_: Throwable) { "" }
+                    if (res.code == 200 && body.isNotBlank() && !isBlockedResponse(res.code, body)) {
+                        return body
+                    }
+                } catch (_: Throwable) {}
+            }
+            return null
         }
 
         /** GET com failover de espelho: tenta o ativo, em 403/challenge rotaciona. */
@@ -103,14 +126,93 @@ class AnimeFire : MainAPI() {
         }
     }
 
+    // ---- v152: modelos da api.animefire.one ----
+    data class AfTitles(
+        @JsonProperty("BR") val br: String? = null,
+        @JsonProperty("US") val us: String? = null,
+        @JsonProperty("JP") val jp: String? = null
+    )
+    data class AfAnimeItem(
+        @JsonProperty("id") val id: String? = null,
+        @JsonProperty("titles") val titles: AfTitles? = null,
+        @JsonProperty("audio") val audio: String? = null,
+        @JsonProperty("poster_src") val poster: String? = null,
+        @JsonProperty("status") val status: String? = null
+    )
+    data class AfAnimesResp(
+        @JsonProperty("data") val data: List<AfAnimeItem>? = null
+    )
+    data class AfHomeResp(
+        @JsonProperty("data") val data: AfHomeData? = null
+    )
+    data class AfCarousel(
+        @JsonProperty("key") val key: String? = null,
+        @JsonProperty("title") val title: String? = null,
+        @JsonProperty("sub") val sub: String? = null,
+        @JsonProperty("items") val items: List<AfAnimeItem>? = null
+    )
+    data class AfHomeData(
+        @JsonProperty("carousels") val carousels: List<AfCarousel>? = null,
+        @JsonProperty("hero") val hero: AfCarousel? = null
+    )
+    data class AfHero(
+        @JsonProperty("id") val id: String? = null,
+        @JsonProperty("titles") val titles: AfTitles? = null,
+        @JsonProperty("synopsis") val synopsis: String? = null,
+        @JsonProperty("poster_src") val poster: String? = null,
+        @JsonProperty("backdrop_src") val backdrop: String? = null,
+        @JsonProperty("status") val status: String? = null,
+        @JsonProperty("audio") val audio: String? = null,
+        @JsonProperty("genres") val genres: List<String>? = null,
+        @JsonProperty("score") val score: Double? = null,
+        @JsonProperty("format") val format: String? = null
+    )
+    data class AfEpisode(
+        @JsonProperty("id") val id: String? = null,
+        @JsonProperty("title") val title: String? = null,
+        @JsonProperty("number") val number: Int? = null,
+        @JsonProperty("season") val season: Int? = null,
+        @JsonProperty("audio") val audio: String? = null,
+        @JsonProperty("still_src") val still: String? = null,
+        @JsonProperty("synopsis") val synopsis: String? = null
+    )
+    data class AfAnimeDetail(
+        @JsonProperty("format") val format: String? = null,
+        @JsonProperty("hero") val hero: AfHero? = null,
+        @JsonProperty("episodes") val episodes: List<AfEpisode>? = null
+    )
+    data class AfAnimeDetailResp(
+        @JsonProperty("data") val data: AfAnimeDetail? = null
+    )
+    data class AfStream(
+        @JsonProperty("audio") val audio: String? = null,
+        @JsonProperty("url") val url: String? = null,
+        @JsonProperty("qualities") val qualities: List<String>? = null
+    )
+    data class AfEpisodeDetail(
+        @JsonProperty("id") val id: String? = null,
+        @JsonProperty("title") val title: String? = null,
+        @JsonProperty("number") val number: Int? = null,
+        @JsonProperty("season") val season: Int? = null,
+        @JsonProperty("streams") val streams: List<AfStream>? = null
+    )
+    data class AfEpisodeResp(
+        @JsonProperty("data") val data: AfEpisodeDetail? = null
+    )
+
+    private fun AfAnimeItem.toSearchResult(): SearchResponse? {
+        val id = this.id ?: return null
+        val title = this.titles?.br ?: this.titles?.us ?: this.titles?.jp ?: return null
+        return newMovieSearchResponse(title, "$mainUrl/anime/$id", TvType.Anime) {
+            this.posterUrl = this@toSearchResult.poster
+        }
+    }
+
     override val mainPage = mainPageOf(
-        "$mainUrl/home/" to "Últimos Lançamentos",
-        "$mainUrl/em-lancamento/" to "Em Lançamento",
-        "$mainUrl/top-animes/" to "Top Animes",
-        "$mainUrl/lista-de-animes-dublados/" to "Animes Dublados",
-        "$mainUrl/lista-de-animes-legendados/" to "Animes Legendados",
-        "$mainUrl/lista-de-filmes-dublados/" to "Filmes Dublados",
-        "$mainUrl/lista-de-filmes-legendados/" to "Filmes Legendados"
+        "api:/home" to "Últimos Lançamentos",
+        "api:/animes/lancamentos" to "Em Lançamento",
+        "api:/animes/em-breve" to "Em Breve",
+        "api:/animes/filmes" to "Filmes"
     )
 
     private fun Element.toSearchResult(): SearchResponse? {
@@ -137,121 +239,73 @@ class AnimeFire : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page <= 1) {
-            if (request.data == "$mainUrl/home/") mainUrl else request.data.removeSuffix("/")
-        } else {
-            "${request.data.removeSuffix("/")}/$page"
+        val path = request.data.removePrefix("api:")
+        if (page > 1 && (path == "/home" || path == "/animes/lancamentos" || path == "/animes/em-breve")) {
+            return newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
-
+        val paged = if (page > 1) {
+            if (path.contains("?")) "$path&page=$page" else "$path?page=$page"
+        } else path
         return try {
-            val doc = mirrorGet(url, BROWSER_HEADERS).document
-            val items = doc.select("article.card, .cardUltimosEps, .divCardUltimosEps, .anime-item, .row article, div.card, .divCardTop").mapNotNull {
-                it.toSearchResult()
-            }.distinctBy { it.url }
-
-            newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
-        } catch (e: Exception) {
+            val body = apiGet(paged) ?: return newHomePageResponse(request.name, emptyList(), hasNext = false)
+            val items = if (path == "/home") {
+                val home = tryParseJson<AfHomeResp>(body)?.data
+                ((home?.hero?.items.orEmpty()) + (home?.carousels.orEmpty().flatMap { it.items.orEmpty() })).distinctBy { it.id }
+            } else {
+                tryParseJson<AfAnimesResp>(body)?.data.orEmpty()
+            }
+            newHomePageResponse(
+                request.name,
+                items.mapNotNull { it.toSearchResult() },
+                hasNext = page <= 1 && (path.startsWith("/animes/filmes") || path.startsWith("/animes?"))
+            )
+        } catch (_: Exception) {
             newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val cleanSlug = sanitizeQuery(query)
-        if (cleanSlug.isBlank()) return emptyList()
-
+        if (query.isBlank()) return emptyList()
         return try {
-            val url = "$mainUrl/pesquisar/$cleanSlug"
-            val doc = mirrorGet(url, BROWSER_HEADERS).document
-
-            doc.select("article.card, .cardUltimosEps, .divCardUltimosEps, .anime-item, .row article, div.card, .divCardTop").mapNotNull {
-                it.toSearchResult()
-            }.distinctBy { it.url }
-        } catch (e: Exception) {
+            val body = apiGet("/animes?q=${query.trim()}") ?: return emptyList()
+            tryParseJson<AfAnimesResp>(body)?.data.orEmpty().mapNotNull { it.toSearchResult() }
+        } catch (_: Exception) {
             emptyList()
         }
     }
 
     override suspend fun load(url: String): LoadResponse {
-        var doc = mirrorGet(url, BROWSER_HEADERS).document
-
-        // Se a URL for de um episódio específico (ex: /animes/slug/9) e houver link para 'todos-os-episodios', carrega a página completa da série
-        val todosOsEpsHref = doc.selectFirst("a[href*='todos-os-episodios']")?.attr("href")
-        if (!todosOsEpsHref.isNullOrBlank() && Regex("""/\d+$""").containsMatchIn(url)) {
-            try {
-                val seriesDoc = mirrorGet(fixUrl(todosOsEpsHref), BROWSER_HEADERS).document
-                doc = seriesDoc
-            } catch (_: Exception) {}
-        }
-
-        val rawTitle = doc.selectFirst("h1.anime-title, h1.title, h1")?.text()?.trim()
-            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
-            ?: "Anime"
-        val title = rawTitle
-            .replace(Regex(""" - Todos os Epis[óo]dios.*""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex(""" - Epis[óo]dio \d+.*""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""^Assistir\s+""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s+-\s+AnimeFire$""", RegexOption.IGNORE_CASE), "")
-            .trim()
-
-        val poster = doc.selectFirst(".anime-cover img, .poster img, img[src*='/animes/']")?.attr("data-src")
-            ?: doc.selectFirst(".anime-cover img, .poster img, img[src*='/animes/']")?.attr("data-original")
-            ?: doc.selectFirst(".anime-cover img, .poster img, img[src*='/animes/']")?.attr("src")
-            ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
-
-        val description = doc.selectFirst(".divSinopse .spanAnimeInfo, .divSinopse, .sinopse, .description, .anime-description")?.text()
-            ?.replace(Regex("""^Sinopse:\s*""", RegexOption.IGNORE_CASE), "")
-            ?.replace(Regex("""Este site não hospeda nenhum vídeo.*""", RegexOption.IGNORE_CASE), "")
-            ?.trim()
-
-        val genres = doc.select("a[href*='/genero/'], .genre, .genres a, .badge-genre").map { it.text().trim() }
-
-        val episodes = doc.select(".div_video_list a, .list_episodes a, a[href*='/animes/'], .div_link_video_list a, .divCardUltimosEps a").mapNotNull { ep ->
-            val href = ep.attr("href")
-            val rawText = ep.text().trim()
-            if (href.isBlank() || !Regex("""/\d+$""").containsMatchIn(href)) {
-                null
-            } else {
-                val epNumber = Regex("""/(\d+)$""").find(href)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                val epName = if (rawText.isNotBlank()) rawText else "Episódio ${epNumber ?: ""}"
-                newEpisode(fixUrl(href)) {
-                    this.name = epName
-                    this.episode = epNumber
-                }
+        val id = Regex("""/anime/([A-Za-z0-9_-]+)""").find(url)?.groupValues?.getOrNull(1)
+            ?: throw ErrorLoadingException("AnimeFire: URL inválida")
+        val body = apiGet("/anime/$id")
+            ?: throw ErrorLoadingException("AnimeFire: API indisponível")
+        val detail = tryParseJson<AfAnimeDetailResp>(body)?.data
+            ?: throw ErrorLoadingException("AnimeFire: anime não encontrado")
+        val hero = detail.hero
+        val title = hero?.titles?.br ?: hero?.titles?.us ?: hero?.titles?.jp ?: "Anime"
+        val episodes = detail.episodes.orEmpty().mapNotNull { ep ->
+            val epId = ep.id ?: return@mapNotNull null
+            val num = ep.number ?: 0
+            newEpisode("$mainUrl/episode/$epId") {
+                this.name = if (!ep.title.isNullOrBlank()) "E$num \u2014 ${ep.title}" else "Episódio $num"
+                this.episode = num
+                this.season = ep.season
+                this.posterUrl = ep.still
+                this.description = ep.synopsis
             }
-        }.distinctBy { it.data }.sortedBy { it.episode ?: 0 }
-
-        // Fallback: se nenhum episódio foi extraído mas a URL atual termina com número de episódio
-        val finalEpisodes = if (episodes.isEmpty() && Regex("""/\d+$""").containsMatchIn(url)) {
-            val epNum = Regex("""/(\d+)$""").find(url)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
-            listOf(
-                newEpisode(url) {
-                    this.name = "Episódio $epNum"
-                    this.episode = epNum
-                }
-            )
-        } else {
-            episodes
-        }
-
-        val isMovie = url.contains("/filmes") 
-            || url.contains("filme") 
-            || url.contains("-movie") 
-            || url.contains("-film") 
-            || rawTitle.contains("- Filme", ignoreCase = true)
-            || rawTitle.contains("Filme", ignoreCase = true)
-            || (finalEpisodes.size <= 1 && (url.contains("filme") || url.contains("movie") || url.contains("film")))
-
+        }.sortedBy { it.episode ?: 0 }
+        val isMovie = detail.format == "movie" || episodes.size <= 1
         return if (isMovie) {
-            newMovieLoadResponse(title, url, TvType.AnimeMovie, finalEpisodes.firstOrNull()?.data ?: url) {
-                this.posterUrl = poster
-                this.plot = description
-                this.tags = genres
+            newMovieLoadResponse(title, url, TvType.AnimeMovie, episodes.firstOrNull()?.data ?: url) {
+                this.posterUrl = hero?.poster
+                this.plot = hero?.synopsis
+                this.tags = hero?.genres
             }
         } else {
-            newTvSeriesLoadResponse(title, url, TvType.Anime, finalEpisodes) {
-                this.posterUrl = poster
-                this.plot = description
-                this.tags = genres
+            newTvSeriesLoadResponse(title, url, TvType.Anime, episodes) {
+                this.posterUrl = hero?.poster
+                this.plot = hero?.synopsis
+                this.tags = hero?.genres
             }
         }
     }
@@ -342,88 +396,82 @@ class AnimeFire : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
+        // v152: data = "$mainUrl/episode/{epId}" — streams via api.animefire.one
+        val epId = Regex("""/episode/([A-Za-z0-9_-]+)""").find(data)?.groupValues?.getOrNull(1)
+        if (!epId.isNullOrBlank()) {
+            try {
+                val body = apiGet("/episode/$epId")
+                val detail = body?.let { tryParseJson<AfEpisodeResp>(it)?.data }
+                for (stream in detail?.streams.orEmpty()) {
+                    val streamUrl = stream.url ?: continue
+                    if (streamUrl.isBlank()) continue
+                    for (q in stream.qualities.orEmpty().ifEmpty { listOf("HD") }) {
+                        val qualityInt = when {
+                            q.contains("1080", true) -> Qualities.P1080.value
+                            q.contains("720", true) -> Qualities.P720.value
+                            q.contains("480", true) -> Qualities.P480.value
+                            q.contains("360", true) -> Qualities.P360.value
+                            else -> Qualities.Unknown.value
+                        }
+                        val isM3u8 = streamUrl.contains(".m3u8")
+                        callback.invoke(
+                            newExtractorLink(
+                                source = name,
+                                name = "AnimeFire ($q)",
+                                url = streamUrl,
+                                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            ) {
+                                // v152: akumast.net valida Referer/Origin do site + UA mobile
+                                this.referer = "$mainUrl/"
+                                this.headers = mapOf(
+                                    "User-Agent" to (JSON_HEADERS["User-Agent"] ?: "Mozilla/5.0"),
+                                    "Referer" to "$mainUrl/",
+                                    "Origin" to "https://animefire.one"
+                                )
+                                this.quality = qualityInt
+                            }
+                        )
+                        found = true
+                    }
+                }
+                // legendas: chapters/thumbnails ignorados (são sprites); API não expõe .srt aqui
+            } catch (_: Exception) {}
+            if (found) return true
+        }
+
+        // Fallback legado: tenta Blogger via página HTML (compat com URLs antigas /animes/slug/N)
+        return try {
+            legacyLoadLinks(data, isCasting, subtitleCallback, callback)
+        } catch (_: Exception) {
+            found
+        }
+    }
+
+    private suspend fun legacyLoadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        var found = false
         val doc = try {
             mirrorGet(data, BROWSER_HEADERS).document
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             return false
         }
 
-        val slugMatch = Regex("""/animes/([^/]+)/(\d+)""").find(data)
-        val slug = slugMatch?.groupValues?.getOrNull(1)
-        val ep = slugMatch?.groupValues?.getOrNull(2)
-
-        // 1. Extração direta de tokens Blogger (GoogleVideo)
         val bloggerTokens = mutableListOf<String>()
         doc.select("iframe[src*='blogger.com']").forEach { iframe ->
             val src = iframe.attr("src")
-            val tokenMatch = Regex("""token=([A-Za-z0-9_-]+)""").find(src)
-            tokenMatch?.groupValues?.getOrNull(1)?.let { bloggerTokens.add(it) }
+            Regex("""token=([A-Za-z0-9_-]+)""").find(src)?.groupValues?.getOrNull(1)?.let { bloggerTokens.add(it) }
         }
         Regex("""blogger\.com/video\.g\?token=([A-Za-z0-9_-]+)""").findAll(doc.html()).forEach { m ->
             m.groupValues.getOrNull(1)?.let { bloggerTokens.add(it) }
         }
-
         for (token in bloggerTokens.distinct()) {
-            if (extractBlogger(token, callback)) {
-                found = true
-            }
+            if (extractBlogger(token, callback)) found = true
         }
 
-        // 2. Extração direta via API JSON da CDN nativa (lightspeedst.net)
-        val candidateApis = mutableListOf<String>()
-        val dataVideoSrc = doc.selectFirst("video[data-video-src]")?.attr("data-video-src")
-        if (!dataVideoSrc.isNullOrBlank()) {
-            candidateApis.add(dataVideoSrc.substringBefore("?"))
-            candidateApis.add(dataVideoSrc)
-        }
-        if (!slug.isNullOrBlank() && !ep.isNullOrBlank()) {
-            candidateApis.add("$mainUrl/video/$slug/$ep")
-            candidateApis.add("$mainUrl/video/$slug/$ep?tempsubs=1")
-            candidateApis.add("$mainUrl/api/video/$slug/$ep")
-        }
-
-        for (apiUrl in candidateApis.distinct()) {
-            try {
-                val response = mirrorGet(
-                    apiUrl,
-                    API_HEADERS + mapOf("Referer" to data)
-                )
-
-                if (response.text.trim().startsWith("{")) {
-                    val apiResp = response.parsedSafe<AnimeFireVideoResponse>()
-
-                    if (!apiResp?.data.isNullOrEmpty()) {
-                        for (item in apiResp.data) {
-                            val videoUrl = item.src ?: continue
-                            val label = item.label ?: "HD"
-                            val qualityInt = when (label.lowercase()) {
-                                "1080p", "f-hd", "fhd" -> Qualities.P1080.value
-                                "720p", "hd"          -> Qualities.P720.value
-                                "480p", "sd", "360p"   -> Qualities.P360.value
-                                else                  -> Qualities.Unknown.value
-                            }
-
-                            val isM3u8 = videoUrl.contains(".m3u8")
-                            callback.invoke(
-                                newExtractorLink(
-                                    source = name,
-                                    name = "AnimeFire CDN ($label)",
-                                    url = videoUrl,
-                                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.referer = "$mainUrl/"
-                                    this.quality = qualityInt
-                                }
-                            )
-                            found = true
-                        }
-                        if (found) break
-                    }
-                }
-            } catch (_: Exception) {}
-        }
-
-        // 3. Extração de tags <video> ou <source> no DOM
         doc.select("video source[src], video[src]").forEach { v ->
             val vSrc = v.attr("src").trim()
             if (vSrc.isNotBlank() && (vSrc.contains(".mp4") || vSrc.contains(".m3u8"))) {
@@ -442,26 +490,18 @@ class AnimeFire : MainAPI() {
             }
         }
 
-        // 4. Extração de iframes de terceiros (Sendvid, Streamwish, Filemoon, Mixdrop)
         val iframes = doc.select("iframe[src]").mapNotNull {
-            val src = it.attr("src").trim()
+            val src = it.attr("src")
             if (src.isNotBlank() && !src.contains("topanimes.net/off/") && !src.contains("youtube.googleapis.com") && !src.contains("blogger.com")) fixUrl(src) else null
         }.distinct()
-
         for (ifr in iframes) {
             try {
-                if (loadExtractor(ifr, data, subtitleCallback, callback)) {
-                    found = true
-                }
+                if (loadExtractor(ifr, data, subtitleCallback, callback)) found = true
             } catch (_: Exception) {}
         }
 
-        // 5. Mecanismo de WebViewResolver na página original do episódio (Fallback)
-        // v151: tenta cada espelho no WebView (o ativo pode estar 403 no OkHttp
-        // mas abrir no Chromium, como no navegador do usuário).
         if (!found) {
             val interceptRegex = Regex("""https?://.*(?:googlevideo\.com/videoplayback|lightspeedst\.net|blogger\.com/video-play|.*\.mp4|.*\.m3u8).*""")
-
             val wvMirrors = (0 until MIRRORS.size).map { MIRRORS[(activeMirrorIdx + it) % MIRRORS.size] }
             for (wvBase in wvMirrors) {
                 try {
@@ -474,37 +514,32 @@ class AnimeFire : MainAPI() {
                             timeout = 15000L
                         )
                     )
-
-                val interceptedUrl = wvResp.url
-                val htmlContent = wvResp.text
-
-                val streamUrl = Regex("""https?://[^"'\s<>]*googlevideo\.com/videoplayback[^"'\s<>]*""").find(htmlContent)?.value
-                    ?: Regex("""https?://[^"'\s<>]+\.m3u8[^"'\s<>]*""").find(htmlContent)?.value
-                    ?: Regex("""https?://[^"'\s<>]+\.mp4[^"'\s<>]*""").find(htmlContent)?.value
-                    ?: interceptedUrl.takeIf { it.contains("videoplayback") || it.contains(".mp4") || it.contains(".m3u8") }
-
-                if (streamUrl != null && !streamUrl.contains("youtube.googleapis.com/embed") && !streamUrl.contains("blogger.com/video.g")) {
-                    val isM3u8 = streamUrl.contains(".m3u8")
-                    val isGoogleVideo = streamUrl.contains("googlevideo.com")
-
-                    callback.invoke(
-                        newExtractorLink(
-                            source = name,
-                            name = if (isGoogleVideo) "AnimeFire Google Player" else "AnimeFire Player",
-                            url = streamUrl,
-                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        ) {
-                            this.referer = if (isGoogleVideo) "https://www.blogger.com/" else "$wvBase/"
-                            this.quality = Qualities.P720.value
-                        }
-                    )
-                    found = true
-                    break
-                }
+                    val interceptedUrl = wvResp.url
+                    val htmlContent = wvResp.text
+                    val streamUrl = Regex("""https?://[^"'\s<>]*googlevideo\.com/videoplayback[^"'\s<>]*""").find(htmlContent)?.value
+                        ?: Regex("""https?://[^"'\s<>]+\.m3u8[^"'\s<>]*""").find(htmlContent)?.value
+                        ?: Regex("""https?://[^"'\s<>]+\.mp4[^"'\s<>]*""").find(htmlContent)?.value
+                        ?: interceptedUrl.takeIf { it.contains("videoplayback") || it.contains(".mp4") || it.contains(".m3u8") }
+                    if (streamUrl != null && !streamUrl.contains("youtube.googleapis.com/embed") && !streamUrl.contains("blogger.com/video.g")) {
+                        val isM3u8 = streamUrl.contains(".m3u8")
+                        val isGoogleVideo = streamUrl.contains("googlevideo.com")
+                        callback.invoke(
+                            newExtractorLink(
+                                source = name,
+                                name = if (isGoogleVideo) "AnimeFire Google Player" else "AnimeFire Player",
+                                url = streamUrl,
+                                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            ) {
+                                this.referer = if (isGoogleVideo) "https://www.blogger.com/" else "$wvBase/"
+                                this.quality = Qualities.P720.value
+                            }
+                        )
+                        found = true
+                        break
+                    }
                 } catch (_: Exception) {}
             }
         }
-
         return found
     }
 }
