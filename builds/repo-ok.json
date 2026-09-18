@@ -1,8 +1,8 @@
 {
   "name": "Kythour Repository",
-  "description": "Plugins Kythour \u2014 AnimeFire v153 (player HLS), NetCine v150 e demais",
+  "description": "Plugins Kythour \u2014 CineVision v150 (Abyss WebView), AnimeFire v153 (HLS) e demais",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@4c9c5b8e46306e912c80905950e51e22c3cdc7ee/builds/plugins.json"
+    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@cebc9b80118d3ad9ca717b448662b68268a76382/builds/plugins.json"
   ]
 }
