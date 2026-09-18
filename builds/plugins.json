@@ -1,9 +1,9 @@
 [
     {
-        "fileHash": "sha256-6ce9134bf5eb1a263bc3c54bac5bc3adc244ef9c2d61f2d6e380d50abed060cb",
+        "fileHash": "sha256-b7f2b9d9ff5ac860e91e810b6f45070f9fff30a92d454eb21f565a9f837b8fd9",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 29477,
+        "fileSize": 42184,
         "status": 3,
         "authors": [
             "franciscoalro"
