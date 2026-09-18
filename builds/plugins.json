@@ -14,10 +14,10 @@
         "name": "AnimeFire"
     },
     {
-        "fileHash": "sha256-b93a8da2f3ad0861fe125dd73e3198568f43093075890aac5f8621f8be34cd44",
+        "fileHash": "sha256-c61282652c74aa75ac09e8f9d814e1183fd183e758f2e40c6837b48e117fa4f2",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 38478,
+        "fileSize": 41867,
         "status": 3,
         "authors": [
             "franciscoalro"
