@@ -1,8 +1,8 @@
 {
   "name": "Kythour Repository",
-  "description": "Plugins Kythour \u2014 NetCine v150 (netcineso.lat) e demais",
+  "description": "Plugins Kythour \u2014 NetCine v150 (netcineso.lat) e demais (sem RedeCanaisAF)",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@ea50d07491633b6b587daf7987e00998ee622d2e/builds/plugins.json"
+    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@ef90a0f4737e95f798bfc016e8085d6e136076ac/builds/plugins.json"
   ]
 }
