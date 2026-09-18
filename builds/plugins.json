@@ -1,6 +1,6 @@
 [
     {
-        "fileHash": "sha256-52fe7597908e9a2f4fa4b134d256548eec2ed5c61f6dfafbfa56694734719ba4",
+        "fileHash": "sha256-2368ce0c85376baa0e39e57889ac5b1c98faac0bcacb74119ce872ba4ec7bfce",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
         "fileSize": 26981,
@@ -8,9 +8,9 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 149,
+        "version": 150,
         "internalName": "AnimeFire",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/AnimeFire.cs3",
+        "url": "PLACEHOLDER",
         "name": "AnimeFire"
     },
     {
