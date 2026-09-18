@@ -1,8 +1,8 @@
 {
   "name": "Kythour Repository",
-  "description": "Plugins Kythour \u2014 AnimeFire v151 (espelhos .one/.plus/.io), NetCine v150 (netcineso.lat) e demais",
+  "description": "Plugins Kythour \u2014 AnimeFire v152 (API SPA: home/busca/eps via JSON), NetCine v150 e demais",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@4b737f2af7453ff422f2f85997017f88a785dc55/builds/plugins.json"
+    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@67651c65a1472c75db02ce097e58d3e2bda2c3bb/builds/plugins.json"
   ]
 }
