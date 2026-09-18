@@ -1,8 +1,8 @@
 {
   "name": "Kythour Repository",
-  "description": "Plugins Kythour \u2014 NetCine v150 (netcineso.lat) e demais (sem RedeCanaisAF)",
+  "description": "Plugins Kythour \u2014 AnimeFire v150 (animefire.one), NetCine v150 (netcineso.lat) e demais",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@ef90a0f4737e95f798bfc016e8085d6e136076ac/builds/plugins.json"
+    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@450cbf0e170da194398e24c6f7993498050f5719/builds/plugins.json"
   ]
 }
