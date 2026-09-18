@@ -10,7 +10,7 @@
         ],
         "version": 150,
         "internalName": "AnimeFire",
-        "url": "PLACEHOLDER",
+        "url": "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@0f94c078299c50ecc605c38f55fbc925293f741a/builds/AnimeFire.cs3",
         "name": "AnimeFire"
     },
     {
@@ -24,7 +24,7 @@
         ],
         "version": 149,
         "internalName": "CineVision",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/CineVision.cs3",
+        "url": "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@0f94c078299c50ecc605c38f55fbc925293f741a/builds/CineVision.cs3",
         "name": "CineVision"
     },
     {
@@ -38,7 +38,7 @@
         ],
         "version": 149,
         "internalName": "NetCine",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/NetCine.cs3",
+        "url": "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@0f94c078299c50ecc605c38f55fbc925293f741a/builds/NetCine.cs3",
         "name": "NetCine"
     },
     {
@@ -52,7 +52,7 @@
         ],
         "version": 149,
         "internalName": "Pobreflix",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/Pobreflix.cs3",
+        "url": "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@0f94c078299c50ecc605c38f55fbc925293f741a/builds/Pobreflix.cs3",
         "name": "Pobreflix"
     },
     {
@@ -66,7 +66,7 @@
         ],
         "version": 149,
         "internalName": "RedeCanais",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/RedeCanais.cs3",
+        "url": "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@0f94c078299c50ecc605c38f55fbc925293f741a/builds/RedeCanais.cs3",
         "name": "RedeCanais"
     },
     {
@@ -80,7 +80,7 @@
         ],
         "version": 284,
         "internalName": "RedeCanaisAF",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/RedeCanaisAF.cs3",
+        "url": "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@0f94c078299c50ecc605c38f55fbc925293f741a/builds/RedeCanaisAF.cs3",
         "name": "RedeCanaisAF"
     },
     {
@@ -94,7 +94,7 @@
         ],
         "version": 149,
         "internalName": "TopAnimes",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/TopAnimes.cs3",
+        "url": "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@0f94c078299c50ecc605c38f55fbc925293f741a/builds/TopAnimes.cs3",
         "name": "TopAnimes"
     }
 ]
