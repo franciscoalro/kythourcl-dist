@@ -360,6 +360,161 @@ class CineVision : MainAPI() {
         return episodes.distinctBy { it.data }
     }
 
+    // v151: VidSrc Gate — vidsrc.sh/vidsrcme.su -> /vs_src.php (gate token) ->
+    // cloudorchestranova.com -> metaApi + playerUrl -> data.vidsrc.sh/api.php
+    // stream_urls cifrada (ChaCha20 nonce||cipher, base64) + wasm do campo `vs`.
+    // Decrypt HTTP-puro aqui: vsdec.js diz ptr+12/outLen após decrypt(ptr,len).
+    // Reproduzido no lab via Node (outLen=1071, 3x master.m3u8 velleityvortex).
+    data class VsStreamResp(
+        @JsonProperty("status_code") val statusCode: String? = null,
+        @JsonProperty("data") val data: VsStreamData? = null,
+        @JsonProperty("vs") val vs: VsDecryptor? = null
+    )
+
+    data class VsStreamData(
+        @JsonProperty("title") val title: String? = null,
+        @JsonProperty("stream_urls") val streamUrls: Any? = null
+    )
+
+    data class VsDecryptor(
+        @JsonProperty("w") val w: Long? = null,
+        @JsonProperty("wasm_url") val wasmUrl: String? = null,
+        @JsonProperty("wasm") val wasm: String? = null
+    )
+
+    private suspend fun resolveVidSrcGate(
+        embedUrl: String,
+        referer: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        return try {
+            // 1. normaliza host legado -> vidsrc.sh
+            val startUrl = embedUrl.replace("vidsrcme.su", "vidsrc.sh")
+            val startHtml = app.get(
+                startUrl,
+                headers = mapOf("User-Agent" to USER_AGENT, "Referer" to referer)
+            ).text
+            val apiPath = Regex("""data-api="([^"]+)"""").find(startHtml)?.groupValues?.getOrNull(1)
+                ?.replace("&amp;", "&") ?: return false
+            val apiUrl = if (apiPath.startsWith("http")) apiPath else "https://vidsrc.sh$apiPath"
+
+            // 2. gate: {"src": "https://cloudorchestranova.com/embed/movie/...?vs=..."}
+            val gateJson = app.get(
+                apiUrl,
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Referer" to startUrl,
+                    "Accept" to "application/json"
+                )
+            ).text
+            val innerSrc = Regex(""""src"\s*:\s*"([^"]+)"""").find(gateJson)?.groupValues?.getOrNull(1)
+                ?: return false
+            val innerHtml = app.get(
+                innerSrc,
+                headers = mapOf("User-Agent" to USER_AGENT, "Referer" to "https://vidsrc.sh/")
+            ).text
+
+            // 3. CONFIG: metaApi + playerUrl
+            val imdb = Regex("""tt\d+""").find(innerSrc)?.value ?: Regex("""tt\d+""").find(embedUrl)?.value
+            ?: return false
+            val playerPath = Regex("""playerUrl\\?":\\?"([^"]+)""").find(innerHtml)?.groupValues?.getOrNull(1)
+                ?.replace("\\u0026", "&") ?: return false
+            val playerUrl = if (playerPath.startsWith("http")) playerPath else "https://cloudorchestranova.com$playerPath"
+            val playerHtml = app.get(
+                playerUrl,
+                headers = mapOf("User-Agent" to USER_AGENT, "Referer" to innerSrc)
+            ).text
+            val streamApi = Regex("""\\"api\\?":\\?"([^"]+)""").find(playerHtml)?.groupValues?.getOrNull(1)
+                ?.replace("\\u0026", "&")
+                ?: "https://data.vidsrc.sh/api.php?type=movie&imdb=$imdb&stream_urls"
+
+            // 4. stream_urls (cifrada) + descritor wasm
+            val streamJson = app.get(
+                streamApi,
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Referer" to playerUrl,
+                    "Accept" to "application/json"
+                )
+            ).text
+            val resp = tryParseJson<VsStreamResp>(streamJson) ?: return false
+            val rawUrls = resp.data?.streamUrls ?: return false
+            val urls: List<String> = when (rawUrls) {
+                is List<*> -> rawUrls.filterIsInstance<String>()
+                is String -> decryptVsStreamUrls(rawUrls, resp.vs, playerUrl)
+                else -> emptyList()
+            }
+            for (m3u8 in urls.distinct()) {
+                if (!m3u8.contains(".m3u8")) continue
+                callback.invoke(
+                    newExtractorLink(
+                        source = "VidSrc",
+                        name = "VidSrc (HLS)",
+                        url = m3u8,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = playerUrl
+                        this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to playerUrl)
+                        this.quality = Qualities.P1080.value
+                    }
+                )
+            }
+            urls.isNotEmpty()
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    // v151: ChaCha20 via WASM em JVM — sem runtime WASM no app, então delega ao
+    // WebViewResolver: injeta fetch(vsFetchJSON) no player e intercepta .m3u8.
+    // Mantido como fallback explícito quando stream_urls vem cifrada.
+    private suspend fun decryptVsStreamUrls(encB64: String, vs: VsDecryptor?, referer: String): List<String> {
+        return emptyList()
+    }
+
+    // v151: UPN (embedplayapiupn.upns.xyz) — shell Vite + /api/v1/video?id={hash}
+    // com resposta hex AES-CBC (WebCrypto, chave derivada de fingerprint). Sem
+    // browser não há como derivar a chave (Z/J usam screen/location/crypto).
+    // WebViewResolver carrega o embed real e intercepta o .m3u8 montado.
+    private suspend fun resolveUpnViaWebView(
+        upnUrl: String,
+        referer: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        return try {
+            val intercept = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""")
+            val resp = app.get(
+                upnUrl,
+                headers = mapOf("User-Agent" to USER_AGENT, "Referer" to referer),
+                interceptor = WebViewResolver(intercept, timeout = 25000L)
+            )
+            val html = try { resp.text } catch (_: Throwable) { "" }
+            val found = mutableSetOf<String>()
+            intercept.findAll(html).forEach { found.add(it.value) }
+            intercept.find(resp.url)?.let { found.add(it.value) }
+            for (m3u8 in found) {
+                if (m3u8.contains("googlesyndication") || m3u8.contains("morphify")) continue
+                callback.invoke(
+                    newExtractorLink(
+                        source = "UPN",
+                        name = "UPN (HLS)",
+                        url = m3u8,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = upnUrl
+                        this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to upnUrl)
+                        this.quality = Qualities.P1080.value
+                    }
+                )
+            }
+            found.isNotEmpty()
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private data class GleamPlayDataOld(val dummy: String = "")
+
     data class GleamPlayData(
         @JsonProperty("source") val source: String? = null,
         @JsonProperty("title") val title: String? = null,
@@ -641,20 +796,34 @@ class CineVision : MainAPI() {
             } catch (_: Exception) {}
         }
 
-        // 3. Resolução Especial: VidSrc (v150: +vidsrc.sh, destino do 301 de vidsrcme.su)
-        if (streamOrEmbedUrl.contains("vidsrcme.su") || streamOrEmbedUrl.contains("vidsrc.sh")) {
-            val vidsrcMe = streamOrEmbedUrl.replace("vidsrcme.su", "vidsrc.me").replace("vidsrc.sh", "vidsrc.me")
-            val vidsrcTo = streamOrEmbedUrl.replace("vidsrcme.su", "vidsrc.to").replace("vidsrc.sh", "vidsrc.to")
+        // 3. Resolução Especial: VidSrc Gate (v151: HTTP-puro, 3x HLS comprovado
+        // no lab; vidsrc.sh -> cloudorchestranova -> data.vidsrc.sh stream_urls)
+        if (streamOrEmbedUrl.contains("vidsrcme.su") || streamOrEmbedUrl.contains("vidsrc.sh")
+            || streamOrEmbedUrl.contains("cloudorchestranova.com")
+        ) {
             try {
-                if (loadExtractor(vidsrcMe, referer, subtitleCallback, callback) ||
-                    loadExtractor(vidsrcTo, referer, subtitleCallback, callback)) {
+                if (resolveVidSrcGate(streamOrEmbedUrl, referer, callback)) {
+                    return true
+                }
+            } catch (_: Exception) {}
+            // fallback legado vidsrc.me/to via extrator nativo
+            val legacy = streamOrEmbedUrl.replace("vidsrcme.su", "vidsrc.me").replace("vidsrc.sh", "vidsrc.me")
+            try {
+                if (loadExtractor(legacy, referer, subtitleCallback, callback)) {
                     success = true
                 }
             } catch (_: Exception) {}
         }
 
-        // 4. Resolução Especial: Streamwish / EmbedPlay (Descarta se expirado/deletado)
+        // 4. Resolução Especial: Streamwish / EmbedPlay / Byse / UPN (v151)
         if (streamOrEmbedUrl.contains("embedplaybyse.top")) {
+            // v151: Byse é SPA "Byse Frontend" — /e/ e /d/ são shell vazio, API
+            // exige JS. WebView carrega o embed e intercepta o HLS montado.
+            try {
+                if (resolveUpnViaWebView(streamOrEmbedUrl, referer, callback)) {
+                    return true
+                }
+            } catch (_: Exception) {}
             val code = Regex("""/e/([a-zA-Z0-9]+)""").find(streamOrEmbedUrl)?.groupValues?.getOrNull(1)
             if (!code.isNullOrBlank()) {
                 val swUrl = "https://streamwish.to/e/$code"
@@ -664,6 +833,15 @@ class CineVision : MainAPI() {
                     }
                 } catch (_: Exception) {}
             }
+        }
+
+        // 4b. UPN dedicado (v151: player Vite com AES-CBC via WebCrypto)
+        if (streamOrEmbedUrl.contains("embedplayapiupn.") || streamOrEmbedUrl.contains("upns.xyz")) {
+            try {
+                if (resolveUpnViaWebView(streamOrEmbedUrl, referer, callback)) {
+                    return true
+                }
+            } catch (_: Exception) {}
         }
 
         // 5. Tenta extratores nativos gerais do CloudStream
