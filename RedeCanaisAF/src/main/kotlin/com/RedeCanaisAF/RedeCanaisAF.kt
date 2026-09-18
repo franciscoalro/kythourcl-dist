@@ -60,7 +60,10 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 281
+        const val BUILD_VERSION = 282
+        // v282 MANUAL-FIRST: WebView 100% visível/tocável + toques sintéticos
+        // DESLIGADOS + orçamento 180s. Laboratório provou que só humano real
+        // com IP residencial passa no Turnstile.
         // v281: failover .af→.pk também em falha de REDE/DNS (antes só em ban).
         // v280: diagnóstico de home vazia ([HOME_DIAG] title/htmlLen/challenge/
         // clearance + contagens por seletor). Só loga — sem mudança de comportamento.

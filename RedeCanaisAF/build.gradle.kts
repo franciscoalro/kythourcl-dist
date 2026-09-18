@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v281: failover .af→.pk também em falha de rede/DNS (antes só em ban)
+// v282 MANUAL-FIRST: WebView visível/tocável, sem toques sintéticos, orçamento 180s
 cloudstream {
-    version = 281
+    version = 282
 }

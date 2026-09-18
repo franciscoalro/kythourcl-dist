@@ -37,6 +37,10 @@ object CloudflareSolver {
     private val catalogMutex = kotlinx.coroutines.sync.Mutex()
     private const val TAG = "RedeCanaisAF-Trace"
     private const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/AP1A.240505.005) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Mobile Safari/537.36"
+    // v282 MANUAL-FIRST: toques sintéticos desligados — só humano real passa.
+    // false = poll só observa (usuário toca com o dedo na WebView visível).
+    // true = reativa tryTapTurnstile (queima score; só para teste em laboratório).
+    @Volatile var MANUAL_TAP_ENABLED = false
     // v158: static.cloudflareinsights.com e acscdn.com REMOVIDOS — são infraestrutura
     // Cloudflare. Bloqueá-los impede o Turnstile managed de injetar o iframe (beacon.min.js
     // é sinal de verificação). emptyResource() retornava 200/0-bytes silenciosamente.
@@ -1382,9 +1386,14 @@ object CloudflareSolver {
                     val cooldown = 3200L
                     // v237: só toca no modo checkbox (widget real). No managed/unknown
                     // os toques são inúteis e queimam o IP — apenas aguarda.
+                    // v282: toques SINTÉTICOS DESLIGADOS por padrão — o laboratório
+                    // provou que queimam score sem resolver (clearance emitido e
+                    // invalidado em loop). Só o fallback de TECLADO permanece
+                    // (acessibilidade, sem custo de score). O usuário toca com o
+                    // dedo na WebView visível.
                     if (mode != "checkbox") {
                         if (pollAttempts % 10 == 0) Log.d(TAG, "[CF] sem widget (mode=$mode) — sem toques, só aguardando")
-                    } else if (pollAttempts >= 3 && (now - lastTurnstileTapAt >= cooldown)) {
+                    } else if (MANUAL_TAP_ENABLED && pollAttempts >= 3 && (now - lastTurnstileTapAt >= cooldown)) {
                         tryTapTurnstile(cv, "poll_$pollAttempts")
                         // P0-3: se o probe só devolve fallback calibrado (widget não
                         // monta — rect 0x0), o toque por coordenada não atinge nada;
@@ -1392,6 +1401,8 @@ object CloudflareSolver {
                         if (lastTapType == "iframe_rect") {
                             tryKeyboardActivate(cv, "poll_${pollAttempts}_calibrated")
                         }
+                    } else if (pollAttempts % 10 == 0) {
+                        Log.i(TAG, "[CF] modo MANUAL — toque no checkbox com o dedo (toques automáticos desligados)")
                     }
                 }
 
@@ -1458,15 +1469,17 @@ object CloudflareSolver {
                 val rootLayout = activity.findViewById<ViewGroup>(android.R.id.content)
 
                 val wv = WebView(activity).apply {
-                    // v275: INVISÍVEL de verdade — VISIBLE MATCH_PARENT alpha 1.0
-                    // pintava o challenge POR CIMA da UI (pisca a cada redirect).
-                    // alpha 0.01 + HARDWARE = viewport real p/ Turnstile (cTplV:5
-                    // exige escala válida) mas pixels imperceptíveis. Mesmo padrão
-                    // do WebViewStreamProxy (linha ~178). TOQUES SINTÉTICOS
-                    // (dispatchTouchEvent) NÃO precisam de visibilidade real —
-                    // o Turnstile valida coordenadas, não pixels na tela.
+                    // v282 MANUAL-FIRST: WebView 100% VISÍVEL e TOCÁVEL.
+                    // Diagnóstico do laboratório (Sim1/Sim2): toques sintéticos
+                    // (dispatchTouchEvent) e cliques CDP emitem cf_clearance mas o
+                    // edge invalida em loop sob IP de datacenter — só humano real
+                    // com IP residencial passa. Então: NADA de alpha 0.01, NADA de
+                    // toque sintético. O usuário VÊ o challenge e TOCA no checkbox
+                    // com o dedo; o poll só observa e captura o HTML quando o
+                    // conteúdo real carregar. Teclado TAB+Espaço mantido como
+                    // acessibilidade (não queima score).
                     visibility = android.view.View.VISIBLE
-                    alpha = 0.01f
+                    alpha = 1.0f
                     setBackgroundColor(0x00000000)
                     setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
                     isFocusable = true
@@ -1698,7 +1711,9 @@ object CloudflareSolver {
             // v237: watchdog absoluto — mesmo que o poll trave sem completar o
             // deferred, a WebView é destruída no timeout (evita WebViews órfãs
             // acumulando e matando o app por OOM após vários ciclos).
-            val budget = timeoutMs.coerceAtMost(90000L)
+            // v282: orçamento manual 180s — humano lê + toca + redirect leva
+            // mais que 60s; poll limite interno (180 tentativas) continua valendo.
+            val budget = timeoutMs.coerceAtMost(180000L)
             Log.i(TAG, "[CF] orçamento interactive=${budget}ms fails=$consecutiveSolverFails url=$url")
             withTimeoutOrNull(budget) { htmlCaptureDone.await() }
         } finally {
