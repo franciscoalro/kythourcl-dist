@@ -42,10 +42,10 @@
         "name": "NetCine"
     },
     {
-        "fileHash": "sha256-36f95fe6e195f4ed47bb02e70e17c8cbec01500c93da48fb6e9e0b9ec97b3a9a",
+        "fileHash": "sha256-ca0a1426ab89bb3ea49d9b084ee4d5cbd2cd0265988460bac4664df7d8aaafcd",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 23442,
+        "fileSize": 26350,
         "status": 3,
         "authors": [
             "franciscoalro"
