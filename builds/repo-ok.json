@@ -3,6 +3,6 @@
   "description": "Plugins Kythour \u2014 AnimeFire v151 (espelhos .one/.plus/.io), NetCine v150 (netcineso.lat) e demais",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@51e4198074636f3b9f75bec499bd69d863288bc0/builds/plugins.json"
+    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@4b737f2af7453ff422f2f85997017f88a785dc55/builds/plugins.json"
   ]
 }
