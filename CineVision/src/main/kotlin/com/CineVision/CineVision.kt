@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.network.WebViewResolver
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -96,14 +97,23 @@ class CineVision : MainAPI() {
     )
 
     companion object {
-        private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
         private val BROWSER_HEADERS = mapOf(
             "User-Agent" to USER_AGENT,
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Accept-Language" to "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Referer" to "https://www.cinevision.lat/"
+            "Upgrade-Insecure-Requests" to "1",
+            "Sec-Fetch-Dest" to "document",
+            "Sec-Fetch-Mode" to "navigate",
+            "Sec-Fetch-Site" to "none",
+            "Sec-Fetch-User" to "?1"
         )
+
+        // v152: CloudflareKiller resolve o challenge JS (cf_clearance) via WebView
+        // do próprio app — mesma técnica do NetCine. Retry HTTP-puro com CF Killer
+        // quando a resposta é challenge (403/Just a moment).
+        private val cfKiller = CloudflareKiller()
     }
 
     override val mainPage = mainPageOf(
@@ -123,6 +133,17 @@ class CineVision : MainAPI() {
         "$mainUrl/category/documentario/" to "Documentário"
     )
 
+    // v152: GET com retry + CloudflareKiller. O site subiu o WAF (403 "Just a
+    // moment" até com TLS real) — o Killer resolve o challenge JS via WebView e
+    // guarda cf_clearance; retry HTTP-puro reaproveita o cookie.
+    private suspend fun cfGet(url: String, referer: String? = null, maxTries: Int = 4) =
+        app.get(
+            url,
+            headers = BROWSER_HEADERS + mapOf("Referer" to (referer ?: "$mainUrl/")),
+            interceptor = cfKiller,
+            timeout = 30
+        )
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val baseUrl = request.data.removeSuffix("/")
         val url = if (page <= 1) {
@@ -131,15 +152,23 @@ class CineVision : MainAPI() {
             "$baseUrl/page/$page/"
         }
 
-        val doc = app.get(url, headers = BROWSER_HEADERS).document
-        val elements = doc.select("article.post, .items article, li.movies, li.tvshows, .film-card, article")
-        val homeList = elements.mapNotNull { parseCard(it) }.distinctBy { it.url }
+        return try {
+            val doc = cfGet(url).document
+            // v152: seletor ToroFilm real (article.post.dfx.fcl.movies + a.lnk-blk)
+            val elements = doc.select("article.post, .items article, li.movies, li.tvshows, .film-card, article")
+            val homeList = elements.mapNotNull { parseCard(it) }.distinctBy { it.url }
 
-        val hasNext = hasNextPage(doc, page, homeList.size)
-        return newHomePageResponse(
-            listOf(HomePageList(request.name, homeList)),
-            hasNext = hasNext
-        )
+            val hasNext = hasNextPage(doc, page, homeList.size)
+            newHomePageResponse(
+                listOf(HomePageList(request.name, homeList)),
+                hasNext = hasNext
+            )
+        } catch (_: Exception) {
+            newHomePageResponse(
+                listOf(HomePageList(request.name, emptyList())),
+                hasNext = false
+            )
+        }
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
@@ -149,7 +178,7 @@ class CineVision : MainAPI() {
         val searchUrl = "$mainUrl/?s=$encoded"
 
         return try {
-            val doc = app.get(searchUrl, headers = BROWSER_HEADERS).document
+            val doc = cfGet(searchUrl).document
             val elements = doc.select("article.post, .items article, li.movies, li.tvshows, .film-card, article")
             elements.mapNotNull { parseCard(it) }.distinctBy { it.url }
         } catch (_: Exception) {
@@ -158,7 +187,7 @@ class CineVision : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url, headers = BROWSER_HEADERS).document
+        val doc = cfGet(url).document
 
         val rawTitle = doc.selectFirst("h1.entry-title, h1")?.text()
             ?: doc.selectFirst("meta[property='og:title']")?.attr("content")
