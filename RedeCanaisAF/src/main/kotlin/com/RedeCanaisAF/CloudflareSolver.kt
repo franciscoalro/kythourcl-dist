@@ -239,7 +239,47 @@ object CloudflareSolver {
         return try { File(ctx.filesDir, DISK_HTML_FILE) } catch (_: Throwable) { null }
     }
 
-    fun cleanHtmlForCache(html: String): String = html
+    fun cleanHtmlForCache(html: String): String {
+        // v284: slim REAL — o log do usuário provou que o cache de disco SEMPRE
+        // rejeitava (4.3MB > cap 600KB → "[CF_DISK] nada para persistir" em todo
+        // boot → prewarm 0/6 → 1 WebView visível por categoria, página por página).
+        // Mantém: <head> enxuto (title/meta/og:) + #pm-grid + paginação + entry-title
+        // + blocos de player (rcPreloadPlayer/server.php/jwplayer/<video>). Some:
+        // <script>, <style>, <noscript>, <iframe>, <link>, beacon, header/footer/nav.
+        // 4.3MB → ~300-500KB: cabe no disco (TTL 12h) e a home abre instantânea.
+        if (html.isBlank() || html.length < 600_000) return html
+        return try {
+            val doc = org.jsoup.Jsoup.parse(html)
+            doc.select("script, style, noscript, iframe, link[rel=stylesheet], " +
+                "link[rel=preload], link[rel=prefetch], header, footer, nav, " +
+                ".ads, .advertisement, #beacon, cloudflare-app").remove()
+            doc.select("img").forEach { img ->
+                for (a in listOf("onload", "onerror", "onclick", "srcset", "sizes")) img.removeAttr(a)
+                val echo = img.attr("data-echo"); if (echo.isBlank()) {
+                    val ds = img.attr("data-src"); if (ds.isNotBlank()) img.attr("src", ds)
+                }
+            }
+            // remove comentários HTML (o Melody injeta comentários longos)
+            doc.select("*").forEach { el ->
+                val it = el.childNodes().iterator()
+                while (it.hasNext()) {
+                    val n = it.next()
+                    if (n.nodeName() == "#comment") it.remove()
+                }
+            }
+            val slim = doc.html()
+            if (slim.length < html.length && !isChallengeContent(slim) &&
+                (slim.contains("pm-grid") || slim.contains("pm-li-video") ||
+                    slim.contains("entry-title") || slim.contains("server.php") ||
+                    slim.contains("rcPreloadPlayer") || slim.contains("<video"))) {
+                android.util.Log.i(TAG, "[SLIM] ${html.length} → ${slim.length} bytes")
+                slim
+            } else html
+        } catch (e: Throwable) {
+            android.util.Log.w(TAG, "[SLIM] falhou: ${e.message} — mantendo original")
+            html
+        }
+    }
 
     // v225-stealth: headers indetectáveis nivel browser real (Sec-CH-UA, Sec-Fetch-*, Accept com q-values)
     internal fun stealthHeaders(referer: String): MutableMap<String, String> {
@@ -283,65 +323,95 @@ object CloudflareSolver {
         }
     }
 
-    suspend fun tryFastWebViewFetch(url: String, timeoutMs: Long = 6000L): String? {
+    // v284: HTTP PURO dentro do Chromium. fetch() no helper WebView INVISÍVEL
+    // (GONE 1x1, nunca navega, nunca repinta) — mesmo TLS/JA3, mesmos cookies e
+    // mesma sessão que resolveu o challenge. Sem WebView visível, sem pisca,
+    // ~1-2s por página. Paralelizável via coroutines (1 fetch por vez no helper,
+    // mutex fetchMutex; chamadas concorrentes entram em fila, não abrem WebViews).
+    private val fetchMutex = Mutex()
+
+    // v284: fetch de UMA url via helper invisível. Retorna HTML limpo ou null.
+    suspend fun fetchViaHelper(url: String, timeoutMs: Long = 15000L): String? {
         val activity = CommonActivity.activity ?: return null
         if (activity.isFinishing || activity.isDestroyed) return null
-
-        val deferred = CompletableDeferred<String?>()
-        pendingHtmlFetches[url] = deferred
-
-        withContext(Dispatchers.Main) {
-            try {
-                LocalImageProxy.ensureHelperWebView(activity)
-                val wv = LocalImageProxy.helperWebView
-                if (wv == null) {
-                    deferred.complete(null)
-                    pendingHtmlFetches.remove(url)
-                    return@withContext
-                }
-
-                val js = """(async () => {
-                    try {
-                        const targetUrl = ${org.json.JSONObject.quote(url)};
-                        const r = await fetch(targetUrl, { credentials: 'include' });
-                        if (r.ok) {
-                            const t = await r.text();
-                            const isChal = t.includes('challenge-platform') || 
-                                           t.includes('Just a moment') || 
-                                           t.includes('Ray ID:') || 
-                                           t.includes('id="challenge-form"') ||
-                                           t.includes('Attention Required');
-                            const hasContent = t.includes('pm-video') || 
-                                               t.includes('pm-li-video') || 
-                                               t.includes('entry-title') || 
-                                               t.includes('server.php') || 
-                                               t.includes('rcPreloadPlayer') || 
-                                               t.includes('player') || 
-                                               t.includes('lista-filmes') ||
-                                               t.includes('iframe');
-                            if (t.length > 500 && !isChal && hasContent) {
-                                if (window.HtmlBridge) {
-                                    window.HtmlBridge.postHtml(targetUrl, t);
-                                    return;
-                                }
-                            }
-                        }
-                    } catch(e) {}
-                    if (window.HtmlBridge) {
-                        window.HtmlBridge.postHtml(${org.json.JSONObject.quote(url)}, '');
-                    }
-                })();""".trimIndent()
-                wv.evaluateJavascript(js, null)
-            } catch (e: Throwable) {
-                deferred.complete(null)
-                pendingHtmlFetches.remove(url)
-            }
-        }
-
-        return withTimeoutOrNull(timeoutMs) {
-            deferred.await()
+        return fetchMutex.withLock {
+            fetchViaHelperLocked(url, timeoutMs)
         }
     }
+
+    private suspend fun fetchViaHelperLocked(url: String, timeoutMs: Long): String? {
+        return try {
+            withTimeoutOrNull(timeoutMs) {
+                suspendCancellableFetch(url)
+            }
+        } catch (e: Throwable) {
+            Log.d(TAG, "[FETCH] err url=$url ${e.message}")
+            null
+        }
+    }
+
+    private suspend fun suspendCancellableFetch(url: String): String? {
+        val deferred = CompletableDeferred<String?>()
+        pendingHtmlFetches[url]?.let { runCatching { it.cancel() } }
+        pendingHtmlFetches[url] = deferred
+        return try {
+            withContext(Dispatchers.Main) {
+                try {
+                    val activity = CommonActivity.activity
+                    if (activity == null || activity.isFinishing || activity.isDestroyed) {
+                        deferred.complete(null)
+                        pendingHtmlFetches.remove(url)
+                        return@withContext
+                    }
+                    LocalImageProxy.ensureHelperWebView(activity)
+                    val wv = LocalImageProxy.helperWebView
+                    if (wv == null) {
+                        deferred.complete(null)
+                        pendingHtmlFetches.remove(url)
+                        return@withContext
+                    }
+                    // v284: fetch puro — NÃO navega a view (sem loadUrl), só HTTP GET
+                    // com credentials:include na sessão autenticada do Chromium.
+                    val js = """(async () => {
+                        try {
+                            const targetUrl = ${org.json.JSONObject.quote(url)};
+                            const r = await fetch(targetUrl, { credentials: 'include', redirect: 'follow' });
+                            if (r.ok) {
+                                const t = await r.text();
+                                if (window.HtmlBridge) { window.HtmlBridge.postHtml(targetUrl, t); return; }
+                            }
+                        } catch(e) {}
+                        if (window.HtmlBridge) { window.HtmlBridge.postHtml(${org.json.JSONObject.quote(url)}, ''); }
+                    })();""".trimIndent()
+                    wv.evaluateJavascript(js, null)
+                } catch (e: Throwable) {
+                    deferred.complete(null)
+                    pendingHtmlFetches.remove(url)
+                }
+            }
+            val raw = deferred.await()
+            if (raw.isNullOrBlank() || isChallengeContent(raw)) {
+                if (!raw.isNullOrBlank()) Log.d(TAG, "[FETCH] challenge url=$url len=${raw.length}")
+                null
+            } else {
+                val clean = cleanHtmlForCache(raw)
+                capturedHtmlByUrl[url] = clean
+                diskHtmlTsByUrl[url] = System.currentTimeMillis()
+                Log.i(TAG, "[FETCH] OK url=$url len=${clean.length}")
+                clean
+            }
+        } catch (e: Throwable) {
+            pendingHtmlFetches.remove(url)
+            Log.d(TAG, "[FETCH] cancel/err url=$url ${e.message}")
+            null
+        }
+    }
+
+    // v284: legado removido — corpo antigo do tryFastWebViewFetch substituído
+    // por fetchViaHelper (mutex + sem validação de conteúdo dentro do JS).
+    @Deprecated("Use fetchViaHelper (HTTP puro invisível, sem navegação)")
+    suspend fun tryFastWebViewFetch(url: String, timeoutMs: Long = 6000L): String? =
+        fetchViaHelper(url, timeoutMs)
 
     suspend fun tryFastHttpGet(url: String, cookies: String): String? {
         return withContext(Dispatchers.IO) {
@@ -381,27 +451,29 @@ object CloudflareSolver {
         }
     }
 
-    // v275: prefetch do catálogo via OkHttp + cookies (Dispatchers.IO), SEM
-    // WebView — o fetch() via evaluateJavascript navegava a view visível e
-    // repintava a tela a cada URL (pisca). Chamado 1x por ciclo após o solve.
+    // v284: prefetch do catálogo via fetch() no helper INVISÍVEL (HTTP puro
+    // dentro do Chromium — mesmo TLS/sessão que resolveu). O OkHttp tomava 403
+    // em TODAS as 5 URLs (log do usuário: FAST_GET_MISS code=403 len~3.4KB) por
+    // JA3 diferente — prefetch via OkHttp nunca funcionou. Chamado 1x por ciclo
+    // após o solve, sequencial no fetchMutex, sem WebView visível, sem pisca.
     private suspend fun prefetchCatalogViaHttp(solvedUrl: String) {
         try {
             val pending = catalogUrls.filter { it != solvedUrl && !capturedHtmlByUrl.containsKey(it) }
             if (pending.isEmpty()) return
             val cookies = runCatching { CookieManager.getInstance().getCookie(solvedUrl) }.getOrNull().orEmpty()
             if (!hasValidClearance(cookies)) return
-            Log.i(TAG, "[CF_PREFETCH_HTTP] ${pending.size} URLs via OkHttp (sem WebView)")
+            Log.i(TAG, "[CF_PREFETCH] ${pending.size} URLs via fetch invisível (HTTP puro Chromium)")
             for (u in pending) {
-                val html = tryFastHttpGet(u, cookies)
-                if (!html.isNullOrBlank() && !isChallengeContent(html) && html.length > 1000) {
-                    capturedHtmlByUrl[u] = html
-                    diskHtmlTsByUrl[u] = System.currentTimeMillis()
-                    Log.i(TAG, "[CF_PREFETCH_HTTP] OK len=${html.length} url=$u")
+                val html = fetchViaHelper(u, timeoutMs = 15000L)
+                if (!html.isNullOrBlank()) {
+                    Log.i(TAG, "[CF_PREFETCH] OK len=${html.length} url=$u")
+                } else {
+                    Log.d(TAG, "[CF_PREFETCH] miss url=$u")
                 }
             }
             runCatching { persistCapturedHtmlToDisk() }
         } catch (e: Throwable) {
-            Log.w(TAG, "[CF_PREFETCH_HTTP] falhou: ${e.message}")
+            Log.w(TAG, "[CF_PREFETCH] falhou: ${e.message}")
         }
     }
 
@@ -964,13 +1036,17 @@ object CloudflareSolver {
             }
         }
 
-        // Fast-path 1: se já temos cf_clearance no CookieManager, tenta fetch direto no WebView autenticado
+        // Fast-path 1: se já temos cf_clearance no CookieManager, fetch HTTP PURO
+        // no helper invisível (v284) — sem WebView visível, sem pisca, ~1-2s.
         val existingCookies = runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull().orEmpty()
         if (hasValidClearance(existingCookies)) {
-            val fast = tryFastWebViewFetch(url)
+            val fast = fetchViaHelper(url)
             if (!fast.isNullOrBlank() && !isChallengeContent(fast) && (isPlayerPage(fast) || fast.contains("pm-video") || fast.contains("entry-title") || fast.contains("iframe") || fast.contains("pm-li-video"))) {
-                Log.i(TAG, "[CF] Fast WebView Fetch teve sucesso para $url (len=${fast.length})")
+                Log.i(TAG, "[CF] Fast fetch invisível OK para $url (len=${fast.length})")
                 capturedHtmlByUrl[url] = fast
+                // v284: prefetch das irmãs no mesmo motor invisível (paralelo depois
+                // do 1º hit — as 6 categorias sem abrir 1 WebView visível sequer).
+                prefetchCatalogViaHttp(url)
                 return fast
             }
         }

@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v283: 402 reaproveita HTML da sessão (fim do loop resolve→402→invalida)
+// v284 HTTP PURO: fetch invisível + prefetch Chromium + slim p/ disco 12h
 cloudstream {
-    version = 283
+    version = 284
 }

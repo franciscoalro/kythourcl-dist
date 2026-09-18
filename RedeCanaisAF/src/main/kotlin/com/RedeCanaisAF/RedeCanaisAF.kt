@@ -60,7 +60,12 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 283
+        const val BUILD_VERSION = 284
+        // v284 HTTP PURO: fetch invisível (helper GONE, sem navegação/pisca) como
+        // fast-path ANTES do interactive; prefetch das 5 irmãs no mesmo motor
+        // (OkHttp tomava 403 em todas por JA3); slim real 4.3MB→~400KB p/ disco
+        // 12h (prewarm 6/6, home instantânea). WebView visível só se clearance
+        // morrer de verdade.
         // v283: 402 reaproveita HTML da sessão (não invalida clearance em loop).
         // Log do usuário provou: solver captura 4.3MB mas OkHttp toma 402.
         // v282 MANUAL-FIRST: WebView 100% visível/tocável + toques sintéticos
