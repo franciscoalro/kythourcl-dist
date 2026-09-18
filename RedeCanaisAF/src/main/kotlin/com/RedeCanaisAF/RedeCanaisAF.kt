@@ -60,7 +60,9 @@ class RedeCanaisAF : MainAPI() {
     }
 
     companion object {
-        const val BUILD_VERSION = 282
+        const val BUILD_VERSION = 283
+        // v283: 402 reaproveita HTML da sessão (não invalida clearance em loop).
+        // Log do usuário provou: solver captura 4.3MB mas OkHttp toma 402.
         // v282 MANUAL-FIRST: WebView 100% visível/tocável + toques sintéticos
         // DESLIGADOS + orçamento 180s. Laboratório provou que só humano real
         // com IP residencial passa no Turnstile.
@@ -218,12 +220,16 @@ class RedeCanaisAF : MainAPI() {
 
         val code = res?.code ?: 0
         val body = res?.text.orEmpty()
-        // v274: 402 com cf_clearance = Precursor rebaixou a sessão (cookie presente mas
-        // inválido — provado via Patchright: clearance emitido mas edge re-desafia).
-        // Invalida e cai no solver em vez de retornar falha total.
+        // v283: 402 com cf_clearance = edge rebaixou o OkHttp MAS o WebView da
+        // sessão pode ter o HTML real (provado no log do usuário: solver capturou
+        // 4.3MB e o OkHttp tomou 402 nos mesmos cookies). NÃO invalida mais o
+        // clearance (isso gerava loop resolve→402→invalida→resolve). Marca o
+        // 402 e segue: o solver reaproveita o HTML da sessão; só invalida se
+        // nem o solver tiver HTML (caso raro = clearance realmente morto).
+        var edgeDowngraded402 = false
         if (code == 402) {
-            Log.w(TAG, "[REQ#$reqId] 402 com possível clearance rebaixado — invalidando e re-resolvendo")
-            CloudflareSolver.invalidateClearance(fixedUrl)
+            edgeDowngraded402 = true
+            Log.w(TAG, "[REQ#$reqId] 402 com clearance — edge rebaixou OkHttp; tentando HTML da sessão antes de invalidar")
         }
         // P0-1: detector via header. REFINO (TS NET-01, 2026-09-11): o CF envia
         // `cf-mitigated: challenge` em TODA resposta, inclusive 200 (robots.txt
@@ -254,6 +260,19 @@ class RedeCanaisAF : MainAPI() {
             Log.i(TAG, "[REQ#$reqId] Cloudflare resolvido via WebView! len=${solverHtml.length}")
             logCookieState("AFTER_SOLVER", fixedUrl, reqId)
             return Jsoup.parse(solverHtml, fixedUrl)
+        }
+        // v283: solver sem HTML novo. Se veio de 402 (edge rebaixou OkHttp) e há
+        // HTML de sessão/disco, usa ele em vez de falhar. Só invalida o clearance
+        // quando NÃO há HTML algum (clearance realmente morto).
+        if (edgeDowngraded402) {
+            val sessionHtml = CloudflareSolver.capturedHtml(fixedUrl)
+                ?: CloudflareSolver.getDiskCachedHtml(fixedUrl)
+            if (!sessionHtml.isNullOrBlank() && !CloudflareSolver.isChallengeContent(sessionHtml)) {
+                Log.i(TAG, "[REQ#$reqId] 402 contornado com HTML da sessão! len=${sessionHtml.length}")
+                return Jsoup.parse(sessionHtml, fixedUrl)
+            }
+            Log.w(TAG, "[REQ#$reqId] 402 sem HTML de sessão — invalidando clearance (morto de verdade)")
+            CloudflareSolver.invalidateClearance(fixedUrl)
         }
         // v229: solve() retornou "" mas o interactive armazenou o HTML do player na RAM
         // (o validador antigo descartava antes de retornar — corrida já corrigida no

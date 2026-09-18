@@ -1,6 +1,6 @@
 // Minimal build file
 
-// v282 MANUAL-FIRST: WebView visível/tocável, sem toques sintéticos, orçamento 180s
+// v283: 402 reaproveita HTML da sessão (fim do loop resolve→402→invalida)
 cloudstream {
-    version = 282
+    version = 283
 }
