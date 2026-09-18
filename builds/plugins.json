@@ -8,23 +8,23 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 149,
+        "version": 153,
         "internalName": "AnimeFire",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/AnimeFire.cs3",
+        "url": "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@4bb13da5ada12816dbb45675398f7fcf4386c786/builds/AnimeFire.cs3",
         "name": "AnimeFire"
     },
     {
-        "fileHash": "sha256-b93a8da2f3ad0861fe125dd73e3198568f43093075890aac5f8621f8be34cd44",
+        "fileHash": "sha256-c61282652c74aa75ac09e8f9d814e1183fd183e758f2e40c6837b48e117fa4f2",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 38478,
+        "fileSize": 41867,
         "status": 3,
         "authors": [
             "franciscoalro"
         ],
-        "version": 149,
+        "version": 150,
         "internalName": "CineVision",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/CineVision.cs3",
+        "url": "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@4bb13da5ada12816dbb45675398f7fcf4386c786/builds/CineVision.cs3",
         "name": "CineVision"
     },
     {
@@ -38,7 +38,7 @@
         ],
         "version": 149,
         "internalName": "NetCine",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/NetCine.cs3",
+        "url": "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@4bb13da5ada12816dbb45675398f7fcf4386c786/builds/NetCine.cs3",
         "name": "NetCine"
     },
     {
@@ -52,7 +52,7 @@
         ],
         "version": 149,
         "internalName": "Pobreflix",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/Pobreflix.cs3",
+        "url": "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@4bb13da5ada12816dbb45675398f7fcf4386c786/builds/Pobreflix.cs3",
         "name": "Pobreflix"
     },
     {
@@ -66,22 +66,8 @@
         ],
         "version": 149,
         "internalName": "RedeCanais",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/RedeCanais.cs3",
+        "url": "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@4bb13da5ada12816dbb45675398f7fcf4386c786/builds/RedeCanais.cs3",
         "name": "RedeCanais"
-    },
-    {
-        "fileHash": "sha256-a6ece4ac43e56f3703a356da275e21f56ef31f5434e99a17a30d43a61f634ee8",
-        "apiVersion": 1,
-        "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 187351,
-        "status": 3,
-        "authors": [
-            "franciscoalro"
-        ],
-        "version": 284,
-        "internalName": "RedeCanaisAF",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/RedeCanaisAF.cs3",
-        "name": "RedeCanaisAF"
     },
     {
         "fileHash": "sha256-bcfee67bb993083f18b34e97b49b400ffc91128ea25cc0bf1633955ff1cdbd29",
@@ -94,7 +80,7 @@
         ],
         "version": 149,
         "internalName": "TopAnimes",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/TopAnimes.cs3",
+        "url": "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@4bb13da5ada12816dbb45675398f7fcf4386c786/builds/TopAnimes.cs3",
         "name": "TopAnimes"
     }
 ]
