@@ -1,8 +1,8 @@
 {
   "name": "Kythour Repository",
-  "description": "Plugins Kythour \u2014 NOVO EmbedPlay v1, CineVision v155, Pobreflix v150, AnimeFire v153 e demais",
+  "description": "Plugins Kythour \u2014 EmbedPlay v2 (fix catalogo), CineVision v155, Pobreflix v150, AnimeFire v153 e demais",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@4eca2edb79349caeb67e16f94bff059cb21eaf36/builds/plugins.json"
+    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@84267cd93a4d5bcd3274bc5c7565144b06a33e8d/builds/plugins.json"
   ]
 }
