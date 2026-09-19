@@ -70,12 +70,19 @@ class EmbedPlay : MainAPI() {
     )
 
     private fun parseLibraryCard(element: Element, isSeriesSection: Boolean = false): SearchResponse? {
+        // v2: library usa link /embed/{tmdb} (data-tmdb só existe no suggest)
         val card = element.selectFirst(".movie-card") ?: element
-        val tmdb = card.attr("data-tmdb").takeIf { it.isNotBlank() } ?: return null
+        val tmdb = card.attr("data-tmdb").takeIf { it.isNotBlank() }
+            ?: card.selectFirst("a[href*='/embed/']")?.attr("href")
+                ?.let { Regex("""/embed/(\d+)""").find(it)?.groupValues?.getOrNull(1) }
+            ?: element.selectFirst("a[href*='/embed/']")?.attr("href")
+                ?.let { Regex("""/embed/(\d+)""").find(it)?.groupValues?.getOrNull(1) }
+            ?: return null
         val title = card.selectFirst("p.title")?.text()?.trim()?.substringBefore(" - ")?.trim()
+            ?: element.selectFirst("p.title")?.text()?.trim()?.substringBefore(" - ")?.trim()
             ?: return null
         if (title.isBlank()) return null
-        val poster = card.selectFirst(".poster-img")?.attr("data-bg-multi")
+        val poster = (card.selectFirst(".poster-img") ?: element.selectFirst(".poster-img"))?.attr("data-bg-multi")
             ?.let { Regex("""url\((https?://[^)]+)\)""").find(it)?.groupValues?.getOrNull(1) }
             ?.let { fixUrlNull(it) }
         val url = "$mainUrl/view/$tmdb"
