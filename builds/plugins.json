@@ -28,15 +28,15 @@
         "name": "CineVision"
     },
     {
-        "fileHash": "sha256-f8688bfad538399e77d7eabad0bc58a5940b252d9ca350c6d62a9bb99aae31f6",
+        "fileHash": "sha256-20c2a799c02da1fe1283dbc23bf1702be443f55155c593045a9d4828690f8c0c",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 24527,
+        "fileSize": 26931,
         "status": 3,
         "authors": [
             "franciscoalro"
         ],
-        "version": 3,
+        "version": 4,
         "internalName": "EmbedPlay",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/EmbedPlay.cs3",
         "name": "EmbedPlay"
