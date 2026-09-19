@@ -1,5 +1,5 @@
-// v4: capas c/ Referer (cinemaplay 403 sem) + VidSrc direto 1º + todos servers + WebView 15s
-// (v3 = bump version; v2 = fix catálogo via link /embed/{tmdb})
+// v5: VidSrc GATE HTTP-puro (igual CineVision v151/v155) — loadExtractor não resolve gate
+// (v4 = capas Referer + servers; v3 = bump version; v2 = fix catálogo)
 cloudstream {
-    version = 4
+    version = 5
 }
