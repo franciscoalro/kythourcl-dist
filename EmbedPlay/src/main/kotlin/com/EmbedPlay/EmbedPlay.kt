@@ -228,9 +228,11 @@ class EmbedPlay : MainAPI() {
                 timeout = 30
             ).text
             val movieCode = Regex("""data-movie-id="([^"]+)"""").find(embedHtml)?.groupValues?.getOrNull(1)
-            // v4: pega QUALQUER server válido (era só o 1º); tenta cada um até achar link
-            val serverIds = Regex("""class="server[^"]*"[^>]*data-id="([a-zA-Z0-9]+)"""")
-                .findAll(embedHtml).map { it.groupValues[1] }.distinct().toList()
+            // v8: servers .top agora são alfa (_default=grupo, nrN6D=server real);
+            // pega TODOS os data-id e pula _default (grupo, sempre erro "unknown error")
+            val serverIds = Regex("""data-id="([a-zA-Z0-9_]+)"""")
+                .findAll(embedHtml).map { it.groupValues[1] }.distinct()
+                .filter { it != "_default" }.toList()
             if (movieCode.isNullOrBlank() || serverIds.isEmpty()) {
                 // sem server .top mas com imdb: tenta o .one direto pelo padrão de URL
                 if (imdbId.isNotBlank()) {
@@ -471,7 +473,8 @@ class EmbedPlay : MainAPI() {
             }
             // 3. Byse -> espelho Streamwish (extrator nativo do app)
             if (videoUrl.contains("embedplaybyse.top")) {
-                val code = Regex("""/e/([a-zA-Z0-9]+)""").find(videoUrl)?.groupValues?.getOrNull(1)
+                // v8: code Byse pode ter - e _ (1mwapi8cwto7, 1xn1h1ntef3d)
+                val code = Regex("""/e/([a-zA-Z0-9_-]+)""").find(videoUrl)?.groupValues?.getOrNull(1)
                 if (!code.isNullOrBlank()) {
                     try {
                         if (loadExtractor("https://streamwish.to/e/$code", oneLink, subtitleCallback, callback)) {
@@ -557,7 +560,8 @@ class EmbedPlay : MainAPI() {
     private suspend fun resolveAbyssShell(playerUrl: String, referer: String): String? {
         return try {
             if (playerUrl.contains("abysscdn.com") || playerUrl.contains("abyssplayer.com")) return playerUrl
-            val slug = Regex("""[?&]v=([a-zA-Z0-9]+)""").find(playerUrl)?.groupValues?.getOrNull(1)
+            // v8: slugs Abyss novos têm - e _ (cPk-jXmMH); truncar em "cPk" dava 404
+            val slug = Regex("""[?&]v=([a-zA-Z0-9_-]+)""").find(playerUrl)?.groupValues?.getOrNull(1)
                 ?: return null
             "https://player.abyssplayer.com/$slug"
         } catch (_: Exception) {
