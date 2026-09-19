@@ -481,9 +481,10 @@ class EmbedPlay : MainAPI() {
                     } catch (_: Exception) {}
                 }
             }
-            // 4. Abyss REAL (abysscdn.com, SoTrym) via WebView — ÚNICO WebView do fluxo.
+            // 4. Abyss REAL (player.abyssplayer.com, SoTrym) via WebView — ÚNICO WebView do fluxo.
             // O shell embedplayabyss.top/player.html?v= é casca vazia (só monta iframe);
-            // resolve p/ https://abysscdn.com/?v={slug} antes, que é onde o SoTrym roda.
+            // resolve p/ https://player.abyssplayer.com/{slug} antes (log do aparelho
+            // prova que o .one já retorna esse domínio p/ filmes novos).
             if (videoUrl.contains("abyss") || videoUrl.contains("abysscdn")) {
                 try {
                     val real = resolveAbyssShell(videoUrl, oneLink) ?: videoUrl
@@ -548,15 +549,17 @@ class EmbedPlay : MainAPI() {
         }
     }
 
-    // Shell embedplayabyss.top/player.html?v={slug} -> https://abysscdn.com/?v={slug}.
+    // v7 (log aparelho): o .one agora retorna player.abyssplayer.com/{slug}
+    // (player real SoTrym, substitui embedplayabyss.top + abysscdn.com).
+    // Shell embedplayabyss.top/player.html?v={slug} -> player.abyssplayer.com/{slug}.
     // O shell é casca vazia (1.9KB, só monta o iframe via JS); o SoTrym que monta
-    // o HLS roda no abysscdn.com — é LÁ que o WebView precisa carregar.
+    // o HLS roda no player real — é LÁ que o WebView precisa carregar.
     private suspend fun resolveAbyssShell(playerUrl: String, referer: String): String? {
         return try {
-            if (playerUrl.contains("abysscdn.com")) return playerUrl
+            if (playerUrl.contains("abysscdn.com") || playerUrl.contains("abyssplayer.com")) return playerUrl
             val slug = Regex("""[?&]v=([a-zA-Z0-9]+)""").find(playerUrl)?.groupValues?.getOrNull(1)
                 ?: return null
-            "https://abysscdn.com/?v=$slug"
+            "https://player.abyssplayer.com/$slug"
         } catch (_: Exception) {
             null
         }
