@@ -133,10 +133,12 @@ class CineVision : MainAPI() {
         "$mainUrl/category/documentario/" to "Documentário"
     )
 
-    // v152: GET com retry + CloudflareKiller. O site subiu o WAF (403 "Just a
-    // moment" até com TLS real) — o Killer resolve o challenge JS via WebView e
-    // guarda cf_clearance; retry HTTP-puro reaproveita o cookie.
-    private suspend fun cfGet(url: String, referer: String? = null, maxTries: Int = 4) =
+    // v153: cfGet com 2 fases. Fase 1: HTTP puro (sem interceptor) — reaproveita
+    // cf_clearance em cache. Fase 2 (só se challenge): CloudflareKiller via
+    // WebView do app emite o cookie e o retry HTTP entrega o HTML.
+    // NÃO inverter: interceptor em todas as chamadas faz o WebView carregar a
+    // página de novo a cada request (lento) e o Turnstile nunca conclui a tempo.
+    private suspend fun cfGet(url: String, referer: String? = null, maxTries: Int = 2) =
         app.get(
             url,
             headers = BROWSER_HEADERS + mapOf("Referer" to (referer ?: "$mainUrl/")),
