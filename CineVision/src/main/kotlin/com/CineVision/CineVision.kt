@@ -114,23 +114,35 @@ class CineVision : MainAPI() {
         // do próprio app — mesma técnica do NetCine. Retry HTTP-puro com CF Killer
         // quando a resposta é challenge (403/Just a moment).
         private val cfKiller = CloudflareKiller()
+
+        // v154: catálogo via TMDB público (themovedb.org responde 200 direto, sem
+        // WAF). O cinevision.lat subiu para Turnstile INTERATIVO (checkbox que o
+        // WebView do app não resolve sozinho) — cf-mitigated: challenge em tudo.
+        // URLs TMDB: /movie, /movie/now-playing, /movie/top-rated, /tv (+?page=N),
+        // /genre/{id}-{slug}/movie, /search?query=, detalhe /movie/{id}-*.
+        private const val TMDB_BASE = "https://www.themoviedb.org"
+        private val TMDB_HEADERS = mapOf(
+            "User-Agent" to USER_AGENT,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language" to "pt-BR,pt;q=0.9,en;q=0.8",
+            "Referer" to "https://www.themoviedb.org/"
+        )
     }
 
     override val mainPage = mainPageOf(
-        "$mainUrl/filmes/" to "Filmes Recentes",
-        "$mainUrl/series/" to "Séries Atualizadas",
-        "$mainUrl/category/acao/" to "Ação",
-        "$mainUrl/category/animacao/" to "Animação & Animes",
-        "$mainUrl/category/aventura/" to "Aventura",
-        "$mainUrl/category/comedia/" to "Comédia",
-        "$mainUrl/category/crime/" to "Crime",
-        "$mainUrl/category/drama/" to "Drama",
-        "$mainUrl/category/ficcao-cientifica/" to "Ficção Científica",
-        "$mainUrl/category/terror/" to "Terror",
-        "$mainUrl/category/romance/" to "Romance",
-        "$mainUrl/category/sci-fi-fantasy/" to "Sci-Fi & Fantasia",
-        "$mainUrl/category/familia/" to "Família & Kids",
-        "$mainUrl/category/documentario/" to "Documentário"
+        "$TMDB_BASE/movie/now-playing?language=pt-BR" to "Em Cartaz",
+        "$TMDB_BASE/movie?language=pt-BR" to "Filmes Populares",
+        "$TMDB_BASE/movie/top-rated?language=pt-BR" to "Filmes Aclamados",
+        "$TMDB_BASE/tv?language=pt-BR" to "Séries Populares",
+        "$TMDB_BASE/tv/top-rated?language=pt-BR" to "Séries Aclamadas",
+        "$TMDB_BASE/genre/28-action/movie?language=pt-BR" to "Ação",
+        "$TMDB_BASE/genre/16-animation/movie?language=pt-BR" to "Animação",
+        "$TMDB_BASE/genre/35-comedy/movie?language=pt-BR" to "Comédia",
+        "$TMDB_BASE/genre/18-drama/movie?language=pt-BR" to "Drama",
+        "$TMDB_BASE/genre/27-horror/movie?language=pt-BR" to "Terror",
+        "$TMDB_BASE/genre/878-science-fiction/movie?language=pt-BR" to "Ficção Científica",
+        "$TMDB_BASE/genre/10759-action-adventure/tv?language=pt-BR" to "Ação & Aventura (Séries)",
+        "$TMDB_BASE/genre/16-animation/tv?language=pt-BR" to "Animação (Séries)"
     )
 
     // v153: cfGet com 2 fases. Fase 1: HTTP puro (sem interceptor) — reaproveita
@@ -147,20 +159,17 @@ class CineVision : MainAPI() {
         )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val baseUrl = request.data.removeSuffix("/")
-        val url = if (page <= 1) {
-            "$baseUrl/"
-        } else {
-            "$baseUrl/page/$page/"
-        }
+        // v154: catálogo TMDB (sem WAF). Paginação via ?page=N / &page=N.
+        val sep = if (request.data.contains("?")) "&" else "?"
+        val url = if (page <= 1) request.data else "${request.data}${sep}page=$page"
 
         return try {
-            val doc = cfGet(url).document
-            // v152: seletor ToroFilm real (article.post.dfx.fcl.movies + a.lnk-blk)
-            val elements = doc.select("article.post, .items article, li.movies, li.tvshows, .film-card, article")
-            val homeList = elements.mapNotNull { parseCard(it) }.distinctBy { it.url }
-
-            val hasNext = hasNextPage(doc, page, homeList.size)
+            val doc = app.get(url, headers = TMDB_HEADERS, timeout = 30).document
+            val homeList = doc.select("div#media-list a[href*='/movie/'], div#media-list a[href*='/tv/']")
+                .mapNotNull { parseTmdbCard(it) }
+                .distinctBy { it.url }
+            val hasNext = doc.selectFirst("a[href*='page=${page + 1}'], a.next, a[rel='next']") != null ||
+                    homeList.size >= 15
             newHomePageResponse(
                 listOf(HomePageList(request.name, homeList)),
                 hasNext = hasNext
@@ -173,22 +182,60 @@ class CineVision : MainAPI() {
         }
     }
 
+    // v154: card TMDB → detalhe TMDB como url de load() (slug /movie/{id}-*).
+    // O load() resolve o imdb_id via metadados e monta o painel-aso direto.
+    private fun parseTmdbCard(a: Element): SearchResponse? {
+        val href = a.attr("href").takeIf { it.isNotBlank() } ?: return null
+        if (!href.contains("/movie/") && !href.contains("/tv/")) return null
+        val card = a.parents().select("div[id]").firstOrNull { it.id().matches(Regex("[a-f0-9]{24}")) } ?: a.parent() ?: a
+        val img = a.selectFirst("img") ?: card.selectFirst("img")
+        val rawTitle = img?.attr("alt")?.trim().takeIf { !it.isNullOrBlank() }
+            ?: a.attr("title").trim().takeIf { it.isNotBlank() }
+            ?: return null
+        // alt TMDB = "Título [ano]" — limpa só o sufixo [ano]
+        val cleanTitle = rawTitle.replace(Regex("""\s*\[\d{4}\]\s*$"""), "").trim()
+        if (cleanTitle.isBlank()) return null
+        val poster = img?.let {
+            (it.attr("srcset").substringBefore(" 1x").substringBefore(",").trim()
+                .takeIf { s -> s.isNotBlank() } ?: it.attr("src").takeIf { s -> s.isNotBlank() })
+        }?.let { fixUrlNull(it) }
+        val fullUrl = if (href.startsWith("http")) href else "$TMDB_BASE$href"
+        val isSeries = href.contains("/tv/")
+
+        return if (isSeries) {
+            newTvSeriesSearchResponse(cleanTitle, fullUrl, TvType.TvSeries) {
+                this.posterUrl = poster
+            }
+        } else {
+            newMovieSearchResponse(cleanTitle, fullUrl, TvType.Movie) {
+                this.posterUrl = poster
+            }
+        }
+    }
+
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
 
     override suspend fun search(query: String): List<SearchResponse> {
+        // v154: busca TMDB SSR (sem WAF). Cards: div.media-card-list a[data-media-type].
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
-        val searchUrl = "$mainUrl/?s=$encoded"
-
         return try {
-            val doc = cfGet(searchUrl).document
-            val elements = doc.select("article.post, .items article, li.movies, li.tvshows, .film-card, article")
-            elements.mapNotNull { parseCard(it) }.distinctBy { it.url }
+            val doc = app.get("$TMDB_BASE/search?query=$encoded&language=pt-BR", headers = TMDB_HEADERS, timeout = 30).document
+            doc.select("div.media-card-list a[data-media-type], div#media-list a[href*='/movie/'], div#media-list a[href*='/tv/']")
+                .mapNotNull { el ->
+                    val href = el.attr("href")
+                    if (href.contains("/movie/") || href.contains("/tv/")) parseTmdbCard(el) else null
+                }.distinctBy { it.url }
         } catch (_: Exception) {
             emptyList()
         }
     }
 
     override suspend fun load(url: String): LoadResponse {
+        // v154: url TMDB (/movie/{id}-slug ou /tv/{id}-slug). Metadados + imdb_id
+        // vêm da página TMDB (sem WAF); playback monta painel-aso direto.
+        if (url.startsWith(TMDB_BASE)) {
+            return loadFromTmdb(url)
+        }
         val doc = cfGet(url).document
 
         val rawTitle = doc.selectFirst("h1.entry-title, h1")?.text()
@@ -246,6 +293,81 @@ class CineVision : MainAPI() {
             this.tags = tags
             this.year = year
             this.score = rating
+        }
+    }
+
+    // v154: load via TMDB — detalhe TMDB dá título/poster/sinopse/ano/gêneros;
+    // imdb_id sai dos links externos da página; payload carrega o imdb para o
+    // loadLinks montar https://www.painel-aso.sbs/filme/{imdb} sem passar pelo
+    // cinevision.lat (bloqueado por Turnstile interativo).
+    private suspend fun loadFromTmdb(tmdbUrl: String): LoadResponse {
+        val doc = app.get(tmdbUrl, headers = TMDB_HEADERS, timeout = 30).document
+
+        val rawTitle = doc.selectFirst("meta[property='og:title']")?.attr("content")
+            ?: doc.selectFirst("h2 a")?.text()
+            ?: doc.selectFirst("title")?.text()
+            ?: "CineVision"
+        val title = rawTitle
+            .replace(Regex("""\s*[\(\[]\d{4}[\)\]]\s*(—.*)?$"""), "")
+            .replace(Regex("""\s*—.*$"""), "")
+            .trim()
+
+        val tmdbId = Regex("""/(?:movie|tv)/(\d+)""").find(tmdbUrl)?.groupValues?.getOrNull(1).orEmpty()
+        val isSeries = tmdbUrl.contains("/tv/")
+
+        val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")?.let { fixUrlNull(it) }
+        val plot = doc.selectFirst("meta[property='og:description']")?.attr("content")
+            ?: doc.select("div.overview p").map { it.text().trim() }
+                .firstOrNull { it.length > 25 && !it.startsWith("We don't have") }
+        val year = Regex("""\((\d{4})\)""").find(
+            doc.selectFirst("meta[property='og:title']")?.attr("content").orEmpty()
+        )?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val tags = doc.select("span.genres a, div.genres a, a[href*='/genre/']").map { it.text().trim() }
+            .filter { it.isNotBlank() && !it.contains("?") }.distinct()
+
+        // imdb_id: link externo IMDb no detalhe (quando presente)
+        var imdbId = doc.select("a[href*='imdb.com/title/']").map { it.attr("href") }
+            .firstNotNullOfOrNull { Regex("""(tt\d+)""").find(it)?.groupValues?.getOrNull(1) }.orEmpty()
+        if (imdbId.isBlank()) {
+            imdbId = Regex("""(tt\d{6,})""").find(doc.html())?.groupValues?.getOrNull(1).orEmpty()
+        }
+
+        val payload = "tmdb:$tmdbId|imdb:$imdbId|series:$isSeries"
+
+        return if (isSeries) {
+            val episodes = if (imdbId.isNotBlank()) {
+                // 1 temporada placeholder → loadLinks resolve eps via painel; se
+                // vazio, o usuário entra pelo S1E1 e navega pelos servers.
+                listOf(
+                    newEpisode("$payload|season:1|episode:1") {
+                        this.name = "T1:E1"
+                        this.season = 1
+                        this.episode = 1
+                    }
+                )
+            } else emptyList()
+            if (episodes.isNotEmpty()) {
+                newTvSeriesLoadResponse(title, tmdbUrl, TvType.TvSeries, episodes) {
+                    this.posterUrl = poster
+                    this.plot = plot
+                    this.tags = tags
+                    this.year = year
+                }
+            } else {
+                newMovieLoadResponse(title, tmdbUrl, TvType.Movie, payload) {
+                    this.posterUrl = poster
+                    this.plot = plot
+                    this.tags = tags
+                    this.year = year
+                }
+            }
+        } else {
+            newMovieLoadResponse(title, tmdbUrl, TvType.Movie, payload) {
+                this.posterUrl = poster
+                this.plot = plot
+                this.tags = tags
+                this.year = year
+            }
         }
     }
 
@@ -568,8 +690,35 @@ class CineVision : MainAPI() {
 
         val tmdbParam = Regex("""tmdb=([^&]+)""").find(data)?.groupValues?.getOrNull(1)
         val mediaIdParam = Regex("""mediaId=([^&]+)""").find(data)?.groupValues?.getOrNull(1) ?: tmdbParam
+        // v154: payload TMDB (tmdb:{id}|imdb:{tt}|series:{bool}|season|episode)
+        val tmdbPayloadId = Regex("""tmdb:(\d+)""").find(data)?.groupValues?.getOrNull(1)
+        val imdbPayloadId = Regex("""imdb:(tt\d+)""").find(data)?.groupValues?.getOrNull(1)
         val seasonParam = Regex("""season=(\d+)""").find(data)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?: Regex("""season:(\d+)""").find(data)?.groupValues?.getOrNull(1)?.toIntOrNull()
         val episodeParam = Regex("""episode=(\d+)""").find(data)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?: Regex("""episode:(\d+)""").find(data)?.groupValues?.getOrNull(1)?.toIntOrNull()
+
+        // v154: caminho direto — painel-aso sem passar pelo cinevision.lat.
+        if (!imdbPayloadId.isNullOrBlank()) {
+            val painelUrl = "https://www.painel-aso.sbs/filme/$imdbPayloadId"
+            try {
+                val embedHtml = app.get(
+                    painelUrl,
+                    headers = mapOf("User-Agent" to USER_AGENT, "Referer" to "$mainUrl/")
+                ).text
+                val soup = Jsoup.parse(embedHtml)
+                val buttons = soup.select("button[data-source], [data-source]")
+                    .map { it.attr("data-source") to it.text().trim().ifBlank { "Player" } }
+                    .filter { it.first.isNotBlank() }
+                    .sortedByDescending { it.first.contains("playembedapi.site") || it.first.contains("ok.ru") }
+                for ((src, label) in buttons) {
+                    if (resolveStreamOrExtractor(src, label, painelUrl, subtitleCallback, callback)) {
+                        foundAny = true
+                    }
+                }
+                if (foundAny) return true
+            } catch (_: Exception) {}
+        }
 
         // 1. Resolução dos Players do painel-aso.sbs (Prioridade Máxima para LoadVid e Players Nativos)
         if (data.contains("painel-aso.sbs/episodio/")) {
@@ -641,7 +790,8 @@ class CineVision : MainAPI() {
 
         // 2. Resolução Multi-Server Direta de Fallback (MegaEmbed, SuperFlix, PlayerFlix)
         // v150: só usa mediaId se for TMDB numérico (tt/imdb e id interno /embed/N geram 404)
-        val tmdbNumeric = mediaIdParam?.takeIf { it.matches(Regex("""\d+""")) }
+        // v154: inclui o tmdb id do payload TMDB.
+        val tmdbNumeric = mediaIdParam?.takeIf { it.matches(Regex("""\d+""")) } ?: tmdbPayloadId
         if (!tmdbNumeric.isNullOrBlank()) {
             if (seasonParam != null && episodeParam != null) {
                 if (resolveMegaEmbed("https://megaembed.com/embed/$tmdbNumeric/$seasonParam/$episodeParam", callback)) foundAny = true
