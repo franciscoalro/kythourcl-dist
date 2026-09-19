@@ -82,14 +82,22 @@ class EmbedPlay : MainAPI() {
             ?: element.selectFirst("p.title")?.text()?.trim()?.substringBefore(" - ")?.trim()
             ?: return null
         if (title.isBlank()) return null
+        // v4: cinemaplay.top exige Referer (403 sem) — w300 -> w500 p/ capas nítidas
         val poster = (card.selectFirst(".poster-img") ?: element.selectFirst(".poster-img"))?.attr("data-bg-multi")
             ?.let { Regex("""url\((https?://[^)]+)\)""").find(it)?.groupValues?.getOrNull(1) }
+            ?.replace("/w300/", "/w500/")
             ?.let { fixUrlNull(it) }
         val url = "$mainUrl/view/$tmdb"
         return if (isSeriesSection) {
-            newTvSeriesSearchResponse(title, url, TvType.TvSeries) { this.posterUrl = poster }
+            newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
+                this.posterUrl = poster
+                this.posterHeaders = mapOf("Referer" to "$mainUrl/")
+            }
         } else {
-            newMovieSearchResponse(title, url, TvType.Movie) { this.posterUrl = poster }
+            newMovieSearchResponse(title, url, TvType.Movie) {
+                this.posterUrl = poster
+                this.posterHeaders = mapOf("Referer" to "$mainUrl/")
+            }
         }
     }
 
@@ -125,9 +133,11 @@ class EmbedPlay : MainAPI() {
                 if (title.isBlank()) return@mapNotNull null
                 val poster = card.selectFirst(".poster-img")?.attr("data-bg-multi")
                     ?.let { Regex("""url\((https?://[^)]+)\)""").find(it)?.groupValues?.getOrNull(1) }
+                    ?.replace("/w300/", "/w500/")
                     ?.let { fixUrlNull(it) }
                 newMovieSearchResponse(title, "$mainUrl/view/$tmdb", TvType.Movie) {
                     this.posterUrl = poster
+                    this.posterHeaders = mapOf("Referer" to "$mainUrl/")
                 }
             }.distinctBy { it.url }
         } catch (_: Exception) {
@@ -166,12 +176,14 @@ class EmbedPlay : MainAPI() {
                 }
             )) {
                 this.posterUrl = poster
+                this.posterHeaders = mapOf("Referer" to "$mainUrl/")
                 this.plot = plot
                 this.year = year
             }
         } else {
             newMovieLoadResponse(title, url, TvType.Movie, payload) {
                 this.posterUrl = poster
+                this.posterHeaders = mapOf("Referer" to "$mainUrl/")
                 this.plot = plot
                 this.year = year
             }
@@ -192,6 +204,23 @@ class EmbedPlay : MainAPI() {
         if (tmdbId.isBlank()) return false
 
         return try {
+            // v4: VidSrc direto PRIMEIRO (rápido, sem WebView) — era o 2b, virou 1º.
+            // O data-url do .one já entrega o filme dublado; se falhar, cai pro
+            // fluxo .top -> get_stream_link -> getPlayer (ABYS/BYSE/UPN via WebView).
+            val imdbId = Regex("""imdb:(tt\d+)""").find(data)?.groupValues?.getOrNull(1).orEmpty()
+            if (imdbId.isNotBlank()) {
+                val direct = if (isSeries)
+                    "https://vidsrcme.su/embed/tv?imdb=$imdbId&season=$season&episode=$episode&ds_lang=pt&autoplay=1"
+                else
+                    "https://vidsrcme.su/embed/movie?imdb=$imdbId&ds_lang=pt&autoplay=1"
+                try {
+                    if (loadExtractor(direct, "$ONE_BASE/", subtitleCallback, callback)) {
+                        foundAny = true
+                    }
+                } catch (_: Exception) {}
+                if (foundAny) return true
+            }
+
             // 1. embed .top -> data-movie-id + server data-id reais
             val embedPath = if (isSeries) "/embed/$tmdbId/$season/$episode" else "/embed/$tmdbId"
             val embedHtml = app.get(
@@ -200,74 +229,52 @@ class EmbedPlay : MainAPI() {
                 timeout = 30
             ).text
             val movieCode = Regex("""data-movie-id="([^"]+)"""").find(embedHtml)?.groupValues?.getOrNull(1)
-            val serverId = Regex("""class="server[^"]*"[^>]*data-id="([a-zA-Z0-9]+)"""").find(embedHtml)
-                ?.groupValues?.getOrNull(1)
-            if (movieCode.isNullOrBlank() || serverId.isNullOrBlank()) return false
-
-            // 2. ajax/get_stream_link -> link embedplay.one + VidSrc direto (data-url)
-            val linkResp = app.get(
-                "$mainUrl/ajax/get_stream_link?id=$serverId&movie=$movieCode&is_init=false",
-                headers = BROWSER_HEADERS + mapOf(
-                    "X-Requested-With" to "XMLHttpRequest",
-                    "Referer" to "$mainUrl$embedPath"
-                ),
-                timeout = 30
-            ).parsedSafe<StreamLinkResp>()
-            val oneLink = linkResp?.data?.link?.takeIf { it.isNotBlank() }
-
-            // 2b. VidSrc direto do embed .one (opcional data-url) — tenta sempre
-            if (!oneLink.isNullOrBlank()) {
-                try {
-                    val oneHtml = app.get(
-                        oneLink,
-                        headers = BROWSER_HEADERS + mapOf("Referer" to "$mainUrl$embedPath"),
-                        timeout = 30
-                    ).text
-                    val vidsrcUrl = Regex("""data-url="([^"]+)"""").find(oneHtml)?.groupValues?.getOrNull(1)
-                        ?.replace("&amp;", "&")
-                    if (!vidsrcUrl.isNullOrBlank()) {
-                        if (loadExtractor(vidsrcUrl, oneLink, subtitleCallback, callback)) {
+            // v4: pega QUALQUER server válido (era só o 1º); tenta cada um até achar link
+            val serverIds = Regex("""class="server[^"]*"[^>]*data-id="([a-zA-Z0-9]+)"""")
+                .findAll(embedHtml).map { it.groupValues[1] }.distinct().toList()
+            if (movieCode.isNullOrBlank() || serverIds.isEmpty()) {
+                // sem server .top mas com imdb: tenta o .one direto pelo padrão de URL
+                if (imdbId.isNotBlank()) {
+                    try {
+                        val oneHtml = app.get(
+                            "$ONE_BASE/filme/$imdbId",
+                            headers = BROWSER_HEADERS + mapOf("Referer" to "$mainUrl$embedPath"),
+                            timeout = 30
+                        ).text
+                        if (resolveOnePlayers(oneHtml, "$ONE_BASE/filme/$imdbId", subtitleCallback, callback)) {
                             foundAny = true
                         }
-                    }
-                    // 3. api getPlayer por data-id -> ABYS / BYSE / UPN
-                    val playerIds = Regex("""data-id="(\d+)"""").findAll(oneHtml)
-                        .map { it.groupValues[1] }.distinct().toList()
-                    for (vid in playerIds) {
-                        try {
-                            val apiResp = app.post(
-                                "$ONE_BASE/api",
-                                headers = mapOf(
-                                    "User-Agent" to USER_AGENT,
-                                    "Referer" to oneLink,
-                                    "X-Requested-With" to "XMLHttpRequest"
-                                ),
-                                data = mapOf("action" to "getPlayer", "video_id" to vid),
-                                timeout = 30
-                            ).parsedSafe<OnePlayerResp>()
-                            val videoUrl = apiResp?.data?.videoUrl?.takeIf { it.isNotBlank() } ?: continue
-                            if (videoUrl.contains(".m3u8")) {
-                                callback.invoke(
-                                    newExtractorLink(
-                                        source = "EmbedPlay",
-                                        name = "EmbedPlay (HLS)",
-                                        url = videoUrl,
-                                        type = ExtractorLinkType.M3U8
-                                    ) {
-                                        this.referer = oneLink
-                                        this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to oneLink)
-                                        this.quality = Qualities.P1080.value
-                                    }
-                                )
-                                foundAny = true
-                            } else if (resolveViaWebView(videoUrl, oneLink, callback)) {
-                                foundAny = true
-                            } else if (loadExtractor(videoUrl, oneLink, subtitleCallback, callback)) {
-                                foundAny = true
-                            }
-                        } catch (_: Exception) {}
-                    }
-                } catch (_: Exception) {}
+                    } catch (_: Exception) {}
+                }
+                return foundAny
+            }
+
+            // 2. ajax/get_stream_link -> link embedplay.one (tenta cada server)
+            for (serverId in serverIds) {
+                try {
+                    val linkResp = app.get(
+                        "$mainUrl/ajax/get_stream_link?id=$serverId&movie=$movieCode&is_init=false",
+                        headers = BROWSER_HEADERS + mapOf(
+                            "X-Requested-With" to "XMLHttpRequest",
+                            "Referer" to "$mainUrl$embedPath"
+                        ),
+                        timeout = 30
+                    ).parsedSafe<StreamLinkResp>()
+                    val oneLink = linkResp?.data?.link?.takeIf { it.isNotBlank() } ?: continue
+
+                    // 2b. página .one: VidSrc direto (data-url) + getPlayer por data-id
+                    try {
+                        val oneHtml = app.get(
+                            oneLink,
+                            headers = BROWSER_HEADERS + mapOf("Referer" to "$mainUrl$embedPath"),
+                            timeout = 30
+                        ).text
+                        if (resolveOnePlayers(oneHtml, oneLink, subtitleCallback, callback)) {
+                            foundAny = true
+                            break
+                        }
+                    } catch (_: Exception) { continue }
+                } catch (_: Exception) { continue }
             }
             foundAny
         } catch (_: Exception) {
@@ -275,8 +282,75 @@ class EmbedPlay : MainAPI() {
         }
     }
 
+    // Resolve os players da página embedplay.one: VidSrc direto (data-url)
+    // + api getPlayer por data-id -> ABYS / BYSE / UPN (WebView c/ timeout curto).
+    private suspend fun resolveOnePlayers(
+        oneHtml: String,
+        oneLink: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        var foundAny = false
+        val vidsrcUrl = Regex("""data-url="([^"]+)"""").find(oneHtml)?.groupValues?.getOrNull(1)
+            ?.replace("&amp;", "&")
+        if (!vidsrcUrl.isNullOrBlank()) {
+            try {
+                if (loadExtractor(vidsrcUrl, oneLink, subtitleCallback, callback)) {
+                    foundAny = true
+                }
+            } catch (_: Exception) {}
+            if (foundAny) return true
+        }
+        // 3. api getPlayer por data-id -> ABYS / BYSE / UPN
+        val playerIds = Regex("""data-id="(\d+)"""").findAll(oneHtml)
+            .map { it.groupValues[1] }.distinct().toList()
+        for (vid in playerIds) {
+            try {
+                val apiResp = app.post(
+                    "$ONE_BASE/api",
+                    headers = mapOf(
+                        "User-Agent" to USER_AGENT,
+                        "Referer" to oneLink,
+                        "X-Requested-With" to "XMLHttpRequest"
+                    ),
+                    data = mapOf("action" to "getPlayer", "video_id" to vid),
+                    timeout = 30
+                ).parsedSafe<OnePlayerResp>()
+                val videoUrl = apiResp?.data?.videoUrl?.takeIf { it.isNotBlank() } ?: continue
+                if (videoUrl.contains(".m3u8")) {
+                    callback.invoke(
+                        newExtractorLink(
+                            source = "EmbedPlay",
+                            name = "EmbedPlay (HLS)",
+                            url = videoUrl,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = oneLink
+                            this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to oneLink)
+                            this.quality = Qualities.P1080.value
+                        }
+                    )
+                    foundAny = true
+                    break
+                } else if (resolveViaWebView(videoUrl, oneLink, callback)) {
+                    foundAny = true
+                    break
+                } else {
+                    try {
+                        if (loadExtractor(videoUrl, oneLink, subtitleCallback, callback)) {
+                            foundAny = true
+                            break
+                        }
+                    } catch (_: Exception) {}
+                }
+            } catch (_: Exception) {}
+        }
+        return foundAny
+    }
+
     // Abyss (embedplayabyss.top) / Byse / UPN são SPAs com JS — WebView do app
-    // carrega o player e intercepta o .m3u8 montado.
+    // carrega o player e intercepta o .m3u8 montado. Timeout curto (15s) p/
+    // não travar o loadLinks: 3 players x 15s max em vez de 3 x 60s.
     private suspend fun resolveViaWebView(
         playerUrl: String,
         referer: String,
@@ -287,8 +361,8 @@ class EmbedPlay : MainAPI() {
             val resp = app.get(
                 playerUrl,
                 headers = mapOf("User-Agent" to USER_AGENT, "Referer" to referer),
-                interceptor = WebViewResolver(intercept),
-                timeout = 60
+                interceptor = WebViewResolver(intercept, timeout = 15000L),
+                timeout = 25
             )
             val html = try { resp.text } catch (_: Throwable) { "" }
             val found = mutableSetOf<String>()
