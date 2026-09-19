@@ -204,21 +204,20 @@ class EmbedPlay : MainAPI() {
         if (tmdbId.isBlank()) return false
 
         return try {
-            // v4: VidSrc direto PRIMEIRO (rápido, sem WebView) — era o 2b, virou 1º.
-            // O data-url do .one já entrega o filme dublado; se falhar, cai pro
-            // fluxo .top -> get_stream_link -> getPlayer (ABYS/BYSE/UPN via WebView).
+            // v5: VidSrc GATE (mesmo do CineVision v151/v155, que funciona no app).
+            // loadExtractor NÃO resolve gate VidSrc (data-api -> cloudorchestranova
+            // -> playerUrl -> data.vidsrc.sh cifrado); precisa do fluxo HTTP-puro.
             val imdbId = Regex("""imdb:(tt\d+)""").find(data)?.groupValues?.getOrNull(1).orEmpty()
             if (imdbId.isNotBlank()) {
-                val direct = if (isSeries)
-                    "https://vidsrcme.su/embed/tv?imdb=$imdbId&season=$season&episode=$episode&ds_lang=pt&autoplay=1"
-                else
-                    "https://vidsrcme.su/embed/movie?imdb=$imdbId&ds_lang=pt&autoplay=1"
                 try {
-                    if (loadExtractor(direct, "$ONE_BASE/", subtitleCallback, callback)) {
-                        foundAny = true
+                    val gateUrl = if (isSeries)
+                        "https://vidsrc.sh/embed/tv/$imdbId/$season-$episode"
+                    else
+                        "https://vidsrc.sh/embed/movie/$imdbId"
+                    if (resolveVidSrcGate(gateUrl, "$ONE_BASE/", callback)) {
+                        return true
                     }
                 } catch (_: Exception) {}
-                if (foundAny) return true
             }
 
             // 1. embed .top -> data-movie-id + server data-id reais
@@ -242,6 +241,18 @@ class EmbedPlay : MainAPI() {
                             timeout = 30
                         ).text
                         if (resolveOnePlayers(oneHtml, "$ONE_BASE/filme/$imdbId", subtitleCallback, callback)) {
+                            foundAny = true
+                        }
+                    } catch (_: Exception) {}
+                }
+                // último recurso: gate VidSrc com TMDB id (vidsrc.sh aceita tmdb)
+                if (!foundAny && tmdbId.isNotBlank()) {
+                    try {
+                        val gateUrl = if (isSeries)
+                            "https://vidsrc.sh/embed/tv/$tmdbId/$season-$episode"
+                        else
+                            "https://vidsrc.sh/embed/movie/$tmdbId"
+                        if (resolveVidSrcGate(gateUrl, "$ONE_BASE/", callback)) {
                             foundAny = true
                         }
                     } catch (_: Exception) {}
@@ -279,6 +290,96 @@ class EmbedPlay : MainAPI() {
             foundAny
         } catch (_: Exception) {
             foundAny
+        }
+    }
+
+    // v5: VidSrc Gate — cópia do fluxo CineVision v151/v155 (comprovado no app).
+    // vidsrc.sh/embed -> data-api (/vs_src.php) -> gate {"src": cloudorchestranova}
+    // -> playerUrl -> data.vidsrc.sh/api.php stream_urls (lista) -> HLS direto.
+    // Se stream_urls vier cifrada (string), delega ao WebView (fetch no player).
+    private suspend fun resolveVidSrcGate(
+        embedUrl: String,
+        referer: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        return try {
+            val startUrl = embedUrl.replace("vidsrcme.su", "vidsrc.sh")
+            val startHtml = app.get(
+                startUrl,
+                headers = mapOf("User-Agent" to USER_AGENT, "Referer" to referer),
+                timeout = 30
+            ).text
+            val apiPath = Regex("""data-api="([^"]+)"""").find(startHtml)?.groupValues?.getOrNull(1)
+                ?.replace("&amp;", "&") ?: return false
+            val apiUrl = if (apiPath.startsWith("http")) apiPath else "https://vidsrc.sh$apiPath"
+
+            val gateJson = app.get(
+                apiUrl,
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Referer" to startUrl,
+                    "Accept" to "application/json"
+                ),
+                timeout = 30
+            ).text
+            val innerSrc = Regex(""""src"\s*:\s*"([^"]+)"""").find(gateJson)?.groupValues?.getOrNull(1)
+                ?: return false
+            val innerHtml = app.get(
+                innerSrc,
+                headers = mapOf("User-Agent" to USER_AGENT, "Referer" to "https://vidsrc.sh/"),
+                timeout = 30
+            ).text
+
+            val imdb = Regex("""tt\d+""").find(innerSrc)?.value ?: Regex("""tt\d+""").find(embedUrl)?.value
+            val playerPath = Regex("""playerUrl\\?":\\?"([^"]+)""").find(innerHtml)?.groupValues?.getOrNull(1)
+                ?.replace("\\u0026", "&") ?: return false
+            val playerUrl = if (playerPath.startsWith("http")) playerPath else "https://cloudorchestranova.com$playerPath"
+            val playerHtml = app.get(
+                playerUrl,
+                headers = mapOf("User-Agent" to USER_AGENT, "Referer" to innerSrc),
+                timeout = 30
+            ).text
+            val streamApi = Regex("""\\"api\\?":\\?"([^"]+)""").find(playerHtml)?.groupValues?.getOrNull(1)
+                ?.replace("\\u0026", "&")
+                ?: if (!imdb.isNullOrBlank()) {
+                    val isTv = embedUrl.contains("/tv/")
+                    val type = if (isTv) "tv" else "movie"
+                    "https://data.vidsrc.sh/api.php?type=$type&imdb=$imdb&stream_urls"
+                } else return false
+
+            val streamJson = app.get(
+                streamApi,
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Referer" to playerUrl,
+                    "Accept" to "application/json"
+                ),
+                timeout = 30
+            ).text
+            // stream_urls pode ser lista (direto) ou string cifrada (WebView)
+            val listMatch = Regex(""""stream_urls"\s*:\s*\[(.*?)\]""", RegexOption.DOT_MATCHES_ALL)
+                .find(streamJson)?.groupValues?.getOrNull(1)
+            val urls = listMatch?.let { Regex(""""(https?://[^"]+\.m3u8[^"]*)"""").findAll(it).map { m -> m.groupValues[1] }.distinct().toList() }
+                .orEmpty()
+            for (m3u8 in urls) {
+                callback.invoke(
+                    newExtractorLink(
+                        source = "EmbedPlay",
+                        name = "EmbedPlay VidSrc (HLS)",
+                        url = m3u8,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = playerUrl
+                        this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to playerUrl)
+                        this.quality = Qualities.P1080.value
+                    }
+                )
+            }
+            if (urls.isNotEmpty()) return true
+            // stream_urls cifrada -> WebView no player intercepta o .m3u8 montado
+            resolveViaWebView(playerUrl, innerSrc, callback)
+        } catch (_: Exception) {
+            false
         }
     }
 
