@@ -1,8 +1,8 @@
 {
   "name": "Kythour Repository",
-  "description": "Plugins Kythour \u2014 EmbedPlay v9 (temporadas + ChaCha20 puro + busca tv), CineVision v155, Pobreflix v150, AnimeFire v153 e demais",
+  "description": "Plugins Kythour \u2014 CineVision v155, Pobreflix v150, AnimeFire v153, NetCine v150 e demais",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@58936ab77d7a0398e99b93d1cb1ad7fe9e10ff95/builds/plugins.json"
+    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@3fbb64adcb0b21a1bfb6e8b8a6a9a571619137f3/builds/plugins.json"
   ]
 }
