@@ -28,10 +28,10 @@
         "name": "CineVision"
     },
     {
-        "fileHash": "sha256-72e71165d850ad3ef369625244ec3972010b2443c33b1d98c12df5e98f4a5bff",
+        "fileHash": "sha256-e3a8f59aa5c1beb5656f26c5a0b228abb9177e0435a140afeb72111783066579",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 24236,
+        "fileSize": 24531,
         "status": 3,
         "authors": [
             "franciscoalro"
