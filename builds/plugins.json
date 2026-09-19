@@ -42,15 +42,15 @@
         "name": "NetCine"
     },
     {
-        "fileHash": "sha256-ca0a1426ab89bb3ea49d9b084ee4d5cbd2cd0265988460bac4664df7d8aaafcd",
+        "fileHash": "sha256-1ae139f343f765738741f4167ad6edb726a9a272e3383f7b8972fe916a3ca4b3",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 26350,
+        "fileSize": 55163,
         "status": 3,
         "authors": [
             "franciscoalro"
         ],
-        "version": 149,
+        "version": 150,
         "internalName": "Pobreflix",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/Pobreflix.cs3",
         "name": "Pobreflix"
