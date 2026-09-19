@@ -3,6 +3,6 @@
  "description": "Plugins Kythour — AnimesOrion v1 (animesorion.cc), Pobreflix v150 (profilmecloud.net), CineVision, AnimeFire v153, NetCine v150 e demais",
  "manifestVersion": 1,
  "pluginLists": [
-  "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@300bf533eee494bcd7f503ded179c949a344322a/builds/plugins.json"
+  "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@858b3a192eb18f717b068582df5e6e5540c6056c/builds/plugins.json"
  ]
 }
