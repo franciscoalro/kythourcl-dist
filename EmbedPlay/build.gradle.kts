@@ -1,5 +1,5 @@
-// v7: AbyssShell -> player.abyssplayer.com/{slug} (dominio novo provado no log do aparelho)
-// (v6 = ordem + Streamwish + shell; v5 = VidSrc gate; v4 = capas Referer; v2 = fix catálogo)
+// v8: servers .top alfa (_default pulado) + slug Abyss [-_] (cPk-jXmMH dava 404)
+// (v7 = abyssplayer.com; v6 = ordem + Streamwish; v5 = VidSrc gate; v4 = capas Referer; v2 = catálogo)
 cloudstream {
-    version = 7
+    version = 8
 }
