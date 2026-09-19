@@ -1,8 +1,8 @@
 {
   "name": "Kythour Repository",
-  "description": "Plugins Kythour \u2014 CineVision v152 (catalogo anti-WAF), Pobreflix v150, AnimeFire v153 e demais",
+  "description": "Plugins Kythour \u2014 CineVision v153 (catalogo anti-WAF), Pobreflix v150, AnimeFire v153 e demais",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@05beb5a08b0aba085242d40ef6a470b874ec7392/builds/plugins.json"
+    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@06148eed9fd809fe9db3927478d7597a15ba7827/builds/plugins.json"
   ]
 }
