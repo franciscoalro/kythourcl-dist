@@ -3,6 +3,6 @@
   "description": "Plugins Kythour — Pobreflix v150 (profilmecloud.net), CineVision, AnimeFire v153, NetCine v150 e demais",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@f8ae1f19553c6e442d0bc5bc76c71d19255de968/builds/plugins.json"
+    "https://cdn.jsdelivr.net/gh/franciscoalro/kythourcl-dist@ab5d1672a280db552b3004994446580b59e044a0/builds/plugins.json"
   ]
 }
