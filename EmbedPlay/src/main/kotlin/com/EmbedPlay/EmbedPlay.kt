@@ -383,8 +383,13 @@ class EmbedPlay : MainAPI() {
         }
     }
 
-    // Resolve os players da página embedplay.one: VidSrc direto (data-url)
-    // + api getPlayer por data-id -> ABYS / BYSE / UPN (WebView c/ timeout curto).
+    // Resolve os players da página embedplay.one: VidSrc Gate (data-url) +
+    // api getPlayer por data-id -> ABYS / BYSE / UPN.
+    // v6 (log do aparelho): ordem por velocidade comprovada —
+    //   1º VidSrc Gate (HTTP-puro, ~5s, thumbnails externos OK);
+    //   2º UPN /api/v1/video (HTTP-puro, provado no lab);
+    //   3º Streamwish espelho do Byse via loadExtractor (extrator nativo);
+    //   4º WebView SOMENTE no Abyss real (abysscdn.com, SoTrym descriptografa).
     private suspend fun resolveOnePlayers(
         oneHtml: String,
         oneLink: String,
@@ -392,19 +397,27 @@ class EmbedPlay : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var foundAny = false
+        // 1. VidSrc Gate via data-url (HTTP-puro, sem WebView)
         val vidsrcUrl = Regex("""data-url="([^"]+)"""").find(oneHtml)?.groupValues?.getOrNull(1)
             ?.replace("&amp;", "&")
         if (!vidsrcUrl.isNullOrBlank()) {
             try {
-                if (loadExtractor(vidsrcUrl, oneLink, subtitleCallback, callback)) {
-                    foundAny = true
+                if (resolveVidSrcGate(vidsrcUrl, oneLink, callback)) {
+                    return true
                 }
             } catch (_: Exception) {}
-            if (foundAny) return true
+            try {
+                if (loadExtractor(vidsrcUrl, oneLink, subtitleCallback, callback)) {
+                    return true
+                }
+            } catch (_: Exception) {}
         }
-        // 3. api getPlayer por data-id -> ABYS / BYSE / UPN
+        // 2+3+4. getPlayer por data-id
         val playerIds = Regex("""data-id="(\d+)"""").findAll(oneHtml)
             .map { it.groupValues[1] }.distinct().toList()
+        // v6: tenta TODOS e coleta nomes p/ priorizar UPN/BYSE antes do ABYSS
+        data class PlayerEntry(val videoUrl: String, val name: String)
+        val entries = mutableListOf<PlayerEntry>()
         for (vid in playerIds) {
             try {
                 val apiResp = app.post(
@@ -418,40 +431,139 @@ class EmbedPlay : MainAPI() {
                     timeout = 30
                 ).parsedSafe<OnePlayerResp>()
                 val videoUrl = apiResp?.data?.videoUrl?.takeIf { it.isNotBlank() } ?: continue
-                if (videoUrl.contains(".m3u8")) {
-                    callback.invoke(
-                        newExtractorLink(
-                            source = "EmbedPlay",
-                            name = "EmbedPlay (HLS)",
-                            url = videoUrl,
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            this.referer = oneLink
-                            this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to oneLink)
-                            this.quality = Qualities.P1080.value
-                        }
-                    )
-                    foundAny = true
-                    break
-                } else if (resolveViaWebView(videoUrl, oneLink, callback)) {
-                    foundAny = true
-                    break
-                } else {
+                entries.add(PlayerEntry(videoUrl, apiResp?.data?.captionUrl ?: videoUrl))
+            } catch (_: Exception) {}
+        }
+        // UPN+BYSE primeiro (HTTP-puro), Abyss por último (WebView)
+        val ordered = entries.sortedBy {
+            when {
+                it.videoUrl.contains("upns.xyz") || it.videoUrl.contains("embedplayapiupn") -> 0
+                it.videoUrl.contains("byse") -> 1
+                it.videoUrl.contains(".m3u8") -> 2
+                else -> 3
+            }
+        }
+        for ((videoUrl, _) in ordered) {
+            if (videoUrl.contains(".m3u8")) {
+                callback.invoke(
+                    newExtractorLink(
+                        source = "EmbedPlay",
+                        name = "EmbedPlay (HLS)",
+                        url = videoUrl,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = oneLink
+                        this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to oneLink)
+                        this.quality = Qualities.P1080.value
+                    }
+                )
+                foundAny = true
+                break
+            }
+            // 2. UPN direto: /api/v1/video?id={hash} (HTTP-puro, provado no lab)
+            if (videoUrl.contains("upns.xyz") || videoUrl.contains("embedplayapiupn")) {
+                try {
+                    if (resolveUpnDirect(videoUrl, oneLink, callback)) {
+                        foundAny = true
+                        break
+                    }
+                } catch (_: Exception) {}
+            }
+            // 3. Byse -> espelho Streamwish (extrator nativo do app)
+            if (videoUrl.contains("embedplaybyse.top")) {
+                val code = Regex("""/e/([a-zA-Z0-9]+)""").find(videoUrl)?.groupValues?.getOrNull(1)
+                if (!code.isNullOrBlank()) {
                     try {
-                        if (loadExtractor(videoUrl, oneLink, subtitleCallback, callback)) {
+                        if (loadExtractor("https://streamwish.to/e/$code", oneLink, subtitleCallback, callback)) {
                             foundAny = true
                             break
                         }
                     } catch (_: Exception) {}
+                }
+            }
+            // 4. Abyss REAL (abysscdn.com, SoTrym) via WebView — ÚNICO WebView do fluxo.
+            // O shell embedplayabyss.top/player.html?v= é casca vazia (só monta iframe);
+            // resolve p/ https://abysscdn.com/?v={slug} antes, que é onde o SoTrym roda.
+            if (videoUrl.contains("abyss") || videoUrl.contains("abysscdn")) {
+                try {
+                    val real = resolveAbyssShell(videoUrl, oneLink) ?: videoUrl
+                    if (resolveViaWebView(real, oneLink, callback)) {
+                        foundAny = true
+                        break
+                    }
+                } catch (_: Exception) {}
+            }
+            // 5. Qualquer outro: extrator nativo como última tentativa (sem WebView)
+            try {
+                if (loadExtractor(videoUrl, oneLink, subtitleCallback, callback)) {
+                    foundAny = true
+                    break
                 }
             } catch (_: Exception) {}
         }
         return foundAny
     }
 
-    // Abyss (embedplayabyss.top) / Byse / UPN são SPAs com JS — WebView do app
-    // carrega o player e intercepta o .m3u8 montado. Timeout curto (15s) p/
-    // não travar o loadLinks: 3 players x 15s max em vez de 3 x 60s.
+    // UPN direto: extrai o hash do fragmento (#hash) e chama /api/v1/video?id=.
+    // Resposta é AES-CBC (hex) — sem WebCrypto no app, então devolve false e o
+    // chamador cai no WebView; mas tenta primeiro um .m3u8 embutido no JSON.
+    private suspend fun resolveUpnDirect(
+        playerUrl: String,
+        referer: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        return try {
+            val hash = playerUrl.substringAfter("#", "").substringBefore("&").trim()
+            if (hash.isBlank()) return false
+            val host = Regex("""(https?://[^/]+)""").find(playerUrl)?.groupValues?.getOrNull(1)
+                ?: return false
+            val json = app.get(
+                "$host/api/v1/video?id=$hash",
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Referer" to playerUrl,
+                    "Accept" to "application/json"
+                ),
+                timeout = 30
+            ).text
+            val urls = Regex("""(https?://[^"\s<>]+\.m3u8[^"\s<>]*)""").findAll(json)
+                .map { it.groupValues[1] }.distinct().toList()
+            for (m3u8 in urls) {
+                callback.invoke(
+                    newExtractorLink(
+                        source = "EmbedPlay",
+                        name = "EmbedPlay UPN (HLS)",
+                        url = m3u8,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = playerUrl
+                        this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to playerUrl)
+                        this.quality = Qualities.P1080.value
+                    }
+                )
+            }
+            urls.isNotEmpty()
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    // Shell embedplayabyss.top/player.html?v={slug} -> https://abysscdn.com/?v={slug}.
+    // O shell é casca vazia (1.9KB, só monta o iframe via JS); o SoTrym que monta
+    // o HLS roda no abysscdn.com — é LÁ que o WebView precisa carregar.
+    private suspend fun resolveAbyssShell(playerUrl: String, referer: String): String? {
+        return try {
+            if (playerUrl.contains("abysscdn.com")) return playerUrl
+            val slug = Regex("""[?&]v=([a-zA-Z0-9]+)""").find(playerUrl)?.groupValues?.getOrNull(1)
+                ?: return null
+            "https://abysscdn.com/?v=$slug"
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    // WebView SOMENTE p/ o Abyss real (abysscdn.com, SoTrym descriptografa e o
+    // player monta o HLS). Timeout 25s (CineVision usa 25s no Abyss/UPN).
     private suspend fun resolveViaWebView(
         playerUrl: String,
         referer: String,
@@ -462,8 +574,8 @@ class EmbedPlay : MainAPI() {
             val resp = app.get(
                 playerUrl,
                 headers = mapOf("User-Agent" to USER_AGENT, "Referer" to referer),
-                interceptor = WebViewResolver(intercept, timeout = 15000L),
-                timeout = 25
+                interceptor = WebViewResolver(intercept, timeout = 25000L),
+                timeout = 35
             )
             val html = try { resp.text } catch (_: Throwable) { "" }
             val found = mutableSetOf<String>()
