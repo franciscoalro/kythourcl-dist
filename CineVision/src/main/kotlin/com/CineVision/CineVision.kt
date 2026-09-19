@@ -371,6 +371,10 @@ class CineVision : MainAPI() {
         }
     }
 
+    private fun isSeriesPayload(data: String): Boolean {
+        return data.contains("series:true")
+    }
+
     private fun extractMediaId(embedUrl: String, doc: Document): String {
         val imdbMatch = Regex("""(tt\d+)""").find(embedUrl)?.groupValues?.getOrNull(1)
         if (!imdbMatch.isNullOrBlank()) return imdbMatch
@@ -568,8 +572,10 @@ class CineVision : MainAPI() {
             ).text
 
             // 3. CONFIG: metaApi + playerUrl
+            // v155: a gate também responde tt direto no `src` quando o painel dá
+            // imdb; mas com TMDB id ela responde tmdb — então o imdb aqui é
+            // opcional (só usado no fallback do streamApi).
             val imdb = Regex("""tt\d+""").find(innerSrc)?.value ?: Regex("""tt\d+""").find(embedUrl)?.value
-            ?: return false
             val playerPath = Regex("""playerUrl\\?":\\?"([^"]+)""").find(innerHtml)?.groupValues?.getOrNull(1)
                 ?.replace("\\u0026", "&") ?: return false
             val playerUrl = if (playerPath.startsWith("http")) playerPath else "https://cloudorchestranova.com$playerPath"
@@ -579,7 +585,7 @@ class CineVision : MainAPI() {
             ).text
             val streamApi = Regex("""\\"api\\?":\\?"([^"]+)""").find(playerHtml)?.groupValues?.getOrNull(1)
                 ?.replace("\\u0026", "&")
-                ?: "https://data.vidsrc.sh/api.php?type=movie&imdb=$imdb&stream_urls"
+                ?: if (!imdb.isNullOrBlank()) "https://data.vidsrc.sh/api.php?type=movie&imdb=$imdb&stream_urls" else return false
 
             // 4. stream_urls (cifrada) + descritor wasm
             val streamJson = app.get(
@@ -699,6 +705,8 @@ class CineVision : MainAPI() {
             ?: Regex("""episode:(\d+)""").find(data)?.groupValues?.getOrNull(1)?.toIntOrNull()
 
         // v154: caminho direto — painel-aso sem passar pelo cinevision.lat.
+        // v155: VidSrc-com-TMDB cobre filme SEM imdb (vidsrc.sh aceita tmdb id).
+        // Painel-com-imdb continua primeiro (4 servers); VidSrc-TMDB é fallback.
         if (!imdbPayloadId.isNullOrBlank()) {
             val painelUrl = "https://www.painel-aso.sbs/filme/$imdbPayloadId"
             try {
@@ -717,6 +725,18 @@ class CineVision : MainAPI() {
                     }
                 }
                 if (foundAny) return true
+            } catch (_: Exception) {}
+        }
+        if (!tmdbPayloadId.isNullOrBlank() && !isSeriesPayload(data)) {
+            try {
+                if (resolveVidSrcGate(
+                        "https://vidsrc.sh/embed/movie/$tmdbPayloadId",
+                        "$mainUrl/",
+                        callback
+                    )
+                ) {
+                    return true
+                }
             } catch (_: Exception) {}
         }
 
