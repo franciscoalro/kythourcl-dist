@@ -61,6 +61,38 @@ class EmbedPlay : MainAPI() {
         @JsonProperty("video_caption_url") val captionUrl: String? = null
     )
 
+    data class OneOptionsResp(
+        @JsonProperty("errors") val errors: String? = null,
+        @JsonProperty("data") val data: OneOptionsData? = null
+    )
+
+    data class OneOptionsData(
+        @JsonProperty("options") val options: List<OneOption>? = null
+    )
+
+    data class OneOption(
+        @JsonProperty("ID") val id: String? = null,
+        @JsonProperty("server") val server: String? = null,
+        @JsonProperty("url") val url: String? = null
+    )
+
+    data class VsStreamResp(
+        @JsonProperty("status_code") val statusCode: String? = null,
+        @JsonProperty("data") val data: VsStreamData? = null,
+        @JsonProperty("vs") val vs: VsDecryptor? = null
+    )
+
+    data class VsStreamData(
+        @JsonProperty("title") val title: String? = null,
+        @JsonProperty("stream_urls") val streamUrls: Any? = null
+    )
+
+    data class VsDecryptor(
+        @JsonProperty("w") val w: Long? = null,
+        @JsonProperty("wasm_url") val wasmUrl: String? = null,
+        @JsonProperty("wasm") val wasm: String? = null
+    )
+
     override val mainPage = mainPageOf(
         "$mainUrl/library/movies" to "Filmes",
         "$mainUrl/library/shows" to "Séries",
@@ -116,33 +148,44 @@ class EmbedPlay : MainAPI() {
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
 
     override suspend fun search(query: String): List<SearchResponse> {
-        return try {
-            val resp = app.get(
-                "$mainUrl/ajax/get_suggest?title=${URLEncoder.encode(query.trim(), "UTF-8")}&type=movie",
-                headers = BROWSER_HEADERS + mapOf(
-                    "X-Requested-With" to "XMLHttpRequest",
-                    "Referer" to "$mainUrl/"
-                ),
-                timeout = 30
-            ).parsedSafe<SuggestResp>()
-            val html = resp?.data?.results ?: return emptyList()
-            val doc = Jsoup.parse(html)
-            doc.select(".movie-card").mapNotNull { card ->
-                val tmdb = card.attr("data-tmdb").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                val title = card.selectFirst("p.title")?.text()?.trim() ?: return@mapNotNull null
-                if (title.isBlank()) return@mapNotNull null
-                val poster = card.selectFirst(".poster-img")?.attr("data-bg-multi")
-                    ?.let { Regex("""url\((https?://[^)]+)\)""").find(it)?.groupValues?.getOrNull(1) }
-                    ?.replace("/w300/", "/w500/")
-                    ?.let { fixUrlNull(it) }
-                newMovieSearchResponse(title, "$mainUrl/view/$tmdb", TvType.Movie) {
-                    this.posterUrl = poster
-                    this.posterHeaders = mapOf("Referer" to "$mainUrl/")
+        // v9: busca filmes E séries (era só type=movie — série nunca aparecia)
+        val out = mutableListOf<SearchResponse>()
+        for (type in listOf("movie", "tv")) {
+            try {
+                val resp = app.get(
+                    "$mainUrl/ajax/get_suggest?title=${URLEncoder.encode(query.trim(), "UTF-8")}&type=$type",
+                    headers = BROWSER_HEADERS + mapOf(
+                        "X-Requested-With" to "XMLHttpRequest",
+                        "Referer" to "$mainUrl/"
+                    ),
+                    timeout = 30
+                ).parsedSafe<SuggestResp>()
+                val html = resp?.data?.results ?: continue
+                val doc = Jsoup.parse(html)
+                val isTv = type == "tv"
+                doc.select(".movie-card").mapNotNullTo(out) { card ->
+                    val tmdb = card.attr("data-tmdb").takeIf { it.isNotBlank() } ?: return@mapNotNullTo null
+                    val title = card.selectFirst("p.title")?.text()?.trim() ?: return@mapNotNullTo null
+                    if (title.isBlank()) return@mapNotNullTo null
+                    val poster = card.selectFirst(".poster-img")?.attr("data-bg-multi")
+                        ?.let { Regex("""url\((https?://[^)]+)\)""").find(it)?.groupValues?.getOrNull(1) }
+                        ?.replace("/w300/", "/w500/")
+                        ?.let { fixUrlNull(it) }
+                    if (isTv) {
+                        newTvSeriesSearchResponse(title, "$mainUrl/view/$tmdb", TvType.TvSeries) {
+                            this.posterUrl = poster
+                            this.posterHeaders = mapOf("Referer" to "$mainUrl/")
+                        }
+                    } else {
+                        newMovieSearchResponse(title, "$mainUrl/view/$tmdb", TvType.Movie) {
+                            this.posterUrl = poster
+                            this.posterHeaders = mapOf("Referer" to "$mainUrl/")
+                        }
+                    }
                 }
-            }.distinctBy { it.url }
-        } catch (_: Exception) {
-            emptyList()
+            } catch (_: Exception) {}
         }
+        return out.distinctBy { it.url }
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -165,16 +208,58 @@ class EmbedPlay : MainAPI() {
         val tmdbId = Regex("""/view/(\d+)""").find(url)?.groupValues?.getOrNull(1).orEmpty()
 
         val isSeriesUrl = url.contains("/shows") || doc.html().contains("/embed/$tmdbId/1/1")
-        val payload = "tmdb:$tmdbId|imdb:$imdbId|series:$isSeriesUrl"
+        // v9: payload da série carrega o mapa real de temporadas (contentid por episódio,
+        // extraído do view .top) — o loadLinks resolve via getOptions sem re-baixar a página
+        var seriesMap = ""
+        if (isSeriesUrl && tmdbId.isNotBlank()) {
+            try {
+                val seasons = mutableListOf<String>()
+                val seasonNames = mutableMapOf<Int, String>()
+                doc.select("#season-select option").forEach { opt ->
+                    val sn = opt.attr("value").toIntOrNull() ?: return@forEach
+                    seasonNames[sn] = opt.text().trim().ifBlank { "Temporada $sn" }
+                }
+                doc.select("select[id^='sea-'][id\$='--episodes']").forEach { sel ->
+                    val sn = Regex("""sea-(\d+)--episodes""").find(sel.attr("id"))
+                        ?.groupValues?.getOrNull(1)?.toIntOrNull() ?: return@forEach
+                    sel.select("option").forEach { opt ->
+                        val en = opt.attr("value").toIntOrNull() ?: return@forEach
+                        val epId = opt.attr("data-id").takeIf { it.isNotBlank() } ?: return@forEach
+                        val epName = opt.text().trim().substringAfter(":").trim()
+                            .ifBlank { opt.text().trim() }
+                        seasons.add("$sn:$en:$epId:$epName")
+                    }
+                }
+                seriesMap = seasons.joinToString(";")
+            } catch (_: Exception) {}
+        }
+        val payload = "tmdb:$tmdbId|imdb:$imdbId|series:$isSeriesUrl|seasons:$seriesMap"
 
         return if (isSeriesUrl && tmdbId.isNotBlank()) {
-            newTvSeriesLoadResponse(title, url, TvType.TvSeries, listOf(
-                newEpisode("$payload|season:1|episode:1") {
-                    this.name = "T1:E1"
-                    this.season = 1
-                    this.episode = 1
+            val episodes = seriesMap.split(";").filter { it.isNotBlank() }.mapNotNull { entry ->
+                val parts = entry.split(":", limit = 4)
+                if (parts.size < 3) return@mapNotNull null
+                val sn = parts[0].toIntOrNull() ?: return@mapNotNull null
+                val en = parts[1].toIntOrNull() ?: return@mapNotNull null
+                val epId = parts[2]
+                val epName = parts.getOrNull(3).orEmpty()
+                newEpisode("$payload|season:$sn|episode:$en|contentid:$epId") {
+                    this.name = if (epName.isNotBlank()) "E$en - $epName" else "Episódio $en"
+                    this.season = sn
+                    this.episode = en
                 }
-            )) {
+            }
+            val eps = if (episodes.isEmpty()) {
+                // fallback: 1 episódio (fluxo antigo por /embed/tmdb/1/1)
+                listOf(
+                    newEpisode("$payload|season:1|episode:1") {
+                        this.name = "T1:E1"
+                        this.season = 1
+                        this.episode = 1
+                    }
+                )
+            } else episodes
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
                 this.posterUrl = poster
                 this.posterHeaders = mapOf("Referer" to "$mainUrl/")
                 this.plot = plot
@@ -200,10 +285,46 @@ class EmbedPlay : MainAPI() {
         val tmdbId = Regex("""tmdb:(\d+)""").find(data)?.groupValues?.getOrNull(1).orEmpty()
         val season = Regex("""season:(\d+)""").find(data)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
         val episode = Regex("""episode:(\d+)""").find(data)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
+        val contentId = Regex("""contentid:(\d+)""").find(data)?.groupValues?.getOrNull(1).orEmpty()
         val isSeries = data.contains("series:true")
         if (tmdbId.isBlank()) return false
 
         return try {
+            // v9: série via .one getOptions (contentid do view .top) — cadeia provada no lab:
+            // getOptions(contentid) -> options[] ABYS/BYSE/UPN -> getPlayer(ID) -> video_url.
+            // É o caminho oficial do site p/ séries; o embed .top de série também funciona
+            // como fallback (mesmo fluxo do filme).
+            if (isSeries && contentId.isNotBlank()) {
+                try {
+                    val optResp = app.post(
+                        "$ONE_BASE/api",
+                        headers = mapOf(
+                            "User-Agent" to USER_AGENT,
+                            "Referer" to "$ONE_BASE/",
+                            "X-Requested-With" to "XMLHttpRequest"
+                        ),
+                        data = mapOf("action" to "getOptions", "contentid" to contentId),
+                        timeout = 30
+                    ).parsedSafe<OneOptionsResp>()
+                    val options = optResp?.data?.options.orEmpty()
+                    // UPN+BYSE primeiro (HTTP-puro), Abyss por último (WebView)
+                    val ordered = options.sortedBy {
+                        when {
+                            (it.url.orEmpty().contains("upns.xyz") || it.url.orEmpty().contains("embedplayapiupn")) -> 0
+                            (it.server.orEmpty().equals("BYSE", true) || it.url.orEmpty().contains("byse")) -> 1
+                            it.url.orEmpty().contains(".m3u8") -> 2
+                            else -> 3
+                        }
+                    }
+                    for (opt in ordered) {
+                        try {
+                            if (resolveOneOption(opt.id.orEmpty(), opt.url.orEmpty(), opt.server.orEmpty(), "$ONE_BASE/", subtitleCallback, callback)) {
+                                return true
+                            }
+                        } catch (_: Exception) {}
+                    }
+                } catch (_: Exception) {}
+            }
             // v5: VidSrc GATE (mesmo do CineVision v151/v155, que funciona no app).
             // loadExtractor NÃO resolve gate VidSrc (data-api -> cloudorchestranova
             // -> playerUrl -> data.vidsrc.sh cifrado); precisa do fluxo HTTP-puro.
@@ -295,10 +416,14 @@ class EmbedPlay : MainAPI() {
         }
     }
 
-    // v5: VidSrc Gate — cópia do fluxo CineVision v151/v155 (comprovado no app).
-    // vidsrc.sh/embed -> data-api (/vs_src.php) -> gate {"src": cloudorchestranova}
-    // -> playerUrl -> data.vidsrc.sh/api.php stream_urls (lista) -> HLS direto.
-    // Se stream_urls vier cifrada (string), delega ao WebView (fetch no player).
+        // v9 (log aparelho tt27989067): o gate responde, mas stream_urls vem
+        // CIFRADA (ChaCha20 + wasm por janela `w`) — e o WebView no player expira
+        // em 25s sem montar o HLS. Decrypt HTTP-puro abaixo (ChaCha20 RFC 8439 com
+        // chave extraída do próprio wasm: seg[0] XOR seg[3200] — engenharia reversa
+        // comprovada no lab, todos os blocos batem).
+        // v5: VidSrc Gate — cópia do fluxo CineVision v151/v155 (comprovado no app).
+        // vidsrc.sh/embed -> data-api (/vs_src.php) -> gate {"src": cloudorchestranova}
+        // -> playerUrl -> data.vidsrc.sh/api.php stream_urls (lista) -> HLS direto.
     private suspend fun resolveVidSrcGate(
         embedUrl: String,
         referer: String,
@@ -358,12 +483,25 @@ class EmbedPlay : MainAPI() {
                 ),
                 timeout = 30
             ).text
-            // stream_urls pode ser lista (direto) ou string cifrada (WebView)
-            val listMatch = Regex(""""stream_urls"\s*:\s*\[(.*?)\]""", RegexOption.DOT_MATCHES_ALL)
-                .find(streamJson)?.groupValues?.getOrNull(1)
-            val urls = listMatch?.let { Regex(""""(https?://[^"]+\.m3u8[^"]*)"""").findAll(it).map { m -> m.groupValues[1] }.distinct().toList() }
-                .orEmpty()
-            for (m3u8 in urls) {
+            // stream_urls pode ser lista (direto) ou string cifrada (ChaCha20+wasm)
+            val resp = tryParseJson<VsStreamResp>(streamJson)
+            val rawUrls = resp?.data?.streamUrls
+            val urls: List<String> = when (rawUrls) {
+                is List<*> -> rawUrls.filterIsInstance<String>()
+                    .flatMap { Regex(""""?(https?://[^"\s,]+\.m3u8[^"\s,]*)""").findAll(it).map { m -> m.groupValues[1] } }
+                    .ifEmpty { rawUrls.filterIsInstance<String>() }
+                    .distinct()
+                is String -> decryptVsStreamUrls(rawUrls, resp.vs, playerUrl)
+                else -> {
+                    // fallback: regex direto no JSON (formato antigo sem wrapper)
+                    val listMatch = Regex(""""stream_urls"\s*:\s*\[(.*?)\]""", RegexOption.DOT_MATCHES_ALL)
+                        .find(streamJson)?.groupValues?.getOrNull(1)
+                    listMatch?.let { Regex(""""(https?://[^"]+\.m3u8[^"]*)"""").findAll(it).map { m -> m.groupValues[1] }.distinct().toList() }
+                        .orEmpty()
+                }
+            }
+            for (m3u8 in urls.distinct()) {
+                if (!m3u8.contains(".m3u8")) continue
                 callback.invoke(
                     newExtractorLink(
                         source = "EmbedPlay",
@@ -378,8 +516,229 @@ class EmbedPlay : MainAPI() {
                 )
             }
             if (urls.isNotEmpty()) return true
-            // stream_urls cifrada -> WebView no player intercepta o .m3u8 montado
-            resolveViaWebView(playerUrl, innerSrc, callback)
+            return false
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    // v9: decrypt ChaCha20 (RFC 8439) do stream_urls cifrado — SEM WebView, SEM WASM.
+    // Engenharia reversa do vsdec.js + wasm (lab): o wasm exporta alloc/decrypt; o cipher
+    // é ChaCha20 com sigma padrão; chave = data-seg[0] XOR data-seg[3200] (32 bytes);
+    // enc = base64(nonce12 || ciphertext); blocos com counter u32 LE a partir de 0;
+    // saída em ptr+12. Muda por janela `w` — por isso baixa o wasm da `wasm_url` sempre.
+    private suspend fun decryptVsStreamUrls(encB64: String, vs: VsDecryptor?, referer: String): List<String> {
+        return try {
+            val wasmBytes: ByteArray = if (!vs?.wasm.isNullOrBlank()) {
+                android.util.Base64.decode(vs!!.wasm, android.util.Base64.DEFAULT)
+            } else {
+                val wasmUrl = vs?.wasmUrl?.takeIf { it.isNotBlank() } ?: return emptyList()
+                app.get(
+                    wasmUrl,
+                    headers = mapOf("User-Agent" to USER_AGENT, "Referer" to referer),
+                    timeout = 30
+                ).body.bytes()
+            }
+            val key = vsWasmKey(wasmBytes) ?: return emptyList()
+            val enc = try {
+                android.util.Base64.decode(encB64.trim(), android.util.Base64.DEFAULT)
+            } catch (_: Exception) {
+                return emptyList()
+            }
+            if (enc.size <= 12) return emptyList()
+            val nonce = enc.copyOfRange(0, 12)
+            val ct = enc.copyOfRange(12, enc.size)
+            val pt = chacha20(key, nonce, ct) ?: return emptyList()
+            val txt = pt.toString(Charsets.UTF_8)
+            txt.split("\n").map { it.trim() }.filter { it.contains(".m3u8") }.distinct()
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    // Extrai a chave ChaCha20 do wasm: parse das data-sections (id 11),
+    // chave = bytes do segmento no offset 0 XOR bytes do segmento no offset 3200.
+    private fun vsWasmKey(wasm: ByteArray): ByteArray? {
+        return try {
+            var p = 8
+            var seg0: ByteArray? = null
+            var seg3200: ByteArray? = null
+            while (p < wasm.size) {
+                val id = wasm[p++].toInt() and 0xFF
+                var n = 0
+                var s = 0
+                while (true) {
+                    val m = wasm[p++].toInt() and 0xFF
+                    n = n or ((m and 0x7F) shl s)
+                    s += 7
+                    if (m and 0x80 == 0) break
+                }
+                if (id == 11) {
+                    var q = p
+                    var cnt = 0
+                    var ss = 0
+                    while (true) {
+                        val m = wasm[q++].toInt() and 0xFF
+                        cnt = cnt or ((m and 0x7F) shl ss)
+                        ss += 7
+                        if (m and 0x80 == 0) break
+                    }
+                    repeat(cnt) {
+                        q++ // memidx
+                        var off = 0
+                        var so = 0
+                        q++ // opcode i32.const
+                        while (true) {
+                            val m = wasm[q++].toInt() and 0xFF
+                            off = off or ((m and 0x7F) shl so)
+                            so += 7
+                            if (m and 0x80 == 0) break
+                        }
+                        q++ // end
+                        var len = 0
+                        var sl = 0
+                        while (true) {
+                            val m = wasm[q++].toInt() and 0xFF
+                            len = len or ((m and 0x7F) shl sl)
+                            sl += 7
+                            if (m and 0x80 == 0) break
+                        }
+                        val chunk = wasm.copyOfRange(q, q + len)
+                        if (off == 0 && len >= 32) seg0 = chunk.copyOfRange(0, 32)
+                        if (off == 3200 && len >= 32) seg3200 = chunk.copyOfRange(0, 32)
+                        q += len
+                    }
+                }
+                p += n
+            }
+            val a = seg0 ?: return null
+            val b = seg3200 ?: return null
+            ByteArray(32) { i -> (a[i].toInt() xor b[i].toInt()).toByte() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    // ChaCha20 RFC 8439 puro (20 rounds, sigma "expand 32-byte k", counter u32 LE).
+    private fun chacha20(key: ByteArray, nonce: ByteArray, ct: ByteArray): ByteArray? {
+        return try {
+            if (key.size != 32 || nonce.size != 12 || ct.isEmpty()) return null
+            fun le(b: ByteArray, o: Int): Int =
+                (b[o].toInt() and 0xFF) or ((b[o + 1].toInt() and 0xFF) shl 8) or
+                ((b[o + 2].toInt() and 0xFF) shl 16) or ((b[o + 3].toInt() and 0xFF) shl 24)
+            fun rotl(v: Int, n: Int): Int = (v shl n) or (v ushr (32 - n))
+            fun qr(x: IntArray, a: Int, b: Int, c: Int, d: Int) {
+                x[a] = x[a] + x[b]; x[d] = rotl(x[d] xor x[a], 16)
+                x[c] = x[c] + x[d]; x[b] = rotl(x[b] xor x[c], 12)
+                x[a] = x[a] + x[b]; x[d] = rotl(x[d] xor x[a], 8)
+                x[c] = x[c] + x[d]; x[b] = rotl(x[b] xor x[c], 7)
+            }
+            val out = ByteArray(ct.size)
+            var ctr = 0
+            var pos = 0
+            while (pos < ct.size) {
+                val s = IntArray(16)
+                s[0] = 0x61707865; s[1] = 0x3320646e; s[2] = 0x79622d32; s[3] = 0x6b206574
+                for (i in 0 until 8) s[4 + i] = le(key, i * 4)
+                s[12] = ctr
+                s[13] = le(nonce, 0); s[14] = le(nonce, 4); s[15] = le(nonce, 8)
+                val w = s.copyOf()
+                repeat(10) {
+                    qr(w, 0, 4, 8, 12); qr(w, 1, 5, 9, 13); qr(w, 2, 6, 10, 14); qr(w, 3, 7, 11, 15)
+                    qr(w, 0, 5, 10, 15); qr(w, 1, 6, 11, 12); qr(w, 2, 7, 8, 13); qr(w, 3, 4, 9, 14)
+                }
+                val ks = ByteArray(64)
+                for (i in 0 until 16) {
+                    val v = w[i] + s[i]
+                    ks[i * 4] = (v and 0xFF).toByte()
+                    ks[i * 4 + 1] = ((v ushr 8) and 0xFF).toByte()
+                    ks[i * 4 + 2] = ((v ushr 16) and 0xFF).toByte()
+                    ks[i * 4 + 3] = ((v ushr 24) and 0xFF).toByte()
+                }
+                val n = minOf(64, ct.size - pos)
+                for (i in 0 until n) out[pos + i] = (ct[pos + i].toInt() xor ks[i].toInt()).toByte()
+                pos += n
+                ctr++
+            }
+            out
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    // v9: resolve UMA opção de player (filme via getPlayer listado ou série via
+    // getOptions). videoUrl direto pode vir no option (série) ou via getPlayer(ID).
+    private suspend fun resolveOneOption(
+        videoId: String,
+        directUrl: String,
+        server: String,
+        oneLink: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        var videoUrl = directUrl.takeIf { it.isNotBlank() }
+        if (videoUrl == null) {
+            if (videoId.isBlank()) return false
+            try {
+                val apiResp = app.post(
+                    "$ONE_BASE/api",
+                    headers = mapOf(
+                        "User-Agent" to USER_AGENT,
+                        "Referer" to oneLink,
+                        "X-Requested-With" to "XMLHttpRequest"
+                    ),
+                    data = mapOf("action" to "getPlayer", "video_id" to videoId),
+                    timeout = 30
+                ).parsedSafe<OnePlayerResp>()
+                videoUrl = apiResp?.data?.videoUrl?.takeIf { it.isNotBlank() } ?: return false
+            } catch (_: Exception) {
+                return false
+            }
+        }
+        val url = videoUrl!!
+        if (url.contains(".m3u8")) {
+            callback.invoke(
+                newExtractorLink(
+                    source = "EmbedPlay",
+                    name = "EmbedPlay (HLS)",
+                    url = url,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = oneLink
+                    this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to oneLink)
+                    this.quality = Qualities.P1080.value
+                }
+            )
+            return true
+        }
+        // UPN direto: /api/v1/video?id={hash} (HTTP-puro, provado no lab)
+        if (url.contains("upns.xyz") || url.contains("embedplayapiupn")) {
+            try {
+                if (resolveUpnDirect(url, oneLink, callback)) return true
+            } catch (_: Exception) {}
+        }
+        // Byse -> espelho Streamwish (extrator nativo do app)
+        if (url.contains("embedplaybyse.top") || server.equals("BYSE", true)) {
+            // v8: code Byse pode ter - e _ (1mwapi8cwto7, 1xn1h1ntef3d)
+            val code = Regex("""/e/([a-zA-Z0-9_-]+)""").find(url)?.groupValues?.getOrNull(1)
+            if (!code.isNullOrBlank()) {
+                try {
+                    if (loadExtractor("https://streamwish.to/e/$code", oneLink, subtitleCallback, callback)) {
+                        return true
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+        // Abyss REAL (player.abyssplayer.com, SoTrym) via WebView — ÚNICO WebView do fluxo.
+        if (url.contains("abyss") || url.contains("abysscdn") || server.equals("ABYS", true)) {
+            try {
+                val real = resolveAbyssShell(url, oneLink) ?: url
+                if (resolveViaWebView(real, oneLink, callback)) return true
+            } catch (_: Exception) {}
+        }
+        // Qualquer outro: extrator nativo como última tentativa (sem WebView)
+        return try {
+            loadExtractor(url, oneLink, subtitleCallback, callback)
         } catch (_: Exception) {
             false
         }
