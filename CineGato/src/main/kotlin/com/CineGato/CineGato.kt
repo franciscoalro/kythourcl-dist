@@ -33,6 +33,11 @@ class CineGato : MainAPI() {
     private val SIGN_APP_KEY = "T!BgJBAppSf"
     private val SIGN_KEY_STATIC = "T!BgJB"
 
+    private val posterHeadersMap = mapOf(
+        "User-Agent" to UA,
+        "Referer" to "$mainUrl/"
+    )
+
     private var cachedAesKey: ByteArray? = null
 
     override val mainPage = mainPageOf(
@@ -144,6 +149,7 @@ class CineGato : MainAPI() {
                             searchList.add(
                                 newMovieSearchResponse(title, "$mainUrl/film/$mid", type) {
                                     this.posterUrl = poster
+                                    this.posterHeaders = posterHeadersMap
                                 }
                             )
                         }
@@ -177,6 +183,7 @@ class CineGato : MainAPI() {
                             results.add(
                                 newMovieSearchResponse(title, "$mainUrl/film/$mid", type) {
                                     this.posterUrl = poster
+                                    this.posterHeaders = posterHeadersMap
                                 }
                             )
                         }
@@ -251,6 +258,7 @@ class CineGato : MainAPI() {
                 episodesList
             ) {
                 this.posterUrl = poster
+                this.posterHeaders = posterHeadersMap
                 this.plot = plot
                 this.year = year
             }
@@ -269,6 +277,7 @@ class CineGato : MainAPI() {
             singleEpisodeId
         ) {
             this.posterUrl = poster
+            this.posterHeaders = posterHeadersMap
             this.plot = plot
             this.year = year
         }
