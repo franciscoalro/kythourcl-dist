@@ -211,6 +211,7 @@ class CineGato : MainAPI() {
         var poster: String? = null
         var year: Int? = null
         var isSeries = false
+        val seasonsList = mutableListOf<Pair<String, Int>>()
 
         try {
             val detailUrl = "$mainUrl/film-api/v2.1.2/movie?movieId=$mediaId&clientType=1&packageName=$PACKAGE_NAME&lang=pt-BR"
@@ -229,34 +230,78 @@ class CineGato : MainAPI() {
                         val cal = java.util.Calendar.getInstance().apply { timeInMillis = pubTime }
                         year = cal.get(java.util.Calendar.YEAR)
                     }
+                    val seasons = data.optJSONArray("seasons")
+                    if (seasons != null && seasons.length() > 0) {
+                        for (i in 0 until seasons.length()) {
+                            val sObj = seasons.optJSONObject(i) ?: continue
+                            val sMid = sObj.opt("movieId")?.toString() ?: sObj.optString("movieId", "")
+                            val sNum = sObj.optInt("number", i + 1)
+                            if (sMid.isNotBlank()) {
+                                seasonsList.add(Pair(sMid, sNum))
+                            }
+                        }
+                    }
                 }
             }
         } catch (e: Exception) {}
 
-        // Buscar lista de episódios
+        // Buscar lista de episódios (suporte a múltiplas temporadas ou temporada única)
         val episodesList = mutableListOf<Episode>()
         try {
-            val epUrl = "$mainUrl/film-api/v1.8.7/movie/getEpisodes?movieId=$mediaId&clientType=1&packageName=$PACKAGE_NAME&lang=pt-BR"
-            val epResp = app.get(epUrl, headers = getApiHeaders())
-            val epDec = decryptPayload(epResp.text)
-            if (epDec != null) {
-                val epJson = parseJsonObject(epDec)
-                val data = epJson?.optJSONObject("data")
-                val eps = data?.optJSONArray("episodes")
-                if (eps != null) {
-                    for (i in 0 until eps.length()) {
-                        val epObj = eps.optJSONObject(i) ?: continue
-                        val epId = epObj.opt("id")?.toString() ?: epObj.optString("id", "")
-                        val epNum = epObj.optInt("number", i + 1)
-                        val epTitle = epObj.optString("title", "Episódio $epNum")
-                        if (epId.isNotBlank()) {
-                            episodesList.add(
-                                newEpisode("$mainUrl/episode/$epId?mid=$mediaId") {
-                                    this.name = epTitle
-                                    this.episode = epNum
-                                    this.posterUrl = poster
+            if (seasonsList.isNotEmpty()) {
+                for (s in seasonsList) {
+                    val sMid = s.first
+                    val sNum = s.second
+                    val epUrl = "$mainUrl/film-api/v1.8.7/movie/getEpisodes?movieId=$sMid&clientType=1&packageName=$PACKAGE_NAME&lang=pt-BR"
+                    val epResp = app.get(epUrl, headers = getApiHeaders())
+                    val epDec = decryptPayload(epResp.text)
+                    if (epDec != null) {
+                        val epJson = parseJsonObject(epDec)
+                        val data = epJson?.optJSONObject("data")
+                        val eps = data?.optJSONArray("episodes")
+                        if (eps != null) {
+                            for (i in 0 until eps.length()) {
+                                val epObj = eps.optJSONObject(i) ?: continue
+                                val epId = epObj.opt("id")?.toString() ?: epObj.optString("id", "")
+                                val epNum = epObj.optInt("number", i + 1)
+                                val epTitle = epObj.optString("title", "Episódio $epNum")
+                                if (epId.isNotBlank()) {
+                                    episodesList.add(
+                                        newEpisode("$mainUrl/episode/$epId?mid=$sMid") {
+                                            this.name = epTitle
+                                            this.season = sNum
+                                            this.episode = epNum
+                                            this.posterUrl = poster
+                                        }
+                                    )
                                 }
-                            )
+                            }
+                        }
+                    }
+                }
+            } else {
+                val epUrl = "$mainUrl/film-api/v1.8.7/movie/getEpisodes?movieId=$mediaId&clientType=1&packageName=$PACKAGE_NAME&lang=pt-BR"
+                val epResp = app.get(epUrl, headers = getApiHeaders())
+                val epDec = decryptPayload(epResp.text)
+                if (epDec != null) {
+                    val epJson = parseJsonObject(epDec)
+                    val data = epJson?.optJSONObject("data")
+                    val eps = data?.optJSONArray("episodes")
+                    if (eps != null) {
+                        for (i in 0 until eps.length()) {
+                            val epObj = eps.optJSONObject(i) ?: continue
+                            val epId = epObj.opt("id")?.toString() ?: epObj.optString("id", "")
+                            val epNum = epObj.optInt("number", i + 1)
+                            val epTitle = epObj.optString("title", "Episódio $epNum")
+                            if (epId.isNotBlank()) {
+                                episodesList.add(
+                                    newEpisode("$mainUrl/episode/$epId?mid=$mediaId") {
+                                        this.name = epTitle
+                                        this.episode = epNum
+                                        this.posterUrl = poster
+                                    }
+                                )
+                            }
                         }
                     }
                 }

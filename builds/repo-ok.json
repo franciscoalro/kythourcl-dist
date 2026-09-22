@@ -1,6 +1,6 @@
 {
   "name": "Kythour Repository",
-  "description": "Plugins Kythour — CineGato v4, AnimesOrion v1, Pobreflix v150, CineVision, AnimeFire, NetCine, RedeCanais, TopAnimes (8 plugins)",
+  "description": "Plugins Kythour — CineGato v6, AnimesOrion v1, Pobreflix v150, CineVision, AnimeFire, NetCine, RedeCanais, TopAnimes (8 plugins)",
   "manifestVersion": 1,
   "pluginLists": [
     "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/plugins.json"

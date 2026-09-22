@@ -28,15 +28,15 @@
         "name": "AnimesOrion"
     },
     {
-        "fileHash": "sha256-f71676d8e9f0656d70f1ee0cc81e4480bf103d11ec6f31b1e327106b9666d99a",
+        "fileHash": "sha256-f3b2ab733d50e23615b4b185183052af54cc3a5e7a114a5d67a083252db49c6d",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 18936,
+        "fileSize": 22335,
         "status": 3,
         "authors": [
             "franciscoalro"
         ],
-        "version": 5,
+        "version": 6,
         "internalName": "CineGato",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/CineGato.cs3",
         "name": "CineGato"
