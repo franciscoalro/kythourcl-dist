@@ -2,7 +2,6 @@ package com.CineGato
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
@@ -46,6 +45,15 @@ class CineGato : MainAPI() {
         "catalogo" to "Catálogo Geral"
     )
 
+    private fun parseJsonObject(str: String?): JSONObject? {
+        if (str.isNullOrBlank()) return null
+        return try {
+            JSONObject(str)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private fun getApiHeaders(timestamp: String? = null): Map<String, String> {
         val ts = timestamp ?: System.currentTimeMillis().toString()
         val nonce = UUID.randomUUID().toString().replace("-", "")
@@ -74,7 +82,7 @@ class CineGato : MainAPI() {
                 "$mainUrl/v0.1/system/getSecurityKey/1",
                 headers = mapOf("User-Agent" to UA)
             )
-            val json = tryParseJson<JSONObject>(secResp.text)
+            val json = parseJsonObject(secResp.text)
             val secB64 = json?.optString("data", "") ?: ""
             val dynamicPart = if (secB64.isNotBlank()) {
                 String(Base64.decode(secB64, Base64.NO_WRAP), Charsets.UTF_8)
@@ -124,7 +132,7 @@ class CineGato : MainAPI() {
             val resp = app.get(url, headers = getApiHeaders())
             val decrypted = decryptPayload(resp.text)
             if (decrypted != null) {
-                val json = tryParseJson<JSONObject>(decrypted)
+                val json = parseJsonObject(decrypted)
                 val dataObj = json?.optJSONObject("data")
                 val dataArr = json?.optJSONArray("data")
 
@@ -139,7 +147,7 @@ class CineGato : MainAPI() {
                 if (rows != null) {
                     for (i in 0 until rows.length()) {
                         val obj = rows.optJSONObject(i) ?: continue
-                        val mid = obj.optString("id", obj.optString("movieId", ""))
+                        val mid = obj.opt("id")?.toString() ?: obj.optString("movieId", "")
                         val title = obj.optString("title", obj.optString("name", ""))
                         val poster = obj.optString("coverVerticalImage", obj.optString("coverHorizontalImage", obj.optString("cover", "")))
                         val movieType = obj.optInt("movieType", 2)
@@ -168,18 +176,18 @@ class CineGato : MainAPI() {
             val resp = app.get(searchUrl, headers = getApiHeaders())
             val decrypted = decryptPayload(resp.text)
             if (decrypted != null) {
-                val json = tryParseJson<JSONObject>(decrypted)
+                val json = parseJsonObject(decrypted)
                 val data = json?.optJSONObject("data")
-                val rows = data?.optJSONArray("rows")
+                val rows = data?.optJSONArray("rows") ?: json?.optJSONArray("data")
                 if (rows != null) {
                     for (i in 0 until rows.length()) {
                         val obj = rows.optJSONObject(i) ?: continue
-                        val mid = obj.optString("id", "")
-                        val title = obj.optString("title", "")
-                        val poster = obj.optString("coverVerticalImage", obj.optString("coverHorizontalImage", ""))
+                        val mid = obj.opt("id")?.toString() ?: obj.optString("movieId", "")
+                        val title = obj.optString("title", obj.optString("name", ""))
+                        val poster = obj.optString("coverVerticalImage", obj.optString("coverHorizontalImage", obj.optString("cover", "")))
                         val movieType = obj.optInt("movieType", 2)
                         val type = if (movieType == 2) TvType.Movie else TvType.TvSeries
-                        if (mid.isNotBlank()) {
+                        if (mid.isNotBlank() && title.isNotBlank()) {
                             results.add(
                                 newMovieSearchResponse(title, "$mainUrl/film/$mid", type) {
                                     this.posterUrl = poster
@@ -209,13 +217,18 @@ class CineGato : MainAPI() {
             val resp = app.get(detailUrl, headers = getApiHeaders())
             val decrypted = decryptPayload(resp.text)
             if (decrypted != null) {
-                val json = tryParseJson<JSONObject>(decrypted)
+                val json = parseJsonObject(decrypted)
                 val data = json?.optJSONObject("data")
                 if (data != null) {
                     title = data.optString("title", title)
                     plot = data.optString("briefIntroduction", null)
                     poster = data.optString("coverVerticalImage", data.optString("coverHorizontalImage", null))
                     isSeries = data.optInt("movieType", 2) != 2
+                    val pubTime = data.optLong("publishTime", 0L)
+                    if (pubTime > 0) {
+                        val cal = java.util.Calendar.getInstance().apply { timeInMillis = pubTime }
+                        year = cal.get(java.util.Calendar.YEAR)
+                    }
                 }
             }
         } catch (e: Exception) {}
@@ -227,13 +240,13 @@ class CineGato : MainAPI() {
             val epResp = app.get(epUrl, headers = getApiHeaders())
             val epDec = decryptPayload(epResp.text)
             if (epDec != null) {
-                val epJson = tryParseJson<JSONObject>(epDec)
+                val epJson = parseJsonObject(epDec)
                 val data = epJson?.optJSONObject("data")
                 val eps = data?.optJSONArray("episodes")
                 if (eps != null) {
                     for (i in 0 until eps.length()) {
                         val epObj = eps.optJSONObject(i) ?: continue
-                        val epId = epObj.optString("id", "")
+                        val epId = epObj.opt("id")?.toString() ?: epObj.optString("id", "")
                         val epNum = epObj.optInt("number", i + 1)
                         val epTitle = epObj.optString("title", "Episódio $epNum")
                         if (epId.isNotBlank()) {
@@ -301,7 +314,6 @@ class CineGato : MainAPI() {
             episodeId
         }
 
-        // Chamar o endpoint nativo getVideo2 com a chave apkSignKey oficial
         try {
             val videoUrl = "$mainUrl/film-api/v2.0.7/movie/getVideo2"
             val body = JSONObject().apply {
@@ -322,7 +334,7 @@ class CineGato : MainAPI() {
 
             val decrypted = decryptPayload(resp.text)
             if (decrypted != null) {
-                val json = tryParseJson<JSONObject>(decrypted)
+                val json = parseJsonObject(decrypted)
                 val dataObj = json?.optJSONObject("data")
                 if (dataObj != null) {
                     val mainM3u8 = dataObj.optString("videoUrl", "")
