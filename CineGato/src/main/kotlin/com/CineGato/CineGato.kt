@@ -36,10 +36,9 @@ class CineGato : MainAPI() {
     private var cachedAesKey: ByteArray? = null
 
     override val mainPage = mainPageOf(
-        "Em Alta" to "em_alta",
-        "Lançamentos" to "lancamentos",
-        "Filmes" to "filmes",
-        "Séries" to "series"
+        "em_alta" to "Em Alta",
+        "mais_buscados" to "Mais Buscados",
+        "catalogo" to "Catálogo Geral"
     )
 
     private fun getApiHeaders(timestamp: String? = null): Map<String, String> {
@@ -106,24 +105,42 @@ class CineGato : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val items = mutableListOf<HomePageList>()
+        val searchList = mutableListOf<SearchResponse>()
+        var hasNext = false
 
         try {
-            val bannerUrl = "$mainUrl/film-api/v1.9.8/banner/getBannerByClientAndLocation?clientType=1&location=1"
-            val resp = app.get(bannerUrl, headers = getApiHeaders())
+            val url = when (request.data) {
+                "em_alta" -> "$mainUrl/film-api/v1.1.0/movielibrary/getRank?page=$page&pageSize=20&clientType=1&packageName=$PACKAGE_NAME&lang=pt-BR"
+                "mais_buscados" -> "$mainUrl/film-api/v2.0.0/movie/getSearchRank?clientType=1&packageName=$PACKAGE_NAME&lang=pt-BR"
+                "catalogo" -> "$mainUrl/film-api/v1.1.0/movie/getMovieBySearchCondition?page=$page&pageSize=20&clientType=1&packageName=$PACKAGE_NAME&lang=pt-BR"
+                else -> "$mainUrl/film-api/v1.1.0/movielibrary/getRank?page=$page&pageSize=20&clientType=1&packageName=$PACKAGE_NAME&lang=pt-BR"
+            }
+
+            val resp = app.get(url, headers = getApiHeaders())
             val decrypted = decryptPayload(resp.text)
             if (decrypted != null) {
                 val json = tryParseJson<JSONObject>(decrypted)
-                val list = json?.optJSONArray("data")
-                val searchList = mutableListOf<SearchResponse>()
-                if (list != null) {
-                    for (i in 0 until list.length()) {
-                        val obj = list.optJSONObject(i) ?: continue
-                        val mid = obj.optString("movieId", obj.optString("id"))
-                        val title = obj.optString("title", obj.optString("name", "Filme $mid"))
-                        val poster = obj.optString("coverVerticalImage", obj.optString("cover", ""))
-                        val type = if (obj.optInt("movieType", 1) == 2) TvType.Movie else TvType.TvSeries
-                        if (mid.isNotBlank()) {
+                val dataObj = json?.optJSONObject("data")
+                val dataArr = json?.optJSONArray("data")
+
+                val rows = dataObj?.optJSONArray("rows") ?: dataArr
+
+                if (dataObj != null) {
+                    val currentPage = dataObj.optInt("page", page)
+                    val totalPages = dataObj.optInt("pages", 1)
+                    hasNext = currentPage < totalPages
+                }
+
+                if (rows != null) {
+                    for (i in 0 until rows.length()) {
+                        val obj = rows.optJSONObject(i) ?: continue
+                        val mid = obj.optString("id", obj.optString("movieId", ""))
+                        val title = obj.optString("title", obj.optString("name", ""))
+                        val poster = obj.optString("coverVerticalImage", obj.optString("coverHorizontalImage", obj.optString("cover", "")))
+                        val movieType = obj.optInt("movieType", 2)
+                        val type = if (movieType == 2) TvType.Movie else TvType.TvSeries
+
+                        if (mid.isNotBlank() && title.isNotBlank()) {
                             searchList.add(
                                 newMovieSearchResponse(title, "$mainUrl/film/$mid", type) {
                                     this.posterUrl = poster
@@ -132,27 +149,10 @@ class CineGato : MainAPI() {
                         }
                     }
                 }
-                if (searchList.isNotEmpty()) {
-                    items.add(HomePageList(request.name, searchList))
-                }
             }
         } catch (e: Exception) {}
 
-        // Se a chamada à API não trouxer dados, mantemos destaques populares
-        if (items.isEmpty()) {
-            val defaultList = listOf(
-                newMovieSearchResponse(
-                    "Batman",
-                    "$mainUrl/film/6610078462420992",
-                    TvType.Movie
-                ) {
-                    this.posterUrl = "https://img2.fumdx.com/image/f4a16aac18f227e5530fca5a9a1565f94cc5f91e.jpg"
-                }
-            )
-            items.add(HomePageList(request.name, defaultList))
-        }
-
-        return newHomePageResponse(items, hasNext = false)
+        return newHomePageResponse(request.name, searchList, hasNext = hasNext)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
