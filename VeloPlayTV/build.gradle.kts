@@ -1,4 +1,4 @@
 // Minimal per-plugin build file
 cloudstream {
-    version = 2
+    version = 1
 }
