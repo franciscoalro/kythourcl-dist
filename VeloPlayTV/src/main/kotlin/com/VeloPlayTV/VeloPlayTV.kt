@@ -17,6 +17,8 @@ class VeloPlayTV : MainAPI() {
     override val supportedTypes = setOf(
         TvType.Movie,
         TvType.TvSeries,
+        TvType.Anime,
+        TvType.Cartoon,
         TvType.Live
     )
 
@@ -87,30 +89,99 @@ class VeloPlayTV : MainAPI() {
         }
     }
 
+    // Queries de catálogo para cada seção expandida com paginação infinita
+    private val sectionQueries = mapOf(
+        "animes" to listOf(
+            "dragon", "naruto", "piece", "titan", "jujutsu", "demon", "bleach", "death",
+            "hunter", "hero", "sword", "ghoul", "pokemon", "leveling", "chainsaw", "spy",
+            "clover", "fairy", "alchemist", "punch", "boruto", "haikyu", "avatar", "evangelion",
+            "overlord", "rezero", "shield", "baki", "dungeon", "fate", "danganronpa", "inuyasha"
+        ),
+        "movies_action" to listOf(
+            "vingadores", "batman", "aranha", "velozes", "wick", "missao", "avatar", "matrix",
+            "gladiador", "rambo", "exterminador", "transformers", "top gun", "jurassic", "mad max",
+            "godzilla", "kong", "homem de ferro", "thor", "capitao america", "pantera negra"
+        ),
+        "movies_horror" to listOf(
+            "invocacao", "sobrenatural", "panico", "jogos mortais", "halloween", "it",
+            "freira", "anabelle", "exorcista", "hereditario", "evil dead", "chucky",
+            "silencio dos inocentes", "sexta feira 13", "pesadelo", "massacre", "sorria"
+        ),
+        "movies_comedy" to listOf(
+            "gente grande", "se beber", "branquelas", "ted", "deadpool", "todo mundo em panico",
+            "shrek", "vizinhos", "superbad", "click", "mentiroso", "loucademia", "american pie"
+        ),
+        "movies_scifi" to listOf(
+            "interestelar", "senhor dos aneis", "harry potter", "star wars", "duna",
+            "matrix", "inception", "origem", "blade runner", "hobbit", "avatar", "alien"
+        ),
+        "series_populares" to listOf(
+            "stranger", "game of thrones", "breaking bad", "walking dead", "the boys",
+            "dragon", "vikings", "prison break", "supernatural", "last of us", "wandinha",
+            "peaky", "fallout", "dexter", "greys", "friends", "office", "dark", "euphoria", "yellowstone"
+        ),
+        "kids" to listOf(
+            "disney", "pixar", "patrulha canina", "peppa", "galinha pintadinha", "toy story",
+            "shrek", "divertida mente", "kung fu panda", "meu malvado", "minions", "frozen",
+            "carros", "bob esponja", "masha", "scooby", "trolls", "madagascar", "hotel transilvania"
+        )
+    )
+
+    private val channelFilters = mapOf(
+        "live_abertos" to listOf("globo", "sbt", "record", "band", "cultura", "redetv", "gazeta", "vida", "aparecida", "evangelizar", "cancoes", "futura", "tv brasil"),
+        "live_esportes" to listOf("sportv", "espn", "premiere", "fox sports", "bandsports", "conmebol", "combate", "ufc", "futebol", "nosso futebol", "dazn", "f1", "formula"),
+        "live_filmes" to listOf("telecine", "hbo", "max", "paramount", "universal", "warner", "sony", "axn", "tnt", "space", "cinemax", "megapix", "studio universal", "tcm", "a&e", "amc", "eurochannel", "usa"),
+        "live_infantil" to listOf("cartoon", "disney", "gloob", "discovery kids", "nickelodeon", "nick", "tooncrown", "boomerang", "animax", "baby tv", "nat geo kids", "tv rá tim bum"),
+        "live_variedades" to listOf("discovery", "history", "national geographic", "nat geo", "animal planet", "h&h", "tlc", "food", "home & health", "hgtv", "multishow", "gnt", "viva", "e!", "comedy central", "curta"),
+        "live_noticias" to listOf("globonews", "cnn", "jovem pan", "bandnews", "record news", "bloomberg", "bbc", "al jazeera", "dw", "euronews"),
+        "live_4k" to listOf("4k", "uhd")
+    )
+
     override val mainPage = mainPageOf(
-        "/mar/v1/category/nELh/recommendations" to "Filmes",
-        "/mar/v1/category/FFDE/recommendations" to "Séries",
-        "/mar/v1/category/r5Vv/recommendations" to "Infantil",
-        "/mar/v1/category/hgKe/recommendations" to "Animes",
-        "/stella/v1/channels" to "Canais Ao Vivo"
+        "rec:T2xE" to "⭐ Destaques & Recomendações",
+        "cat:animes" to "⛩️ Animes (Completo)",
+        "cat:movies_action" to "💥 Filmes: Ação & Aventura",
+        "cat:series_populares" to "📺 Séries Populares",
+        "cat:movies_horror" to "👻 Filmes: Terror & Suspense",
+        "cat:movies_comedy" to "😂 Filmes: Comédia",
+        "cat:movies_scifi" to "🚀 Filmes: Ficção & Fantasia",
+        "cat:kids" to "🧸 Infantil & Desenhos",
+        "live:all" to "📡 Todos os Canais Ao Vivo (480+)",
+        "live:live_esportes" to "⚽ Canais: Esportes & Futebol",
+        "live:live_filmes" to "🎬 Canais: Filmes & Séries",
+        "live:live_abertos" to "📺 Canais: TV Aberta",
+        "live:live_infantil" to "🎈 Canais: Infantis",
+        "live:live_variedades" to "🌍 Canais: Documentários & Variedades",
+        "live:live_noticias" to "📰 Canais: Notícias",
+        "live:live_4k" to "🌟 Canais: 4K & UHD"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val path = request.data
-        val isLive = path.contains("stella") || path.contains("channels")
+        val itemsList = mutableListOf<SearchResponse>()
+        val seenIds = mutableSetOf<String>()
 
-        if (isLive) {
-            val liveItems = mutableListOf<SearchResponse>()
-            val raw = safeGet(path)
+        // 1. Canais Ao Vivo (com suporte a filtro por gênero e exibição completa)
+        if (path.startsWith("live:")) {
+            val filterKey = path.removePrefix("live:")
+            val raw = safeGet("/stella/v1/channels")
             if (!raw.isNullOrBlank()) {
                 try {
                     val json = JSONObject(raw)
                     val channels = json.optJSONArray("channels") ?: JSONArray()
+                    val filterWords = channelFilters[filterKey]
+
                     for (i in 0 until channels.length()) {
                         val ch = channels.optJSONObject(i) ?: continue
                         val id = ch.optString("_id")
-                        if (id.isBlank()) continue
+                        if (id.isBlank() || seenIds.contains(id)) continue
+
                         val name = ch.optString("display_name", "Canal Ao Vivo")
+                        if (filterWords != null && filterWords.none { name.contains(it, ignoreCase = true) }) {
+                            continue
+                        }
+
+                        seenIds.add(id)
                         val logo = ch.optString("logo").ifBlank { ch.optString("poster") }
                         
                         var streamLink = "$mainUrl/stella/v1/channel/$id/play"
@@ -123,7 +194,7 @@ class VeloPlayTV : MainAPI() {
                             }
                         }
 
-                        liveItems.add(
+                        itemsList.add(
                             newLiveSearchResponse(name, streamLink, TvType.Live) {
                                 this.posterUrl = logo
                                 this.posterHeaders = posterHeadersMap
@@ -135,56 +206,133 @@ class VeloPlayTV : MainAPI() {
 
             return newHomePageResponse(
                 request.name,
-                liveItems,
+                itemsList,
                 hasNext = false
             )
         }
 
-        val homeItems = mutableListOf<SearchResponse>()
-        val raw = safeGet(path)
+        // 2. Destaques da API Oficial
+        if (path.startsWith("rec:")) {
+            val catId = path.removePrefix("rec:")
+            val raw = safeGet("/mar/v1/category/$catId/recommendations")
+            if (!raw.isNullOrBlank()) {
+                try {
+                    val json = JSONObject(raw)
+                    val slots = json.optJSONArray("slots") ?: JSONArray()
+                    for (s in 0 until slots.length()) {
+                        val slot = slots.optJSONObject(s) ?: continue
+                        val items = slot.optJSONArray("items") ?: JSONArray()
+                        for (it in 0 until items.length()) {
+                            val item = items.optJSONObject(it) ?: continue
+                            val id = item.optString("refer")
+                            val title = item.optString("title")
+                            val pic = item.optString("pic")
+                            if (id.isBlank() || title.isBlank() || seenIds.contains(id)) continue
 
-        if (!raw.isNullOrBlank()) {
-            try {
-                val json = JSONObject(raw)
-                val slots = json.optJSONArray("slots") ?: JSONArray()
-                for (s in 0 until slots.length()) {
-                    val slot = slots.optJSONObject(s) ?: continue
-                    val items = slot.optJSONArray("items") ?: JSONArray()
-                    for (it in 0 until items.length()) {
-                        val item = items.optJSONObject(it) ?: continue
-                        val id = item.optString("refer")
+                            seenIds.add(id)
+                            val isSeries = title.contains("Temp.", ignoreCase = true)
+                            val type = if (isSeries) TvType.TvSeries else TvType.Movie
+
+                            if (type == TvType.TvSeries) {
+                                itemsList.add(
+                                    newTvSeriesSearchResponse(title, "$mainUrl/mar/v1/asset/$id/detail", TvType.TvSeries) {
+                                        this.posterUrl = pic
+                                        this.posterHeaders = posterHeadersMap
+                                    }
+                                )
+                            } else {
+                                itemsList.add(
+                                    newMovieSearchResponse(title, "$mainUrl/mar/v1/asset/$id/detail", TvType.Movie) {
+                                        this.posterUrl = pic
+                                        this.posterHeaders = posterHeadersMap
+                                    }
+                                )
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+
+            return newHomePageResponse(
+                request.name,
+                itemsList,
+                hasNext = false
+            )
+        }
+
+        // 3. Categorias Expandidas com Paginação Infinita via Scroll
+        if (path.startsWith("cat:")) {
+            val catKey = path.removePrefix("cat:")
+            val queries = sectionQueries[catKey] ?: emptyList()
+            
+            // Cada página busca 4 termos diferentes da lista
+            val pageSize = 4
+            val startIndex = (page - 1) * pageSize
+            val hasNext = startIndex + pageSize < queries.size
+
+            val currentQueries = if (startIndex < queries.size) {
+                queries.subList(startIndex, minOf(startIndex + pageSize, queries.size))
+            } else {
+                emptyList()
+            }
+
+            for (q in currentQueries) {
+                val encodedQ = try { URLEncoder.encode(q, "UTF-8") } catch (_: Exception) { q }
+                val raw = safeGet("/mar/v1/asset/search?q=$encodedQ&page=1&page_size=25") ?: continue
+                try {
+                    val json = JSONObject(raw)
+                    val assets = json.optJSONArray("assets") ?: JSONArray()
+                    for (i in 0 until assets.length()) {
+                        val item = assets.optJSONObject(i) ?: continue
+                        val id = item.optString("_id")
                         val title = item.optString("title")
-                        val pic = item.optString("pic")
-                        if (id.isBlank() || title.isBlank()) continue
+                        if (id.isBlank() || title.isBlank() || seenIds.contains(id)) continue
 
-                        val isSeries = path.contains("FFDE") || path.contains("hgKe") || title.contains("Temp.", ignoreCase = true)
-                        val type = if (isSeries) TvType.TvSeries else TvType.Movie
+                        seenIds.add(id)
+                        val itemType = item.optString("_type")
+                        val seriesStatus = item.optString("series_status")
+                        val isSeries = catKey.contains("series") || itemType.equals("SEASON", ignoreCase = true) || seriesStatus.isNotBlank() || title.contains("Temp.", ignoreCase = true)
 
-                        if (type == TvType.TvSeries) {
-                            homeItems.add(
-                                newTvSeriesSearchResponse(title, "$mainUrl/mar/v1/asset/$id/detail", TvType.TvSeries) {
-                                    this.posterUrl = pic
+                        var poster: String? = null
+                        val postersArr = item.optJSONArray("posters")
+                        if (postersArr != null && postersArr.length() > 0) {
+                            poster = postersArr.optString(0)
+                        }
+
+                        val tvType = when {
+                            catKey == "animes" -> TvType.Anime
+                            catKey == "kids" -> TvType.Cartoon
+                            isSeries -> TvType.TvSeries
+                            else -> TvType.Movie
+                        }
+
+                        if (isSeries) {
+                            itemsList.add(
+                                newTvSeriesSearchResponse(title, "$mainUrl/mar/v1/asset/$id/detail", tvType) {
+                                    this.posterUrl = poster
                                     this.posterHeaders = posterHeadersMap
                                 }
                             )
                         } else {
-                            homeItems.add(
-                                newMovieSearchResponse(title, "$mainUrl/mar/v1/asset/$id/detail", TvType.Movie) {
-                                    this.posterUrl = pic
+                            itemsList.add(
+                                newMovieSearchResponse(title, "$mainUrl/mar/v1/asset/$id/detail", tvType) {
+                                    this.posterUrl = poster
                                     this.posterHeaders = posterHeadersMap
                                 }
                             )
                         }
                     }
-                }
-            } catch (_: Exception) {}
+                } catch (_: Exception) {}
+            }
+
+            return newHomePageResponse(
+                request.name,
+                itemsList,
+                hasNext = hasNext
+            )
         }
 
-        return newHomePageResponse(
-            request.name,
-            homeItems,
-            hasNext = false
-        )
+        return newHomePageResponse(request.name, emptyList(), hasNext = false)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -192,13 +340,15 @@ class VeloPlayTV : MainAPI() {
         if (trimmed.isBlank()) return emptyList()
 
         val searchItems = mutableListOf<SearchResponse>()
+        val seenIds = mutableSetOf<String>()
+
         val encodedQuery = try {
             URLEncoder.encode(trimmed, "UTF-8")
         } catch (_: Exception) {
             trimmed
         }
 
-        val path = "/mar/v1/asset/search?q=$encodedQuery&page=1&page_size=30"
+        val path = "/mar/v1/asset/search?q=$encodedQuery&page=1&page_size=40"
         val raw = safeGet(path) ?: return emptyList()
 
         try {
@@ -209,8 +359,9 @@ class VeloPlayTV : MainAPI() {
                 val item = assets.optJSONObject(i) ?: continue
                 val id = item.optString("_id")
                 val title = item.optString("title")
-                if (id.isBlank() || title.isBlank()) continue
+                if (id.isBlank() || title.isBlank() || seenIds.contains(id)) continue
 
+                seenIds.add(id)
                 val itemType = item.optString("_type")
                 val seriesStatus = item.optString("series_status")
                 val isSeries = itemType.equals("SEASON", ignoreCase = true) || seriesStatus.isNotBlank() || title.contains("Temp.", ignoreCase = true)
@@ -270,7 +421,6 @@ class VeloPlayTV : MainAPI() {
         var posterUrl: String? = null
         val imagesArr = asset.optJSONArray("images")
         if (imagesArr != null) {
-            // Priority: icon (vertical) -> poster (horizontal) -> first available
             for (i in 0 until imagesArr.length()) {
                 val img = imagesArr.optJSONObject(i) ?: continue
                 if (img.optString("type") == "icon") {
@@ -287,65 +437,33 @@ class VeloPlayTV : MainAPI() {
                     }
                 }
             }
-            if (posterUrl.isNullOrBlank() && imagesArr.length() > 0) {
-                posterUrl = imagesArr.optJSONObject(0)?.optString("url")
-            }
         }
 
-        val childrenObj = asset.optJSONObject("children")
-        val childrenArr = childrenObj?.optJSONArray("items")
-        val brothersArr = asset.optJSONArray("brothers")
-
-        val isSeries = assetType.equals("SEASON", ignoreCase = true) ||
-                (childrenArr != null && childrenArr.length() > 0) ||
-                (brothersArr != null && brothersArr.length() > 0)
+        val scoreVal = asset.optDouble("score", 0.0)
+        val isSeries = assetType.equals("SEASON", ignoreCase = true) || title.contains("Temp.", ignoreCase = true)
 
         if (isSeries) {
             val episodes = mutableListOf<Episode>()
-            if (childrenArr != null && childrenArr.length() > 0) {
-                for (i in 0 until childrenArr.length()) {
-                    val child = childrenArr.optJSONObject(i) ?: continue
-                    val childId = child.optString("_id")
-                    if (childId.isBlank()) continue
-                    val epNum = child.optInt("seq", i + 1)
-                    val epTitle = child.optString("title").ifBlank { "Episódio $epNum" }
+            val childrenRaw = safeGet("/mar/v1/asset/$id/children")
+            if (!childrenRaw.isNullOrBlank()) {
+                try {
+                    val childrenJson = JSONObject(childrenRaw)
+                    val childrenArr = childrenJson.optJSONArray("items") ?: childrenJson.optJSONArray("children") ?: JSONArray()
+                    for (c in 0 until childrenArr.length()) {
+                        val child = childrenArr.optJSONObject(c) ?: continue
+                        val epId = child.optString("_id")
+                        val epSeq = child.optInt("seq", child.optInt("num", c + 1))
+                        val epTitle = child.optString("title").ifBlank { "Episódio $epSeq" }
 
-                    episodes.add(
-                        newEpisode("$mainUrl/mar/v1/asset/$childId/playinfo") {
-                            this.name = epTitle
-                            this.episode = epNum
-                            this.season = 1
-                            this.posterUrl = posterUrl
-                        }
-                    )
-                }
-            } else {
-                // Fallback direct children endpoint
-                val childRaw = safeGet("/mar/v1/asset/$id/children")
-                if (!childRaw.isNullOrBlank()) {
-                    try {
-                        val cJson = JSONObject(childRaw)
-                        val cArr = cJson.optJSONArray("items")
-                        if (cArr != null) {
-                            for (i in 0 until cArr.length()) {
-                                val child = cArr.optJSONObject(i) ?: continue
-                                val childId = child.optString("_id")
-                                if (childId.isBlank()) continue
-                                val epNum = child.optInt("seq", i + 1)
-                                val epTitle = child.optString("title").ifBlank { "Episódio $epNum" }
-
-                                episodes.add(
-                                    newEpisode("$mainUrl/mar/v1/asset/$childId/playinfo") {
-                                        this.name = epTitle
-                                        this.episode = epNum
-                                        this.season = 1
-                                        this.posterUrl = posterUrl
-                                    }
-                                )
+                        episodes.add(
+                            newEpisode("$mainUrl/mar/v1/asset/$epId/playinfo") {
+                                this.name = epTitle
+                                this.episode = epSeq
+                                this.posterUrl = posterUrl
                             }
-                        }
-                    } catch (_: Exception) {}
-                }
+                        )
+                    }
+                } catch (_: Exception) {}
             }
 
             return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
@@ -354,15 +472,17 @@ class VeloPlayTV : MainAPI() {
                 this.plot = plot
                 this.year = year
                 this.tags = tags
+                this.score = Score.from10(if (scoreVal > 0) scoreVal else null)
             }
-        } else {
-            return newMovieLoadResponse(title, url, TvType.Movie, "$mainUrl/mar/v1/asset/$id/playinfo") {
-                this.posterUrl = posterUrl
-                this.posterHeaders = posterHeadersMap
-                this.plot = plot
-                this.year = year
-                this.tags = tags
-            }
+        }
+
+        return newMovieLoadResponse(title, url, TvType.Movie, "$mainUrl/mar/v1/asset/$id/playinfo") {
+            this.posterUrl = posterUrl
+            this.posterHeaders = posterHeadersMap
+            this.plot = plot
+            this.year = year
+            this.tags = tags
+            this.score = Score.from10(if (scoreVal > 0) scoreVal else null)
         }
     }
 
@@ -372,84 +492,118 @@ class VeloPlayTV : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        if (data.startsWith("http") && (data.contains(".m3u8") || data.contains(".mp4") || data.contains(".ts"))) {
+        if (data.contains(".m3u8")) {
             callback(
                 newExtractorLink(
                     source = name,
-                    name = name,
+                    name = "Velo Play Ao Vivo",
                     url = data,
-                    type = if (data.contains(".mp4")) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
+                    type = ExtractorLinkType.M3U8
                 ) {
-                    this.headers = mapOf("User-Agent" to userAgent)
+                    this.referer = "https://fastcdn.bond/"
+                    this.headers = mapOf(
+                        "User-Agent" to userAgent,
+                        "Referer" to "https://fastcdn.bond/"
+                    )
+                    this.quality = Qualities.P1080.value
                 }
             )
             return true
         }
 
         val raw = safeGet(data) ?: return false
-        try {
-            val json = JSONObject(raw)
-            val info = json.optJSONObject("info") ?: return false
+        val json = JSONObject(raw)
+        val infoObj = json.optJSONObject("info") ?: json
 
-            val subsArr = info.optJSONArray("subtitles")
-            if (subsArr != null) {
-                for (i in 0 until subsArr.length()) {
-                    val sub = subsArr.optJSONObject(i) ?: continue
-                    val subUrl = sub.optString("url")
-                    if (subUrl.isNotBlank()) {
-                        subtitleCallback(
-                            SubtitleFile(
-                                lang = sub.optString("lang", "Português"),
-                                url = subUrl
-                            )
-                        )
-                    }
+        val assetIdRegex = Regex("asset/([^/]+)/playinfo")
+        val assetId = assetIdRegex.find(data)?.groupValues?.getOrNull(1)
+
+        val subtitlesArr = infoObj.optJSONArray("subtitles") ?: json.optJSONArray("subtitles")
+        if (subtitlesArr != null && subtitlesArr.length() > 0) {
+            for (s in 0 until subtitlesArr.length()) {
+                val sub = subtitlesArr.optJSONObject(s) ?: continue
+                val lang = sub.optString("lang").ifBlank { sub.optString("language", "Português") }
+                val subUrl = sub.optString("url")
+                if (subUrl.isNotBlank()) {
+                    subtitleCallback(SubtitleFile(lang, subUrl))
                 }
             }
-
-            val playArr = info.optJSONArray("play")
-            var foundLinks = false
-            if (playArr != null) {
-                for (i in 0 until playArr.length()) {
-                    val stream = playArr.optJSONObject(i) ?: continue
-                    val streamUrl = stream.optString("url")
-                    if (streamUrl.isBlank()) continue
-
-                    val resStr = stream.optString("resolution")
-                    val quality = when (resStr.lowercase()) {
-                        "1080p", "1080" -> Qualities.P1080.value
-                        "720p", "720" -> Qualities.P720.value
-                        "480p", "480" -> Qualities.P480.value
-                        else -> Qualities.Unknown.value
-                    }
-
-                    val langs = mutableListOf<String>()
-                    val langArr = stream.optJSONArray("audio_langs")
-                    if (langArr != null) {
-                        for (j in 0 until langArr.length()) {
-                            val l = langArr.optString(j)
-                            if (l.isNotBlank()) langs.add(l)
-                        }
-                    }
-                    val audioDesc = if (langs.isNotEmpty()) " [${langs.joinToString(",")}]" else ""
-
-                    callback(
-                        newExtractorLink(
-                            source = name,
-                            name = "$name ${resStr.ifBlank { "Stream" }}$audioDesc".trim(),
-                            url = streamUrl,
-                            type = if (streamUrl.contains(".mp4")) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
-                        ) {
-                            this.quality = quality
-                            this.headers = mapOf("User-Agent" to userAgent)
-                        }
-                    )
-                    foundLinks = true
-                }
-            }
-            return foundLinks
-        } catch (_: Exception) {
-            return false
+        } else if (!assetId.isNullOrEmpty()) {
+            subtitleCallback(
+                SubtitleFile("Português", "https://vidbox.shop/subtitle/$assetId/pt.srt")
+            )
+            subtitleCallback(
+                SubtitleFile("Inglês", "https://vidbox.shop/subtitle/$assetId/en.srt")
+            )
         }
+
+        var foundLinks = false
+        val streamsArr = infoObj.optJSONArray("play") ?: infoObj.optJSONArray("streams") ?: json.optJSONArray("play") ?: json.optJSONArray("streams")
+        if (streamsArr != null && streamsArr.length() > 0) {
+            for (st in 0 until streamsArr.length()) {
+                val streamObj = streamsArr.optJSONObject(st) ?: continue
+                val streamUrl = streamObj.optString("url")
+                if (streamUrl.isBlank()) continue
+
+                val resName = streamObj.optString("resolution", "1080p")
+                val audioLangs = mutableListOf<String>()
+                val audiosArr = streamObj.optJSONArray("audio_langs")
+                if (audiosArr != null) {
+                    for (a in 0 until audiosArr.length()) {
+                        audioLangs.add(audiosArr.optString(a))
+                    }
+                }
+                val audioSuffix = if (audioLangs.isNotEmpty()) " (${audioLangs.joinToString("/")})" else ""
+
+                val qualityVal = when {
+                    resName.contains("4k", ignoreCase = true) || resName.contains("2160", ignoreCase = true) -> Qualities.P2160.value
+                    resName.contains("1080", ignoreCase = true) -> Qualities.P1080.value
+                    resName.contains("720", ignoreCase = true) -> Qualities.P720.value
+                    resName.contains("480", ignoreCase = true) -> Qualities.P480.value
+                    else -> Qualities.Unknown.value
+                }
+
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = "Velo Play $resName$audioSuffix",
+                        url = streamUrl,
+                        type = if (streamUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = "https://fastcdn.bond/"
+                        this.headers = mapOf(
+                            "User-Agent" to userAgent,
+                            "Referer" to "https://fastcdn.bond/"
+                        )
+                        this.quality = qualityVal
+                    }
+                )
+                foundLinks = true
+            }
+        }
+
+        if (!foundLinks) {
+            val directPlay = infoObj.optString("play_url").ifBlank { infoObj.optString("url").ifBlank { json.optString("play_url").ifBlank { json.optString("url") } } }
+            if (directPlay.isNotBlank()) {
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = "Velo Play Principal",
+                        url = directPlay,
+                        type = if (directPlay.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = "https://fastcdn.bond/"
+                        this.headers = mapOf(
+                            "User-Agent" to userAgent,
+                            "Referer" to "https://fastcdn.bond/"
+                        )
+                        this.quality = Qualities.P1080.value
+                    }
+                )
+                foundLinks = true
+            }
+        }
+
+        return foundLinks
     }
 }
