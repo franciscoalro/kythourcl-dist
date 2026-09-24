@@ -112,10 +112,10 @@
         "name": "TopAnimes"
     },
     {
-        "fileHash": "sha256-82c9be6268198acee6cdebc1785e0f4b4c1573aa73adc8b358ef4d357069635d",
+        "fileHash": "sha256-276922e19a41cd40baf49b53debcd1978b039543b02f99db7594f1fa5b2c085c",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 31434,
+        "fileSize": 35506,
         "status": 3,
         "authors": [
             "franciscoalro"
