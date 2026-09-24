@@ -2,11 +2,11 @@ package com.VeloPlayTV
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
-import com.fasterxml.jackson.annotation.JsonProperty
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URLEncoder
 
 class VeloPlayTV : MainAPI() {
     override var name = "Velo Play TV"
@@ -20,6 +20,12 @@ class VeloPlayTV : MainAPI() {
         TvType.Live
     )
 
+    private val userAgent = "Velo Play/1.2.0 (Linux; Android 11; redroid11_x86_64) com.global.veloplaytv/10200"
+    private val posterHeadersMap = mapOf(
+        "User-Agent" to userAgent,
+        "Referer" to "https://fastcdn.bond/"
+    )
+
     private var authToken: String? = null
 
     private suspend fun getAuthHeaders(): Map<String, String> {
@@ -28,7 +34,7 @@ class VeloPlayTV : MainAPI() {
             token = performLogin()
         }
         return mapOf(
-            "User-Agent" to "Velo Play/1.2.0 (Linux; Android 11; redroid11_x86_64) com.global.veloplaytv/10200",
+            "User-Agent" to userAgent,
             "Accept-Language" to "pt-BR",
             "Authorization" to (if (!token.isNullOrBlank()) "Bearer $token" else "")
         )
@@ -47,11 +53,11 @@ class VeloPlayTV : MainAPI() {
                 "$mainUrl/user/v1/login",
                 requestBody = payload.toRequestBody("application/json; charset=utf-8".toMediaType()),
                 headers = mapOf(
-                    "User-Agent" to "Velo Play/1.2.0 (Linux; Android 11; redroid11_x86_64) com.global.veloplaytv/10200",
+                    "User-Agent" to userAgent,
                     "Content-Type" to "application/json; charset=UTF-8",
                     "Accept-Language" to "pt-BR"
                 ),
-                timeout = 10
+                timeout = 15
             )
             if (resp.isSuccessful) {
                 val json = JSONObject(resp.text)
@@ -69,146 +75,17 @@ class VeloPlayTV : MainAPI() {
         val fullUrl = if (url.startsWith("http")) url else "$mainUrl${if (url.startsWith("/")) "" else "/"}$url"
         return try {
             val headers = getAuthHeaders()
-            var resp = app.get(fullUrl, headers = headers, timeout = 10)
+            var resp = app.get(fullUrl, headers = headers, timeout = 15)
             if (resp.code == 401) {
                 performLogin()
                 val newHeaders = getAuthHeaders()
-                resp = app.get(fullUrl, headers = newHeaders, timeout = 10)
+                resp = app.get(fullUrl, headers = newHeaders, timeout = 15)
             }
             if (resp.isSuccessful) resp.text else null
         } catch (_: Exception) {
             null
         }
     }
-
-    // Data Transfer Objects
-    data class SlotItemDto(
-        @JsonProperty("type") val type: String? = null,
-        @JsonProperty("refer") val refer: String? = null,
-        @JsonProperty("pic") val pic: String? = null,
-        @JsonProperty("title") val title: String? = null
-    )
-
-    data class SlotDto(
-        @JsonProperty("seq") val seq: Int? = null,
-        @JsonProperty("items") val items: List<SlotItemDto>? = null
-    )
-
-    data class RecommendationResponse(
-        @JsonProperty("code") val code: Int? = null,
-        @JsonProperty("msg") val msg: String? = null,
-        @JsonProperty("slots") val slots: List<SlotDto>? = null
-    )
-
-    data class SearchAssetDto(
-        @JsonProperty("_id") val id: String? = null,
-        @JsonProperty("_type") val type: String? = null,
-        @JsonProperty("title") val title: String? = null,
-        @JsonProperty("score") val score: Any? = null,
-        @JsonProperty("series_status") val seriesStatus: String? = null,
-        @JsonProperty("posters") val posters: List<String>? = null,
-        @JsonProperty("has_subtitle") val hasSubtitle: Boolean? = null
-    )
-
-    data class SearchResponseDto(
-        @JsonProperty("code") val code: Int? = null,
-        @JsonProperty("msg") val msg: String? = null,
-        @JsonProperty("total") val total: Int? = null,
-        @JsonProperty("assets") val assets: List<SearchAssetDto>? = null
-    )
-
-    data class ImageDto(
-        @JsonProperty("type") val type: String? = null,
-        @JsonProperty("url") val url: String? = null
-    )
-
-    data class ActorDto(
-        @JsonProperty("_id") val id: String? = null,
-        @JsonProperty("name") val name: String? = null,
-        @JsonProperty("headshot") val headshot: String? = null
-    )
-
-    data class BrotherDto(
-        @JsonProperty("_id") val id: String? = null,
-        @JsonProperty("title") val title: String? = null
-    )
-
-    data class ChildItemDto(
-        @JsonProperty("_id") val id: String? = null,
-        @JsonProperty("seq") val seq: Int? = null,
-        @JsonProperty("title") val title: String? = null
-    )
-
-    data class ChildrenContainerDto(
-        @JsonProperty("total") val total: Int? = null,
-        @JsonProperty("seq_s") val seqS: Int? = null,
-        @JsonProperty("seq_e") val seqE: Int? = null,
-        @JsonProperty("items") val items: List<ChildItemDto>? = null
-    )
-
-    data class AssetDetailItemDto(
-        @JsonProperty("_id") val id: String? = null,
-        @JsonProperty("_type") val type: String? = null,
-        @JsonProperty("title") val title: String? = null,
-        @JsonProperty("score") val score: Any? = null,
-        @JsonProperty("release_at") val releaseAt: String? = null,
-        @JsonProperty("tags") val tags: List<String>? = null,
-        @JsonProperty("description") val description: String? = null,
-        @JsonProperty("images") val images: List<ImageDto>? = null,
-        @JsonProperty("actors") val actors: List<ActorDto>? = null,
-        @JsonProperty("brothers") val brothers: List<BrotherDto>? = null,
-        @JsonProperty("children") val children: ChildrenContainerDto? = null
-    )
-
-    data class AssetDetailResponse(
-        @JsonProperty("code") val code: Int? = null,
-        @JsonProperty("msg") val msg: String? = null,
-        @JsonProperty("asset") val asset: AssetDetailItemDto? = null
-    )
-
-    data class SubtitleItemDto(
-        @JsonProperty("lang") val lang: String? = null,
-        @JsonProperty("url") val url: String? = null
-    )
-
-    data class PlayStreamItemDto(
-        @JsonProperty("resolution") val resolution: String? = null,
-        @JsonProperty("url") val url: String? = null,
-        @JsonProperty("audio_langs") val audioLangs: List<String>? = null
-    )
-
-    data class PlayInfoContainerDto(
-        @JsonProperty("subtitles") val subtitles: List<SubtitleItemDto>? = null,
-        @JsonProperty("play") val play: List<PlayStreamItemDto>? = null
-    )
-
-    data class PlayInfoResponse(
-        @JsonProperty("code") val code: Int? = null,
-        @JsonProperty("msg") val msg: String? = null,
-        @JsonProperty("_id") val id: String? = null,
-        @JsonProperty("info") val info: PlayInfoContainerDto? = null
-    )
-
-    data class ChannelStreamDto(
-        @JsonProperty("_id") val id: String? = null,
-        @JsonProperty("resolution") val resolution: String? = null,
-        @JsonProperty("url") val url: String? = null
-    )
-
-    data class ChannelItemDto(
-        @JsonProperty("_id") val id: String? = null,
-        @JsonProperty("display_name") val displayName: String? = null,
-        @JsonProperty("logo") val logo: String? = null,
-        @JsonProperty("poster") val poster: String? = null,
-        @JsonProperty("resolution") val resolution: String? = null,
-        @JsonProperty("streams") val streams: List<ChannelStreamDto>? = null
-    )
-
-    data class ChannelListResponse(
-        @JsonProperty("code") val code: Int? = null,
-        @JsonProperty("msg") val msg: String? = null,
-        @JsonProperty("channels") val channels: List<ChannelItemDto>? = null
-    )
 
     override val mainPage = mainPageOf(
         "/mar/v1/category/nELh/recommendations" to "Filmes",
@@ -226,25 +103,39 @@ class VeloPlayTV : MainAPI() {
             val liveItems = mutableListOf<SearchResponse>()
             val raw = safeGet(path)
             if (!raw.isNullOrBlank()) {
-                val parsed = tryParseJson<ChannelListResponse>(raw)
-                val channels = parsed?.channels ?: emptyList()
-
-                channels.forEach { ch ->
-                    val id = ch.id ?: return@forEach
-                    val name = ch.displayName ?: "Canal Ao Vivo"
-                    val logo = ch.logo ?: ch.poster
-                    val streamLink = ch.streams?.firstOrNull()?.url ?: "$mainUrl/stella/v1/channel/$id/play"
-
-                    liveItems.add(
-                        newLiveSearchResponse(name, streamLink, TvType.Live) {
-                            this.posterUrl = logo
+                try {
+                    val json = JSONObject(raw)
+                    val channels = json.optJSONArray("channels") ?: JSONArray()
+                    for (i in 0 until channels.length()) {
+                        val ch = channels.optJSONObject(i) ?: continue
+                        val id = ch.optString("_id")
+                        if (id.isBlank()) continue
+                        val name = ch.optString("display_name", "Canal Ao Vivo")
+                        val logo = ch.optString("logo").ifBlank { ch.optString("poster") }
+                        
+                        var streamLink = "$mainUrl/stella/v1/channel/$id/play"
+                        val streams = ch.optJSONArray("streams")
+                        if (streams != null && streams.length() > 0) {
+                            val firstStream = streams.optJSONObject(0)
+                            val directUrl = firstStream?.optString("url")
+                            if (!directUrl.isNullOrBlank()) {
+                                streamLink = directUrl
+                            }
                         }
-                    )
-                }
+
+                        liveItems.add(
+                            newLiveSearchResponse(name, streamLink, TvType.Live) {
+                                this.posterUrl = logo
+                                this.posterHeaders = posterHeadersMap
+                            }
+                        )
+                    }
+                } catch (_: Exception) {}
             }
 
             return newHomePageResponse(
-                listOf(HomePageList(request.name, liveItems)),
+                request.name,
+                liveItems,
                 hasNext = false
             )
         }
@@ -253,68 +144,100 @@ class VeloPlayTV : MainAPI() {
         val raw = safeGet(path)
 
         if (!raw.isNullOrBlank()) {
-            val parsed = tryParseJson<RecommendationResponse>(raw)
-            val slots = parsed?.slots ?: emptyList()
+            try {
+                val json = JSONObject(raw)
+                val slots = json.optJSONArray("slots") ?: JSONArray()
+                for (s in 0 until slots.length()) {
+                    val slot = slots.optJSONObject(s) ?: continue
+                    val items = slot.optJSONArray("items") ?: JSONArray()
+                    for (it in 0 until items.length()) {
+                        val item = items.optJSONObject(it) ?: continue
+                        val id = item.optString("refer")
+                        val title = item.optString("title")
+                        val pic = item.optString("pic")
+                        if (id.isBlank() || title.isBlank()) continue
 
-            slots.forEach { slot ->
-                slot.items?.forEach { item ->
-                    val id = item.refer ?: return@forEach
-                    val title = item.title ?: return@forEach
-                    val poster = item.pic
-                    val isSeries = path.contains("FFDE") || path.contains("hgKe") || title.contains("Temp.", ignoreCase = true)
+                        val isSeries = path.contains("FFDE") || path.contains("hgKe") || title.contains("Temp.", ignoreCase = true)
+                        val type = if (isSeries) TvType.TvSeries else TvType.Movie
 
-                    val type = if (isSeries) TvType.TvSeries else TvType.Movie
-                    if (type == TvType.TvSeries) {
-                        homeItems.add(
-                            newTvSeriesSearchResponse(title, "$mainUrl/mar/v1/asset/$id/detail", TvType.TvSeries) {
-                                this.posterUrl = poster
-                            }
-                        )
-                    } else {
-                        homeItems.add(
-                            newMovieSearchResponse(title, "$mainUrl/mar/v1/asset/$id/detail", TvType.Movie) {
-                                this.posterUrl = poster
-                            }
-                        )
+                        if (type == TvType.TvSeries) {
+                            homeItems.add(
+                                newTvSeriesSearchResponse(title, "$mainUrl/mar/v1/asset/$id/detail", TvType.TvSeries) {
+                                    this.posterUrl = pic
+                                    this.posterHeaders = posterHeadersMap
+                                }
+                            )
+                        } else {
+                            homeItems.add(
+                                newMovieSearchResponse(title, "$mainUrl/mar/v1/asset/$id/detail", TvType.Movie) {
+                                    this.posterUrl = pic
+                                    this.posterHeaders = posterHeadersMap
+                                }
+                            )
+                        }
                     }
                 }
-            }
+            } catch (_: Exception) {}
         }
 
         return newHomePageResponse(
-            listOf(HomePageList(request.name, homeItems)),
+            request.name,
+            homeItems,
             hasNext = false
         )
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
+        val trimmed = query.trim()
+        if (trimmed.isBlank()) return emptyList()
+
         val searchItems = mutableListOf<SearchResponse>()
-        val path = "/mar/v1/asset/search?q=$query&page=1&page_size=24"
+        val encodedQuery = try {
+            URLEncoder.encode(trimmed, "UTF-8")
+        } catch (_: Exception) {
+            trimmed
+        }
+
+        val path = "/mar/v1/asset/search?q=$encodedQuery&page=1&page_size=30"
         val raw = safeGet(path) ?: return emptyList()
 
-        val parsed = tryParseJson<SearchResponseDto>(raw)
-        val items = parsed?.assets ?: emptyList()
+        try {
+            val json = JSONObject(raw)
+            val assets = json.optJSONArray("assets") ?: JSONArray()
 
-        items.forEach { item ->
-            val id = item.id ?: return@forEach
-            val title = item.title ?: return@forEach
-            val poster = item.posters?.firstOrNull()
-            val isSeries = item.type.equals("SEASON", ignoreCase = true) || item.seriesStatus?.isNotBlank() == true || title.contains("Temp.", ignoreCase = true)
+            for (i in 0 until assets.length()) {
+                val item = assets.optJSONObject(i) ?: continue
+                val id = item.optString("_id")
+                val title = item.optString("title")
+                if (id.isBlank() || title.isBlank()) continue
 
-            if (isSeries) {
-                searchItems.add(
-                    newTvSeriesSearchResponse(title, "$mainUrl/mar/v1/asset/$id/detail", TvType.TvSeries) {
-                        this.posterUrl = poster
-                    }
-                )
-            } else {
-                searchItems.add(
-                    newMovieSearchResponse(title, "$mainUrl/mar/v1/asset/$id/detail", TvType.Movie) {
-                        this.posterUrl = poster
-                    }
-                )
+                val itemType = item.optString("_type")
+                val seriesStatus = item.optString("series_status")
+                val isSeries = itemType.equals("SEASON", ignoreCase = true) || seriesStatus.isNotBlank() || title.contains("Temp.", ignoreCase = true)
+
+                var poster: String? = null
+                val postersArr = item.optJSONArray("posters")
+                if (postersArr != null && postersArr.length() > 0) {
+                    poster = postersArr.optString(0)
+                }
+
+                if (isSeries) {
+                    searchItems.add(
+                        newTvSeriesSearchResponse(title, "$mainUrl/mar/v1/asset/$id/detail", TvType.TvSeries) {
+                            this.posterUrl = poster
+                            this.posterHeaders = posterHeadersMap
+                        }
+                    )
+                } else {
+                    searchItems.add(
+                        newMovieSearchResponse(title, "$mainUrl/mar/v1/asset/$id/detail", TvType.Movie) {
+                            this.posterUrl = poster
+                            this.posterHeaders = posterHeadersMap
+                        }
+                    )
+                }
             }
-        }
+        } catch (_: Exception) {}
 
         return searchItems
     }
@@ -325,36 +248,74 @@ class VeloPlayTV : MainAPI() {
         }
 
         val raw = safeGet(url) ?: throw ErrorLoadingException("Não foi possível carregar detalhes do item")
-        val parsed = tryParseJson<AssetDetailResponse>(raw)?.asset
-            ?: throw ErrorLoadingException("Formato de resposta inválido")
+        val json = JSONObject(raw)
+        val asset = json.optJSONObject("asset") ?: throw ErrorLoadingException("Formato de resposta inválido")
 
-        val id = parsed.id ?: ""
-        val title = parsed.title ?: "Sem Título"
-        val poster = parsed.images?.firstOrNull { it.type == "poster" }?.url
-            ?: parsed.images?.firstOrNull { it.type == "icon" }?.url
-            ?: parsed.images?.firstOrNull()?.url
-        val plot = parsed.description
-        val year = parsed.releaseAt?.take(4)?.toIntOrNull()
-        val isSeries = parsed.type.equals("SEASON", ignoreCase = true) || parsed.children?.items?.isNotEmpty() == true || parsed.brothers?.isNotEmpty() == true
+        val id = asset.optString("_id")
+        val title = asset.optString("title", "Sem Título")
+        val plot = asset.optString("description")
+        val releaseAt = asset.optString("release_at")
+        val year = releaseAt.take(4).toIntOrNull()
+        val assetType = asset.optString("_type")
+
+        val tags = mutableListOf<String>()
+        val tagsArr = asset.optJSONArray("tags")
+        if (tagsArr != null) {
+            for (i in 0 until tagsArr.length()) {
+                val t = tagsArr.optString(i)
+                if (t.isNotBlank()) tags.add(t)
+            }
+        }
+
+        var posterUrl: String? = null
+        val imagesArr = asset.optJSONArray("images")
+        if (imagesArr != null) {
+            // Priority: icon (vertical) -> poster (horizontal) -> first available
+            for (i in 0 until imagesArr.length()) {
+                val img = imagesArr.optJSONObject(i) ?: continue
+                if (img.optString("type") == "icon") {
+                    posterUrl = img.optString("url")
+                    break
+                }
+            }
+            if (posterUrl.isNullOrBlank()) {
+                for (i in 0 until imagesArr.length()) {
+                    val img = imagesArr.optJSONObject(i) ?: continue
+                    if (img.optString("type") == "poster") {
+                        posterUrl = img.optString("url")
+                        break
+                    }
+                }
+            }
+            if (posterUrl.isNullOrBlank() && imagesArr.length() > 0) {
+                posterUrl = imagesArr.optJSONObject(0)?.optString("url")
+            }
+        }
+
+        val childrenObj = asset.optJSONObject("children")
+        val childrenArr = childrenObj?.optJSONArray("items")
+        val brothersArr = asset.optJSONArray("brothers")
+
+        val isSeries = assetType.equals("SEASON", ignoreCase = true) ||
+                (childrenArr != null && childrenArr.length() > 0) ||
+                (brothersArr != null && brothersArr.length() > 0)
 
         if (isSeries) {
             val episodes = mutableListOf<Episode>()
-            val childItems = parsed.children?.items ?: emptyList()
-
-            if (childItems.isNotEmpty()) {
-                childItems.forEach { child ->
-                    val childId = child.id ?: return@forEach
-                    val epNum = child.seq ?: 1
-                    val epTitle = child.title ?: "Episódio $epNum"
+            if (childrenArr != null && childrenArr.length() > 0) {
+                for (i in 0 until childrenArr.length()) {
+                    val child = childrenArr.optJSONObject(i) ?: continue
+                    val childId = child.optString("_id")
+                    if (childId.isBlank()) continue
+                    val epNum = child.optInt("seq", i + 1)
+                    val epTitle = child.optString("title").ifBlank { "Episódio $epNum" }
 
                     episodes.add(
-                        newEpisode(
-                            "$mainUrl/mar/v1/asset/$childId/playinfo"
-                        ) {
+                        newEpisode("$mainUrl/mar/v1/asset/$childId/playinfo") {
                             this.name = epTitle
                             this.episode = epNum
                             this.season = 1
-                            this.posterUrl = poster
+                            this.posterUrl = posterUrl
                         }
                     )
                 }
@@ -362,38 +323,45 @@ class VeloPlayTV : MainAPI() {
                 // Fallback direct children endpoint
                 val childRaw = safeGet("/mar/v1/asset/$id/children")
                 if (!childRaw.isNullOrBlank()) {
-                    val childParsed = tryParseJson<ChildrenContainerDto>(childRaw)
-                    childParsed?.items?.forEach { child ->
-                        val childId = child.id ?: return@forEach
-                        val epNum = child.seq ?: 1
-                        val epTitle = child.title ?: "Episódio $epNum"
+                    try {
+                        val cJson = JSONObject(childRaw)
+                        val cArr = cJson.optJSONArray("items")
+                        if (cArr != null) {
+                            for (i in 0 until cArr.length()) {
+                                val child = cArr.optJSONObject(i) ?: continue
+                                val childId = child.optString("_id")
+                                if (childId.isBlank()) continue
+                                val epNum = child.optInt("seq", i + 1)
+                                val epTitle = child.optString("title").ifBlank { "Episódio $epNum" }
 
-                        episodes.add(
-                            newEpisode(
-                                "$mainUrl/mar/v1/asset/$childId/playinfo"
-                            ) {
-                                this.name = epTitle
-                                this.episode = epNum
-                                this.season = 1
-                                this.posterUrl = poster
+                                episodes.add(
+                                    newEpisode("$mainUrl/mar/v1/asset/$childId/playinfo") {
+                                        this.name = epTitle
+                                        this.episode = epNum
+                                        this.season = 1
+                                        this.posterUrl = posterUrl
+                                    }
+                                )
                             }
-                        )
-                    }
+                        }
+                    } catch (_: Exception) {}
                 }
             }
 
             return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                this.posterUrl = poster
+                this.posterUrl = posterUrl
+                this.posterHeaders = posterHeadersMap
                 this.plot = plot
                 this.year = year
-                this.tags = parsed.tags
+                this.tags = tags
             }
         } else {
             return newMovieLoadResponse(title, url, TvType.Movie, "$mainUrl/mar/v1/asset/$id/playinfo") {
-                this.posterUrl = poster
+                this.posterUrl = posterUrl
+                this.posterHeaders = posterHeadersMap
                 this.plot = plot
                 this.year = year
-                this.tags = parsed.tags
+                this.tags = tags
             }
         }
     }
@@ -411,45 +379,77 @@ class VeloPlayTV : MainAPI() {
                     name = name,
                     url = data,
                     type = if (data.contains(".mp4")) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
-                )
+                ) {
+                    this.headers = mapOf("User-Agent" to userAgent)
+                }
             )
             return true
         }
 
         val raw = safeGet(data) ?: return false
-        val parsed = tryParseJson<PlayInfoResponse>(raw)?.info ?: return false
+        try {
+            val json = JSONObject(raw)
+            val info = json.optJSONObject("info") ?: return false
 
-        parsed.subtitles?.forEach { sub ->
-            val subUrl = sub.url ?: return@forEach
-            subtitleCallback(
-                SubtitleFile(
-                    lang = sub.lang ?: "Português",
-                    url = subUrl
-                )
-            )
-        }
-
-        parsed.play?.forEach { stream ->
-            val streamUrl = stream.url ?: return@forEach
-            val quality = when (stream.resolution?.lowercase()) {
-                "1080p", "1080" -> Qualities.P1080.value
-                "720p", "720" -> Qualities.P720.value
-                "480p", "480" -> Qualities.P480.value
-                else -> Qualities.Unknown.value
-            }
-            val audioDesc = if (stream.audioLangs?.isNotEmpty() == true) " [${stream.audioLangs.joinToString(",")}]" else ""
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = "${name} ${stream.resolution ?: ""}$audioDesc".trim(),
-                    url = streamUrl,
-                    type = if (streamUrl.contains(".mp4")) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
-                ) {
-                    this.quality = quality
+            val subsArr = info.optJSONArray("subtitles")
+            if (subsArr != null) {
+                for (i in 0 until subsArr.length()) {
+                    val sub = subsArr.optJSONObject(i) ?: continue
+                    val subUrl = sub.optString("url")
+                    if (subUrl.isNotBlank()) {
+                        subtitleCallback(
+                            SubtitleFile(
+                                lang = sub.optString("lang", "Português"),
+                                url = subUrl
+                            )
+                        )
+                    }
                 }
-            )
-        }
+            }
 
-        return parsed.play?.isNotEmpty() == true
+            val playArr = info.optJSONArray("play")
+            var foundLinks = false
+            if (playArr != null) {
+                for (i in 0 until playArr.length()) {
+                    val stream = playArr.optJSONObject(i) ?: continue
+                    val streamUrl = stream.optString("url")
+                    if (streamUrl.isBlank()) continue
+
+                    val resStr = stream.optString("resolution")
+                    val quality = when (resStr.lowercase()) {
+                        "1080p", "1080" -> Qualities.P1080.value
+                        "720p", "720" -> Qualities.P720.value
+                        "480p", "480" -> Qualities.P480.value
+                        else -> Qualities.Unknown.value
+                    }
+
+                    val langs = mutableListOf<String>()
+                    val langArr = stream.optJSONArray("audio_langs")
+                    if (langArr != null) {
+                        for (j in 0 until langArr.length()) {
+                            val l = langArr.optString(j)
+                            if (l.isNotBlank()) langs.add(l)
+                        }
+                    }
+                    val audioDesc = if (langs.isNotEmpty()) " [${langs.joinToString(",")}]" else ""
+
+                    callback(
+                        newExtractorLink(
+                            source = name,
+                            name = "$name ${resStr.ifBlank { "Stream" }}$audioDesc".trim(),
+                            url = streamUrl,
+                            type = if (streamUrl.contains(".mp4")) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
+                        ) {
+                            this.quality = quality
+                            this.headers = mapOf("User-Agent" to userAgent)
+                        }
+                    )
+                    foundLinks = true
+                }
+            }
+            return foundLinks
+        } catch (_: Exception) {
+            return false
+        }
     }
 }
