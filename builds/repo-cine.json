@@ -1,0 +1,8 @@
+{
+ "name": "Local CineGato",
+ "description": "Repo local p/ teste CineGato",
+ "manifestVersion": 1,
+ "pluginLists": [
+  "http://127.0.0.1:8891/plugins-cine.json"
+ ]
+}
