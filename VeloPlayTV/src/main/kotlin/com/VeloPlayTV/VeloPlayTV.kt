@@ -488,7 +488,12 @@ class VeloPlayTV : MainAPI() {
                                 val child = childrenArr.optJSONObject(c) ?: continue
                                 val epId = child.optString("_id")
                                 val epSeq = child.optInt("seq", child.optInt("num", c + 1))
-                                val epTitle = child.optString("title").ifBlank { "Episódio $epSeq" }
+                                val rawTitle = child.optString("title")
+                                val epTitle = if (rawTitle.isBlank() || rawTitle.equals("null", ignoreCase = true)) {
+                                    "Episódio $epSeq"
+                                } else {
+                                    rawTitle
+                                }
 
                                 episodes.add(
                                     newEpisode("$mainUrl/mar/v1/asset/$epId/playinfo") {
@@ -514,7 +519,12 @@ class VeloPlayTV : MainAPI() {
                             val child = childrenArr.optJSONObject(c) ?: continue
                             val epId = child.optString("_id")
                             val epSeq = child.optInt("seq", child.optInt("num", c + 1))
-                            val epTitle = child.optString("title").ifBlank { "Episódio $epSeq" }
+                            val rawTitle = child.optString("title")
+                            val epTitle = if (rawTitle.isBlank() || rawTitle.equals("null", ignoreCase = true)) {
+                                "Episódio $epSeq"
+                            } else {
+                                rawTitle
+                            }
 
                             episodes.add(
                                 newEpisode("$mainUrl/mar/v1/asset/$epId/playinfo") {
