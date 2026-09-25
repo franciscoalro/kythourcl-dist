@@ -30,6 +30,22 @@ class VeloPlayTV : MainAPI() {
 
     private var authToken: String? = null
 
+    private fun parseSeasonNumber(title: String, fallback: Int): Int {
+        val match = Regex("""(?i)(?:temp(?:orada)?|season|s)\.?\s*(\d+)""").find(title)
+        return match?.groupValues?.getOrNull(1)?.toIntOrNull() ?: fallback
+    }
+
+    private fun cleanSeriesTitle(title: String): String {
+        val cleaned = title.replace(Regex("""(?i)\s+(?:temp(?:orada)?|season|s)\.?\s*\d+.*$"""), "").trim()
+        return if (cleaned.isNotBlank()) cleaned else title
+    }
+
+    private fun isLaterSeason(title: String): Boolean {
+        val match = Regex("""(?i)(?:temp(?:orada)?|season|s)\.?\s*(\d+)""").find(title)
+        val seasonNum = match?.groupValues?.getOrNull(1)?.toIntOrNull() ?: return false
+        return seasonNum > 1
+    }
+
     private suspend fun getAuthHeaders(): Map<String, String> {
         var token = authToken
         if (token.isNullOrBlank()) {
@@ -293,6 +309,9 @@ class VeloPlayTV : MainAPI() {
                         val seriesStatus = item.optString("series_status")
                         val isSeries = catKey.contains("series") || itemType.equals("SEASON", ignoreCase = true) || seriesStatus.isNotBlank() || title.contains("Temp.", ignoreCase = true)
 
+                        // Evita poluir a Home com temporadas repetidas (Temp.2, Temp.3...)
+                        if (isSeries && isLaterSeason(title)) continue
+
                         var poster: String? = null
                         val postersArr = item.optJSONArray("posters")
                         if (postersArr != null && postersArr.length() > 0) {
@@ -307,8 +326,9 @@ class VeloPlayTV : MainAPI() {
                         }
 
                         if (isSeries) {
+                            val cleanTitle = cleanSeriesTitle(title)
                             itemsList.add(
-                                newTvSeriesSearchResponse(title, "$mainUrl/mar/v1/asset/$id/detail", tvType) {
+                                newTvSeriesSearchResponse(cleanTitle, "$mainUrl/mar/v1/asset/$id/detail", tvType) {
                                     this.posterUrl = poster
                                     this.posterHeaders = posterHeadersMap
                                 }
@@ -366,6 +386,9 @@ class VeloPlayTV : MainAPI() {
                 val seriesStatus = item.optString("series_status")
                 val isSeries = itemType.equals("SEASON", ignoreCase = true) || seriesStatus.isNotBlank() || title.contains("Temp.", ignoreCase = true)
 
+                // Evita duplicatas de temporadas posteriores nos resultados de busca
+                if (isSeries && isLaterSeason(title)) continue
+
                 var poster: String? = null
                 val postersArr = item.optJSONArray("posters")
                 if (postersArr != null && postersArr.length() > 0) {
@@ -373,8 +396,9 @@ class VeloPlayTV : MainAPI() {
                 }
 
                 if (isSeries) {
+                    val cleanTitle = cleanSeriesTitle(title)
                     searchItems.add(
-                        newTvSeriesSearchResponse(title, "$mainUrl/mar/v1/asset/$id/detail", TvType.TvSeries) {
+                        newTvSeriesSearchResponse(cleanTitle, "$mainUrl/mar/v1/asset/$id/detail", TvType.TvSeries) {
                             this.posterUrl = poster
                             this.posterHeaders = posterHeadersMap
                         }
@@ -444,29 +468,69 @@ class VeloPlayTV : MainAPI() {
 
         if (isSeries) {
             val episodes = mutableListOf<Episode>()
-            val childrenRaw = safeGet("/mar/v1/asset/$id/children")
-            if (!childrenRaw.isNullOrBlank()) {
-                try {
-                    val childrenJson = JSONObject(childrenRaw)
-                    val childrenArr = childrenJson.optJSONArray("items") ?: childrenJson.optJSONArray("children") ?: JSONArray()
-                    for (c in 0 until childrenArr.length()) {
-                        val child = childrenArr.optJSONObject(c) ?: continue
-                        val epId = child.optString("_id")
-                        val epSeq = child.optInt("seq", child.optInt("num", c + 1))
-                        val epTitle = child.optString("title").ifBlank { "Episódio $epSeq" }
+            val brothersArr = asset.optJSONArray("brothers")
 
-                        episodes.add(
-                            newEpisode("$mainUrl/mar/v1/asset/$epId/playinfo") {
-                                this.name = epTitle
-                                this.episode = epSeq
-                                this.posterUrl = posterUrl
+            if (brothersArr != null && brothersArr.length() > 0) {
+                // Múltiplas temporadas vinculadas
+                for (b in 0 until brothersArr.length()) {
+                    val brother = brothersArr.optJSONObject(b) ?: continue
+                    val bId = brother.optString("_id")
+                    val bTitle = brother.optString("title", "")
+                    if (bId.isBlank()) continue
+
+                    val seasonNum = parseSeasonNumber(bTitle, b + 1)
+                    val childrenRaw = safeGet("/mar/v1/asset/$bId/children")
+                    if (!childrenRaw.isNullOrBlank()) {
+                        try {
+                            val childrenJson = JSONObject(childrenRaw)
+                            val childrenArr = childrenJson.optJSONArray("items") ?: childrenJson.optJSONArray("children") ?: JSONArray()
+                            for (c in 0 until childrenArr.length()) {
+                                val child = childrenArr.optJSONObject(c) ?: continue
+                                val epId = child.optString("_id")
+                                val epSeq = child.optInt("seq", child.optInt("num", c + 1))
+                                val epTitle = child.optString("title").ifBlank { "Episódio $epSeq" }
+
+                                episodes.add(
+                                    newEpisode("$mainUrl/mar/v1/asset/$epId/playinfo") {
+                                        this.name = epTitle
+                                        this.season = seasonNum
+                                        this.episode = epSeq
+                                        this.posterUrl = posterUrl
+                                    }
+                                )
                             }
-                        )
+                        } catch (_: Exception) {}
                     }
-                } catch (_: Exception) {}
+                }
+            } else {
+                // Temporada única
+                val seasonNum = parseSeasonNumber(title, 1)
+                val childrenRaw = safeGet("/mar/v1/asset/$id/children")
+                if (!childrenRaw.isNullOrBlank()) {
+                    try {
+                        val childrenJson = JSONObject(childrenRaw)
+                        val childrenArr = childrenJson.optJSONArray("items") ?: childrenJson.optJSONArray("children") ?: JSONArray()
+                        for (c in 0 until childrenArr.length()) {
+                            val child = childrenArr.optJSONObject(c) ?: continue
+                            val epId = child.optString("_id")
+                            val epSeq = child.optInt("seq", child.optInt("num", c + 1))
+                            val epTitle = child.optString("title").ifBlank { "Episódio $epSeq" }
+
+                            episodes.add(
+                                newEpisode("$mainUrl/mar/v1/asset/$epId/playinfo") {
+                                    this.name = epTitle
+                                    this.season = seasonNum
+                                    this.episode = epSeq
+                                    this.posterUrl = posterUrl
+                                }
+                            )
+                        }
+                    } catch (_: Exception) {}
+                }
             }
 
-            return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+            val seriesTitle = cleanSeriesTitle(title)
+            return newTvSeriesLoadResponse(seriesTitle, url, TvType.TvSeries, episodes) {
                 this.posterUrl = posterUrl
                 this.posterHeaders = posterHeadersMap
                 this.plot = plot
