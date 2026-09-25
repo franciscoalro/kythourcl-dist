@@ -98,6 +98,20 @@
         "name": "RedeCanais"
     },
     {
+        "fileHash": "sha256-4481dc21c3b1f7f1e01f88227f820f91ff403290cf19df647158d96f6ac2291d",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
+        "fileSize": 15632,
+        "status": 3,
+        "authors": [
+            "franciscoalro"
+        ],
+        "version": 1,
+        "internalName": "SuperCine",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/SuperCine.cs3",
+        "name": "SuperCine"
+    },
+    {
         "fileHash": "sha256-bcfee67bb993083f18b34e97b49b400ffc91128ea25cc0bf1633955ff1cdbd29",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
