@@ -112,15 +112,15 @@
         "name": "TopAnimes"
     },
     {
-        "fileHash": "sha256-6d49a5c3db029455805cf23a3d1a1e75848e250cece452c827eed184d4e95b81",
+        "fileHash": "sha256-c5b51efd3c85eecb4ebe562b708788d919456da47fb619dee6ccc9e33e855e59",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 29394,
+        "fileSize": 26454,
         "status": 3,
         "authors": [
             "franciscoalro"
         ],
-        "version": 8,
+        "version": 5,
         "internalName": "VeloPlayTV",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/VeloPlayTV.cs3",
         "name": "VeloPlayTV"
