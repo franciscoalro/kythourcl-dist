@@ -4,6 +4,8 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.json.JSONArray
 import org.json.JSONObject
+import org.jsoup.Jsoup
+import java.net.URLDecoder
 import java.net.URLEncoder
 
 class SuperCine : MainAPI() {
@@ -19,16 +21,15 @@ class SuperCine : MainAPI() {
     )
 
     private val defaultHeaders = mapOf(
-        "User-Agent" to "Dart/2.19 (dart:io)",
-        "Accept" to "application/json",
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept" to "application/json, text/plain, */*",
         "Referer" to "https://supercine-tv.net/"
     )
 
     override val mainPage = mainPageOf(
-        "/wp-json/api/filmes" to "Filmes",
-        "/wp-json/api/series" to "Séries",
-        "/wp-json/api/animes" to "Animes",
-        "/wp-json/api/home" to "Destaques"
+        "movies?what=launch" to "Filmes (Lançamentos)",
+        "tvshows?what=launch" to "Séries (Lançamentos)",
+        "category?terms=animes" to "Animes"
     )
 
     private suspend fun safeGet(url: String): String? {
@@ -41,38 +42,47 @@ class SuperCine : MainAPI() {
         }
     }
 
-    private fun parseSearchItem(item: JSONObject): SearchResponse? {
-        val id = item.optString("id").ifBlank { item.optString("ID") }
-        if (id.isBlank() || id.equals("null", ignoreCase = true)) return null
+    private fun parseItem(item: JSONObject): SearchResponse? {
+        val imdb = item.optString("imdb").ifBlank { item.optString("post_id") }
+        if (imdb.isBlank() || imdb.equals("null", ignoreCase = true)) return null
 
         val rawTitle = item.optString("title").ifBlank { item.optString("post_title") }
-        val title = if (rawTitle.isBlank() || rawTitle.equals("null", ignoreCase = true)) "Sem Título" else rawTitle
-        val poster = item.optString("poster").ifBlank { item.optString("image_url") }.ifBlank { item.optString("thumbnail") }
-        val typeStr = item.optString("type").ifBlank { item.optString("post_type") }.lowercase()
+        if (rawTitle.isBlank() || rawTitle.equals("null", ignoreCase = true)) return null
+        val title = Jsoup.parse(rawTitle).text()
 
-        val isSeries = typeStr.contains("serie") || typeStr.contains("tv") || typeStr.contains("anime")
-        val tvType = if (typeStr.contains("anime")) {
-            TvType.Anime
-        } else if (isSeries) {
-            TvType.TvSeries
-        } else {
-            TvType.Movie
-        }
+        val poster = item.optString("poster").ifBlank { item.optString("image_url") }
+        val backdrop = item.optString("backdrop_path").ifBlank { item.optString("backdrop") }
+        val type = item.optString("type").lowercase()
+        val catStr = item.optString("category")
 
-        val detailEndpoint = if (isSeries) {
-            "/wp-json/api/serieDetail?post_id=$id"
-        } else {
-            "/wp-json/api/movieDetail?post_id=$id"
-        }
-        val detailUrl = "$mainUrl$detailEndpoint"
+        val isAnime = catStr.contains("anime", ignoreCase = true)
+        val isSeries = type == "tvshows" || type.contains("serie") || catStr.contains("série", ignoreCase = true) || isAnime
+        val tvType = if (isAnime) TvType.Anime else if (isSeries) TvType.TvSeries else TvType.Movie
+
+        val year = item.optString("year").toIntOrNull()
+        val rating = item.optString("imdbRating").toDoubleOrNull()
+
+        val itemData = JSONObject().apply {
+            put("title", title)
+            put("poster", poster)
+            put("backdrop", backdrop)
+            put("imdb", imdb)
+            put("type", if (isSeries) "tvshows" else "movies")
+            put("year", year ?: 0)
+            put("rating", rating ?: 0.0)
+        }.toString()
 
         return if (isSeries) {
-            newTvSeriesSearchResponse(title, detailUrl, tvType) {
+            newTvSeriesSearchResponse(title, itemData, tvType) {
                 this.posterUrl = poster.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+                this.year = year
+                if (rating != null && rating > 0.0) this.score = Score.from10(rating)
             }
         } else {
-            newMovieSearchResponse(title, detailUrl, tvType) {
+            newMovieSearchResponse(title, itemData, tvType) {
                 this.posterUrl = poster.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+                this.year = year
+                if (rating != null && rating > 0.0) this.score = Score.from10(rating)
             }
         }
     }
@@ -80,35 +90,23 @@ class SuperCine : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val itemsList = mutableListOf<SearchResponse>()
         val separator = if (request.data.contains("?")) "&" else "?"
-        val url = "$mainUrl${request.data}${separator}page=$page&showposts=60&version=64"
+        val url = "$mainUrl/wp-json/api/${request.data}${separator}page=$page&showposts=21&version=1.0&origin=web"
 
         val responseText = safeGet(url)
         if (!responseText.isNullOrBlank()) {
             try {
-                if (responseText.trim().startsWith("[")) {
-                    val arr = JSONArray(responseText)
-                    for (i in 0 until arr.length()) {
-                        val obj = arr.optJSONObject(i) ?: continue
-                        parseSearchItem(obj)?.let { itemsList.add(it) }
-                    }
-                } else if (responseText.trim().startsWith("{")) {
-                    val root = JSONObject(responseText)
-                    val dataArr = root.optJSONArray("data")
-                        ?: root.optJSONArray("posts")
-                        ?: root.optJSONArray("items")
-                        ?: root.optJSONArray("results")
-                    
-                    if (dataArr != null) {
-                        for (i in 0 until dataArr.length()) {
-                            val obj = dataArr.optJSONObject(i) ?: continue
-                            parseSearchItem(obj)?.let { itemsList.add(it) }
-                        }
+                val root = JSONObject(responseText)
+                val dataArr = root.optJSONArray("data")
+                if (dataArr != null) {
+                    for (i in 0 until dataArr.length()) {
+                        val obj = dataArr.optJSONObject(i) ?: continue
+                        parseItem(obj)?.let { itemsList.add(it) }
                     }
                 }
             } catch (_: Exception) {}
         }
 
-        return newHomePageResponse(request.name, itemsList, hasNext = itemsList.size >= 10)
+        return newHomePageResponse(request.name, itemsList, hasNext = itemsList.size >= 20)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -117,29 +115,17 @@ class SuperCine : MainAPI() {
         } catch (_: Exception) {
             query.trim()
         }
-        val url = "$mainUrl/wp-json/api/search?s=$encodedQuery&showposts=30&version=64"
+        val url = "$mainUrl/wp-json/api/search?s=$encodedQuery&showposts=21&version=1.0&origin=web"
         val responseText = safeGet(url) ?: return emptyList()
 
         val results = mutableListOf<SearchResponse>()
         try {
-            if (responseText.trim().startsWith("[")) {
-                val arr = JSONArray(responseText)
-                for (i in 0 until arr.length()) {
-                    val obj = arr.optJSONObject(i) ?: continue
-                    parseSearchItem(obj)?.let { results.add(it) }
-                }
-            } else if (responseText.trim().startsWith("{")) {
-                val root = JSONObject(responseText)
-                val dataArr = root.optJSONArray("data")
-                    ?: root.optJSONArray("posts")
-                    ?: root.optJSONArray("items")
-                    ?: root.optJSONArray("results")
-
-                if (dataArr != null) {
-                    for (i in 0 until dataArr.length()) {
-                        val obj = dataArr.optJSONObject(i) ?: continue
-                        parseSearchItem(obj)?.let { results.add(it) }
-                    }
+            val root = JSONObject(responseText)
+            val dataArr = root.optJSONArray("data")
+            if (dataArr != null) {
+                for (i in 0 until dataArr.length()) {
+                    val obj = dataArr.optJSONObject(i) ?: continue
+                    parseItem(obj)?.let { results.add(it) }
                 }
             }
         } catch (_: Exception) {}
@@ -148,68 +134,106 @@ class SuperCine : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val separator = if (url.contains("?")) "&" else "?"
-        val requestUrl = if (url.contains("version=")) url else "$url${separator}version=64"
-        val responseText = safeGet(requestUrl) ?: throw ErrorLoadingException("Falha ao carregar detalhes")
+        var imdb = ""
+        var type = "movies"
+        var title = "SuperCine"
+        var poster: String? = null
+        var backdrop: String? = null
+        var year: Int? = null
+        var scoreVal: Double? = null
 
-        val json = JSONObject(responseText)
-        val rawTitle = json.optString("title").ifBlank { json.optString("post_title") }
-        val title = if (rawTitle.isBlank() || rawTitle.equals("null", ignoreCase = true)) "SuperCine Conteúdo" else rawTitle
-        val poster = json.optString("poster").ifBlank { json.optString("image_url") }.ifBlank { json.optString("thumbnail") }
-        val banner = json.optString("backdrop").ifBlank { json.optString("banner") }
-        val plot = json.optString("description").ifBlank { json.optString("sinopse") }.ifBlank { json.optString("post_content") }
-        val year = json.optString("year").ifBlank { json.optString("ano") }.toIntOrNull()
-        val ratingVal = json.optString("rating").ifBlank { json.optString("nota") }.toDoubleOrNull()
+        if (url.trim().startsWith("{")) {
+            try {
+                val json = JSONObject(url)
+                imdb = json.optString("imdb")
+                type = json.optString("type", "movies")
+                title = json.optString("title", "SuperCine")
+                poster = json.optString("poster").takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+                backdrop = json.optString("backdrop").takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+                year = json.optInt("year").takeIf { it > 0 }
+                scoreVal = json.optDouble("rating").takeIf { !it.isNaN() && it > 0.0 }
+            } catch (_: Exception) {}
+        } else {
+            imdb = Regex("""imdb=([a-zA-Z0-9]+)""").find(url)?.groupValues?.get(1) ?: url
+            type = if (url.contains("type=tvshows") || url.contains("tvshows") || url.contains("serie")) "tvshows" else "movies"
+        }
 
-        val seasonsArr = json.optJSONArray("seasons") ?: json.optJSONArray("temporadas")
-        val isSeries = seasonsArr != null && seasonsArr.length() > 0
+        val embedUrl = "$mainUrl/embed-api/?imdb=$imdb&type=$type"
+        val embedHtml = safeGet(embedUrl) ?: ""
+
+        val isSeries = type == "tvshows"
 
         if (isSeries) {
+            val tmdbMatch = Regex("""tmdb\s*=\s*["']?(\d+)""").find(embedHtml)
+            val tmdb = tmdbMatch?.groupValues?.get(1)
+
             val episodesList = mutableListOf<Episode>()
-            for (s in 0 until seasonsArr.length()) {
-                val seasonObj = seasonsArr.optJSONObject(s) ?: continue
-                val seasonNum = seasonObj.optInt("season", seasonObj.optInt("num", s + 1))
-                val epsArr = seasonObj.optJSONArray("episodes") ?: seasonObj.optJSONArray("episodios") ?: continue
+            if (!tmdb.isNullOrBlank()) {
+                val seasonsUrl = "$mainUrl/wp-json/api/tvshows?what=seasons&tmdb=$tmdb&version=1.0&origin=web"
+                val seasonsText = safeGet(seasonsUrl)
+                if (!seasonsText.isNullOrBlank()) {
+                    try {
+                        val sJson = JSONObject(seasonsText)
+                        val seasonsArr = sJson.optJSONArray("seasons")
+                        if (seasonsArr != null) {
+                            for (s in 0 until seasonsArr.length()) {
+                                val sObj = seasonsArr.optJSONObject(s) ?: continue
+                                val seasonNum = sObj.optInt("season", s + 1)
+                                val epsArr = sObj.optJSONArray("episodes") ?: continue
+                                for (e in 0 until epsArr.length()) {
+                                    val epObj = epsArr.optJSONObject(e) ?: continue
+                                    val epNum = epObj.optInt("ep", e + 1)
+                                    val rawEpTitle = epObj.optString("title").ifBlank { "Episódio $epNum" }
+                                    val epTitle = Jsoup.parse(rawEpTitle).text()
+                                    val epBackdrop = epObj.optString("backdrop").takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
 
-                for (e in 0 until epsArr.length()) {
-                    val epObj = epsArr.optJSONObject(e) ?: continue
-                    val epNum = epObj.optInt("episode", epObj.optInt("num", e + 1))
-                    val rawEpTitle = epObj.optString("title").ifBlank { epObj.optString("name") }
-                    val epTitle = if (rawEpTitle.isBlank() || rawEpTitle.equals("null", ignoreCase = true)) {
-                        "Episódio $epNum"
-                    } else {
-                        rawEpTitle
-                    }
-                    val epPoster = epObj.optString("poster").ifBlank { epObj.optString("image") }
-                    val epData = epObj.toString()
+                                    val epData = JSONObject().apply {
+                                        put("type", "tvshows")
+                                        put("tmdb", tmdb)
+                                        put("season", seasonNum)
+                                        put("episode", epNum)
+                                    }.toString()
 
-                    episodesList.add(
-                        newEpisode(epData) {
-                            this.name = epTitle
-                            this.season = seasonNum
-                            this.episode = epNum
-                            this.posterUrl = epPoster.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+                                    episodesList.add(
+                                        newEpisode(epData) {
+                                            this.name = epTitle
+                                            this.season = seasonNum
+                                            this.episode = epNum
+                                            this.posterUrl = epBackdrop
+                                        }
+                                    )
+                                }
+                            }
                         }
-                    )
+                    } catch (_: Exception) {}
                 }
             }
 
             return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodesList) {
-                this.posterUrl = poster.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
-                this.backgroundPosterUrl = banner.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
-                this.plot = plot.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+                this.posterUrl = poster
+                this.backgroundPosterUrl = backdrop
                 this.year = year
-                if (ratingVal != null && ratingVal > 0.0) this.score = Score.from10(ratingVal)
+                if (scoreVal != null && scoreVal > 0.0) this.score = Score.from10(scoreVal)
             }
         }
 
-        // Caso seja filme, passamos o objeto JSON completo dos dados para o loadLinks
-        return newMovieLoadResponse(title, url, TvType.Movie, json.toString()) {
-            this.posterUrl = poster.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
-            this.backgroundPosterUrl = banner.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
-            this.plot = plot.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+        // Movie
+        val serverTokens = Regex("""data-(?:server|url)=["']([^"']+)["']""").findAll(embedHtml)
+            .map { it.groupValues[1] }
+            .distinct()
+            .toList()
+
+        val movieData = JSONObject().apply {
+            put("type", "movies")
+            put("imdb", imdb)
+            put("tokens", JSONArray(serverTokens))
+        }.toString()
+
+        return newMovieLoadResponse(title, url, TvType.Movie, movieData) {
+            this.posterUrl = poster
+            this.backgroundPosterUrl = backdrop
             this.year = year
-            if (ratingVal != null && ratingVal > 0.0) this.score = Score.from10(ratingVal)
+            if (scoreVal != null && scoreVal > 0.0) this.score = Score.from10(scoreVal)
         }
     }
 
@@ -222,72 +246,101 @@ class SuperCine : MainAPI() {
         var foundAny = false
         try {
             val json = JSONObject(data)
-            val playerUrls = mutableListOf<String>()
+            val type = json.optString("type")
 
-            // 1. Extrai links de players diretos ou arrays de servidores
-            val directPlayers = listOf(
-                "player", "url", "stream_url", "embed_url", "streamtape",
-                "streamwish", "doodstream", "vidhide", "fembed"
-            )
-            for (key in directPlayers) {
-                val link = json.optString(key)
-                if (link.isNotBlank() && !link.equals("null", ignoreCase = true) && link.startsWith("http")) {
-                    playerUrls.add(link)
-                }
-            }
-
-            val playersArr = json.optJSONArray("players")
-                ?: json.optJSONArray("servers")
-                ?: json.optJSONArray("links")
-            if (playersArr != null) {
-                for (i in 0 until playersArr.length()) {
-                    val pObj = playersArr.optJSONObject(i)
-                    if (pObj != null) {
-                        val pUrl = pObj.optString("url").ifBlank { pObj.optString("link") }
-                        if (pUrl.isNotBlank() && !pUrl.equals("null", ignoreCase = true) && pUrl.startsWith("http")) {
-                            playerUrls.add(pUrl)
-                        }
-                    } else {
-                        val pUrl = playersArr.optString(i)
-                        if (pUrl.isNotBlank() && !pUrl.equals("null", ignoreCase = true) && pUrl.startsWith("http")) {
-                            playerUrls.add(pUrl)
+            if (type == "tvshows") {
+                val tmdb = json.optString("tmdb")
+                val season = json.optInt("season", 1)
+                val episode = json.optInt("episode", 1)
+                val playerUrl = "$mainUrl/wp-json/api/tvshows?what=player&tmdb=$tmdb&season=$season&episode=$episode&version=1.0&origin=web"
+                val pText = safeGet(playerUrl)
+                if (!pText.isNullOrBlank()) {
+                    val pJson = JSONObject(pText)
+                    val players = pJson.optJSONArray("players")
+                    if (players != null) {
+                        for (i in 0 until players.length()) {
+                            val p = players.optJSONObject(i) ?: continue
+                            val token = p.optString("url")
+                            val pTitle = p.optString("title").ifBlank { "Player ${i + 1}" }
+                            val pLang = p.optString("lang")
+                            val displayName = if (pLang.isNotBlank()) "$name - $pTitle ($pLang)" else "$name - $pTitle"
+                            if (resolveToken(token, displayName, subtitleCallback, callback)) {
+                                foundAny = true
+                            }
                         }
                     }
                 }
-            }
-
-            // 2. Itera sobre os players e dispara os extratores
-            for (playerUrl in playerUrls.distinct()) {
-                val success = loadExtractor(playerUrl, subtitleCallback, callback)
-                if (success) {
-                    foundAny = true
-                } else {
-                    // Fallback para o endpoint de extração do backend
-                    val encoded = try { URLEncoder.encode(playerUrl, "UTF-8") } catch (_: Exception) { playerUrl }
-                    val extractorResp = safeGet("$mainUrl/wp-json/site/extractor?url=$encoded")
-                    if (!extractorResp.isNullOrBlank()) {
-                        try {
-                            val extJson = JSONObject(extractorResp)
-                            val resolvedUrl = extJson.optString("url").ifBlank { extJson.optString("stream") }
-                            if (resolvedUrl.isNotBlank() && !resolvedUrl.equals("null", ignoreCase = true)) {
-                                callback(
-                                    newExtractorLink(
-                                        source = name,
-                                        name = name,
-                                        url = resolvedUrl,
-                                        type = if (resolvedUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                    ) {
-                                        this.referer = "$mainUrl/"
-                                    }
-                                )
-                                foundAny = true
-                            }
-                        } catch (_: Exception) {}
+            } else {
+                val tokensArr = json.optJSONArray("tokens")
+                if (tokensArr != null) {
+                    for (i in 0 until tokensArr.length()) {
+                        val token = tokensArr.optString(i) ?: continue
+                        val displayName = "$name - Player ${i + 1}"
+                        if (resolveToken(token, displayName, subtitleCallback, callback)) {
+                            foundAny = true
+                        }
                     }
                 }
             }
         } catch (_: Exception) {}
 
         return foundAny
+    }
+
+    private suspend fun resolveToken(
+        token: String,
+        displayName: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        if (token.isBlank()) return false
+        val embedUrl = "$mainUrl/embed-api/?action=embed&url=$token"
+        val html = safeGet(embedUrl) ?: return false
+
+        val streamUrl = Regex("""(?:location\.href|src)\s*=\s*["']([^"']+)["']""").find(html)?.groupValues?.get(1) ?: return false
+        val cleanUrl = streamUrl.replace("&amp;", "&")
+
+        if (cleanUrl.contains("sub1=")) {
+            val subMatch = Regex("""sub1=([^&]+)""").find(cleanUrl)
+            val subUrl = subMatch?.groupValues?.get(1)?.let {
+                try { URLDecoder.decode(it, "UTF-8") } catch (_: Exception) { it }
+            }
+            if (!subUrl.isNullOrBlank()) {
+                subtitleCallback(newSubtitleFile("Português", subUrl))
+            }
+        }
+
+        val success = loadExtractor(cleanUrl, subtitleCallback, callback)
+        if (success) {
+            return true
+        }
+
+        if (cleanUrl.contains(".m3u8")) {
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = displayName,
+                    url = cleanUrl,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = "$mainUrl/"
+                }
+            )
+            return true
+        } else if (cleanUrl.contains(".mp4")) {
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = displayName,
+                    url = cleanUrl,
+                    type = ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = "$mainUrl/"
+                }
+            )
+            return true
+        }
+
+        return false
     }
 }
