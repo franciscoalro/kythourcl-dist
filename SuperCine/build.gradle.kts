@@ -1,0 +1,3 @@
+cloudstream {
+    version = 1
+}
