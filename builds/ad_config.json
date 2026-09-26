@@ -1,0 +1,12 @@
+{
+  "video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
+  "smartlink_url": "https://t.me/kythour",
+  "promo_title": "Desbloqueie Todos os Recursos",
+  "promo_subtitle": "Participe da nossa comunidade exclusiva e receba novidades e atualizações com máxima velocidade.",
+  "promo_btn_text": "Acessar Canal Exclusivo",
+  "promo_btn_url": "https://t.me/kythour",
+  "rewarded_cooldown_ms": 900000,
+  "rewarded_duration_sec": 10,
+  "enable_rewarded_ads": true,
+  "enable_promo_banner": true
+}
