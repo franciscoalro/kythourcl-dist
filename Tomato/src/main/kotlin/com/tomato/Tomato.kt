@@ -34,6 +34,13 @@ class Tomato : MainAPI() {
         // origem. Medido: com a origem NO AR e sem token a API devolve 403; com a
         // origem FORA devolve 500. A sonda distingue os dois estados em 1 request.
         const val HEALTH_PROBE_AFTER = 6
+        // Tentativas em detalhes e temporada. Medido no redroid com a v156: 8
+        // tentativas deixavam load() em 11.1s, porque 8 x (timeout + 500ms) de
+        // backoff domina o tempo antes do loadLinks. 3 tentativas cortam para
+        // ~4s sem perder a tolerancia a flapping (janela parcial e de 12-20%
+        // de sucesso, mas em rajadas -- 3 tentativas ja pegam uma rajada).
+        // A sonda isOriginDown() ainda encurta o caminho quando a origem cai.
+        const val DETAIL_ATTEMPTS = 3
         val API_HEADERS = mapOf(
             "User-Agent" to APP_UA,
             "Authorization" to "Bearer $BEARER_TOKEN",
@@ -102,8 +109,13 @@ class Tomato : MainAPI() {
     // A sonda de saude encurta o caminho quando a origem esta FORA: medido no aparelho,
     // sem ela o load() levava 13.8s (8 tentativas de detalhe + 8 de temporada) para
     // so entao chamar o loadLinks e descobrir que nao havia link.
-    private suspend fun getJsonWithRetry(path: String, headers: Map<String, String> = API_HEADERS, attempts: Int = 8): String? {
-        var probeBudget = 3
+    // v157: o default caiu de 8 para DETAIL_ATTEMPTS (3), medido em 11.1s na v156.
+    private suspend fun getJsonWithRetry(path: String, headers: Map<String, String> = API_HEADERS, attempts: Int = DETAIL_ATTEMPTS): String? {
+        // probeBudget = 2, nao 3: com DETAIL_ATTEMPTS = 3 o budget de 3 so
+        // zerava na ultima tentativa, ou seja, a sonda rodava tarde demais para
+        // encurtar o caminho. 2 dispara na segunda, sobrando uma para tentar
+        // de novo caso a origem tenha voltado entre as duas.
+        var probeBudget = 2
         repeat(attempts) { attempt ->
             try {
                 val res = app.get("$mainUrl$path", headers = headers, timeout = 15)
@@ -121,8 +133,10 @@ class Tomato : MainAPI() {
     }
 
     // POST JSON com retry (temporada usa body {page, order}).
-    private suspend fun postJsonWithRetry(path: String, body: Any, attempts: Int = 8): String? {
-        var probeBudget = 3
+    private suspend fun postJsonWithRetry(path: String, body: Any, attempts: Int = DETAIL_ATTEMPTS): String? {
+        // probeBudget = 2 pelo mesmo motivo do getJsonWithRetry: com 3
+        // tentativas, budget 3 so dispara a sonda na ultima, tarde demais.
+        var probeBudget = 2
         repeat(attempts) { attempt ->
             try {
                 val res = app.post("$mainUrl$path", headers = SEARCH_HEADERS, json = body, timeout = 15)
@@ -466,7 +480,7 @@ class Tomato : MainAPI() {
 
         try {
             var resText: String? = null
-            resText = getJsonWithRetry("/v2/anime/$animeId", attempts = 8)
+            resText = getJsonWithRetry("/v2/anime/$animeId", attempts = DETAIL_ATTEMPTS)
             if (resText != null) {
                 val text = resText
                 // Tenta parse tipado; se falhar, usa JsonNode genérico
@@ -519,7 +533,7 @@ class Tomato : MainAPI() {
         for (season in seasons.ifEmpty { listOf(AnimeSeason(animeId, null)) }) {
             try {
                 val reqBody = SeasonReq(page = 1, order = "asc")
-                val epText = postJsonWithRetry("/season/${season.seasonId}/episodes", reqBody, attempts = 8)
+                val epText = postJsonWithRetry("/season/${season.seasonId}/episodes", reqBody, attempts = DETAIL_ATTEMPTS)
                 if (epText == null) continue
                 val parsed = tryParseJson<SeasonEpisodesResp>(epText) ?: continue
                 val data = parsed.data ?: emptyList()
