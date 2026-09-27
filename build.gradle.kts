@@ -47,7 +47,7 @@ subprojects {
     cloudstream {
         setRepo("https://github.com/franciscoalro/kythourcl-dist") 
         authors = listOf("franciscoalro")
-        version = 149
+        version = 150
     }
 
     android {

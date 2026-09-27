@@ -199,7 +199,7 @@ class SuperCine : MainAPI() {
         if (id.isNotBlank()) {
             try {
                 val pUrl = "$mainUrl/?p=$id"
-                val resp = app.get(pUrl, headers = defaultHeaders, followRedirects = true, timeout = 5)
+                val resp = app.get(pUrl, headers = defaultHeaders, timeout = 5)
                 val finalUrl = resp.url
                 val tmdbMatch = Regex("""/(?:movies|tvshows)/(\d+)""").find(finalUrl)
                 if (tmdbMatch != null) {
