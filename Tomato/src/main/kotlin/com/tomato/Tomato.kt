@@ -34,6 +34,30 @@ class Tomato : MainAPI() {
         )
     }
 
+    // Títulos offline para ids que só aparecem em type3/5 sem anime_name (API 500)
+    // 8 de "Em alta" via OCR/Cape + 13 de type7; cobre catálogo embutido quando /v2/anime/* está 500
+    private val fallbackTitleById: Map<Int, String> = mapOf(
+        1089 to "Shingeki no Kyojin",
+        1279 to "Bleach",
+        1179 to "Mushoku Tensei",
+        1100 to "Tensei shitara Slime Datta Ken",
+        1649 to "Kaiju No. 8",
+        6881 to "Super no Ura de Yani Suu Futari",
+        6852 to "Yani Neko",
+        1049 to "JoJo's Bizarre Adventure",
+        6861 to "Let\u2019s go KAIKIGUMI",
+        1921 to "You and I Are Polar Opposites",
+        6888 to "Hanaori-san wa Tensei shitemo Kenka ga Shitai",
+        6887 to "Grow Up Show: Himawari no Circus-dan",
+        6860 to "Tenmaku no Jaadugar",
+        6831 to "Daemons of the Shadow Realm",
+        1117 to "Welcome to Demon School! Iruma-kun",
+        1213 to "Ascendance of a Bookworm",
+        1320 to "Link Click",
+        1681 to "Nige Jouzu no Wakagimi",
+        6885 to "Kore Kaite Shine"
+    )
+
     // ---------- Feed ----------
     // /v2/animes/feed -> {status:true,status_code:4,remote_settings:{},data:[{type:3,title:"Em alta",data:[{anime_id,thumbnail}]},{type:7,title:"Novos episódios",data:[{ep_id,ep_anime_id,anime_name,ep_name}]},...]}
     // Usamos JsonNode para lidar com tipos heterogêneos
@@ -92,13 +116,14 @@ class Tomato : MainAPI() {
             if (!matched) continue
 
             val items: List<SearchResponse> = when (type) {
-                3 -> { // Em alta: [{anime_id, thumbnail banner}]
+                3 -> { // Em alta: [{anime_id, thumbnail banner}] -> offline titles when API 500
                     arr.mapNotNull { n ->
                         val animeId = n.get("anime_id")?.asInt() ?: return@mapNotNull null
                         val thumb = n.get("thumbnail")?.asText()
                             ?: n.get("banner")?.asText()
+                        val t = fallbackTitleById[animeId] ?: "Anime $animeId"
                         newAnimeSearchResponse(
-                            "Anime $animeId",
+                            t,
                             "$mainUrl/anime/$animeId",
                             TvType.Anime
                         ) {
@@ -110,8 +135,9 @@ class Tomato : MainAPI() {
                     arr.mapNotNull { n ->
                         val animeId = n.get("anime_id")?.asInt() ?: return@mapNotNull null
                         val thumb = n.get("thumbnail")?.asText() ?: n.get("cape")?.asText()
+                        val t = fallbackTitleById[animeId] ?: "Anime $animeId"
                         newAnimeSearchResponse(
-                            "Anime $animeId",
+                            t,
                             "$mainUrl/anime/$animeId",
                             TvType.Anime
                         ) {
@@ -158,7 +184,8 @@ class Tomato : MainAPI() {
                     3,5 -> arr.forEach { n ->
                         val animeId = n.get("anime_id")?.asInt() ?: return@forEach
                         val thumb = n.get("thumbnail")?.asText() ?: n.get("cape")?.asText() ?: n.get("banner")?.asText()
-                        allItems.add(newAnimeSearchResponse("Anime $animeId", "$mainUrl/anime/$animeId", TvType.Anime){ this.posterUrl = thumb })
+                        val t = fallbackTitleById[animeId] ?: "Anime $animeId"
+                        allItems.add(newAnimeSearchResponse(t, "$mainUrl/anime/$animeId", TvType.Anime){ this.posterUrl = thumb })
                     }
                     7 -> arr.forEach { n ->
                         val animeId = n.get("ep_anime_id")?.asInt() ?: return@forEach
@@ -224,11 +251,12 @@ class Tomato : MainAPI() {
             } else null
         } catch (_: Exception) { null }
         if (!apiRes.isNullOrEmpty()) return apiRes
-        // Fallback: busca no feed embutido por anime_name / ep_anime_id
+        // Fallback: busca no feed embutido por anime_name / ep_anime_id (e nos títulos offline type3/5)
         return try {
             val feed = fetchFeed() ?: return emptyList()
             val data = feed.get("data") ?: return emptyList()
             val out = linkedMapOf<Int, SearchResponse>()
+            // type7 names
             for (sec in data) {
                 val type = sec.get("type")?.asInt() ?: continue
                 val arr = sec.get("data") ?: continue
@@ -241,8 +269,36 @@ class Tomato : MainAPI() {
                         if (out.containsKey(animeId)) continue
                         out[animeId] = newAnimeSearchResponse(name, "$mainUrl/anime/$animeId", TvType.Anime) { this.posterUrl = n.get("thumbnail")?.asText() }
                     }
-                    3, 5 -> { /* type 3/5 não tem nome — não buscável sem anime_details; ignorado no fallback */ }
                 }
+            }
+            // type3/5 offline titles (busca por substring no nome offline)
+            for ((id, title) in fallbackTitleById) {
+                if (out.containsKey(id)) continue
+                if (!title.contains(q, ignoreCase = true)) continue
+                // verifica se id existe em alguma seção type3/5 do feed
+                var exists = false
+                for (sec in data) {
+                    val arr = sec.get("data") ?: continue
+                    if (!arr.isArray) continue
+                    for (n in arr) {
+                        if (n.get("anime_id")?.asInt() == id) { exists = true; break }
+                    }
+                    if (exists) break
+                }
+                if (!exists) continue
+                // poster do feed se houver
+                var poster: String? = null
+                for (sec in data) {
+                    val arr = sec.get("data") ?: continue
+                    if (!arr.isArray) continue
+                    for (n in arr) {
+                        if (n.get("anime_id")?.asInt() == id) {
+                            poster = n.get("thumbnail")?.asText() ?: n.get("cape")?.asText(); if (poster!=null) break
+                        }
+                    }
+                    if (poster!=null) break
+                }
+                out[id] = newAnimeSearchResponse(title, "$mainUrl/anime/$id", TvType.Anime) { this.posterUrl = poster }
             }
             out.values.toList()
         } catch (_: Exception) { emptyList() }
@@ -337,7 +393,7 @@ class Tomato : MainAPI() {
         }
 
         // Busca detalhes do anime
-        var title = "Anime $animeId"
+        var title = fallbackTitleById[animeId] ?: "Anime $animeId"
         var poster: String? = null
         var plot: String? = null
         var tags: List<String>? = null
@@ -384,6 +440,10 @@ class Tomato : MainAPI() {
                     if (title == "Anime $animeId") {
                         title = dataNode.get("anime_name")?.asText() ?: title
                     }
+                    // Se ainda é "Anime $id" mas temos offline, usa offline
+                    if (title == "Anime $animeId") {
+                        fallbackTitleById[animeId]?.let { title = it }
+                    }
                 }
             }
         } catch (_: Exception) {}
@@ -420,6 +480,10 @@ class Tomato : MainAPI() {
         // Motivo: alguns animes só aparecem em "Em alta" (type3) ou categorias (type5) sem entrada em type7,
         // então ficavam sem episódios e sem botão de player.
         if (episodes.isEmpty() || title == "Anime $animeId" || poster == null) {
+            // offline map corrige título antes mesmo do feed (type3/5 não tem anime_name)
+            if (title == "Anime $animeId") {
+                fallbackTitleById[animeId]?.let { title = it }
+            }
             try {
                 val feed = fetchFeed()
                 val data = feed?.get("data")
@@ -433,6 +497,8 @@ class Tomato : MainAPI() {
                             if (aId != animeId) continue
                             if (title == "Anime $animeId") {
                                 n.get("anime_name")?.asText()?.let { title = it }
+                                // se ainda "Anime $id", tenta offline
+                                if (title == "Anime $animeId") fallbackTitleById[animeId]?.let { title = it }
                             }
                             if (poster == null) {
                                 poster = n.get("thumbnail")?.asText()
@@ -460,17 +526,25 @@ class Tomato : MainAPI() {
                     }
                 }
             } catch (_: Exception) {}
+            // garante que offline nunca deixe "Anime $id" passar
+            if (title == "Anime $animeId") {
+                fallbackTitleById[animeId]?.let { title = it }
+            }
         }
 
         // Fallback 3: sintético para garantir botão de player quando API 500 e feed não tinha ep em type7
         // Ex: 1089, 1279, 1179, 6881 (só em "Em alta") ficam sem episódios -> CloudStream não mostra player
         var hasEpisodes = episodes.isNotEmpty()
+        var apiOffline = false
         if (!hasEpisodes) {
-            val placeholderPlot = "[Tomato API instável — 500 em prod-api/edge (FRA60-P7) em /v2/anime e /season/*/episodes. Catálogo em modo offline via feed embutido. Player aguardando API voltar — tente novamente em alguns minutos.]"
-            plot = if (plot.isNullOrBlank()) placeholderPlot else "$plot\n\n$placeholderPlot"
-            // Cria 1 episódio sintético para o botão aparecer; loadLinks tentará /stream e falhará com "nenhum link" até API voltar
+            apiOffline = true
+            // Sinopse vazia = catálogo offline; não poluímos sinopse real quando já existe
+            if (plot.isNullOrBlank()) {
+                plot = "Catálogo offline (feed embutido) — API instável no momento. Toque no episódio para tentar reproduzir; quando a API voltar os episódios reais aparecerão aqui."
+            }
+            // Cria 1 episódio sintético para o botão aparecer; loadLinks informará status offline se ainda 500
             episodes.add(newEpisode("${animeId}_0") {
-                this.name = "Episódio 1 — toque para tentar reproduzir"
+                this.name = "Episódio 1 — offline (toque para tentar)"
                 this.posterUrl = poster
                 this.episode = 1
             })
