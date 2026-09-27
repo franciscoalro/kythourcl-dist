@@ -416,22 +416,38 @@ class Tomato : MainAPI() {
             } catch (_: Exception) { continue }
         }
 
-        // Fallback 2: feed Novos episódios filtrando por anime; preenche título/poster quando API de episódios 500
+        // Fallback 2: feed completo (type 3/5/7) quando API 500 — preenche título/poster/episódios
+        // Motivo: alguns animes só aparecem em "Em alta" (type3) ou categorias (type5) sem entrada em type7,
+        // então ficavam sem episódios e sem botão de player.
         if (episodes.isEmpty() || title == "Anime $animeId" || poster == null) {
             try {
                 val feed = fetchFeed()
                 val data = feed?.get("data")
                 if (data != null && data.isArray) {
+                    // Primeiro coleta poster/título de qualquer seção que tenha anime_id == animeId
+                    for (sec in data) {
+                        val arr = sec.get("data") ?: continue
+                        if (!arr.isArray) continue
+                        for (n in arr) {
+                            val aId = n.get("anime_id")?.asInt() ?: n.get("ep_anime_id")?.asInt() ?: continue
+                            if (aId != animeId) continue
+                            if (title == "Anime $animeId") {
+                                n.get("anime_name")?.asText()?.let { title = it }
+                            }
+                            if (poster == null) {
+                                poster = n.get("thumbnail")?.asText()
+                                    ?: n.get("cape")?.asText()
+                                    ?: n.get("banner")?.asText()
+                            }
+                        }
+                    }
+                    // Depois coleta episódios apenas de type 7 (único que tem ep_id)
                     for (sec in data) {
                         if (sec.get("type")?.asInt() != 7) continue
                         val arr = sec.get("data") ?: continue
                         for (n in arr) {
                             if (n.get("ep_anime_id")?.asInt() != animeId) continue
                             val epId = n.get("ep_id")?.asInt() ?: continue
-                            if (title == "Anime $animeId") {
-                                n.get("anime_name")?.asText()?.let { title = it }
-                            }
-                            if (poster == null) poster = n.get("thumbnail")?.asText()
                             if (episodes.none { it.data == epId.toString() }) {
                                 val epName2 = n.get("ep_name")?.asText() ?: "Episódio $epId"
                                 val thumb = n.get("thumbnail")?.asText()
@@ -446,13 +462,19 @@ class Tomato : MainAPI() {
             } catch (_: Exception) {}
         }
 
-        // Último fallback: se tudo falhou e sabemos que anime 6888 tem ep 36947 (prova LAB §6.10), expõe ao menos um
-        // mas genérico: se ainda vazio, cria 1 episódio placeholder que tentará stream direto (pode falhar, mas não crasha)
-        // Não cria placeholder genérico para não poluir; deixa vazio e avisa no plot
-
-        val hasEpisodes = episodes.isNotEmpty()
+        // Fallback 3: sintético para garantir botão de player quando API 500 e feed não tinha ep em type7
+        // Ex: 1089, 1279, 1179, 6881 (só em "Em alta") ficam sem episódios -> CloudStream não mostra player
+        var hasEpisodes = episodes.isNotEmpty()
         if (!hasEpisodes) {
-            plot = (plot ?: "") + "\n\n[Tomato API instável — 500 em /season/*/episodes. Tente novamente quando API voltar (janela IPv4). Última prova OK: wk4.oncourse-content.org 720p.m3u8 com policy/signature — ver LAB §6.10]"
+            val placeholderPlot = "[Tomato API instável — 500 em prod-api/edge (FRA60-P7) em /v2/anime e /season/*/episodes. Catálogo em modo offline via feed embutido. Player aguardando API voltar — tente novamente em alguns minutos.]"
+            plot = if (plot.isNullOrBlank()) placeholderPlot else "$plot\n\n$placeholderPlot"
+            // Cria 1 episódio sintético para o botão aparecer; loadLinks tentará /stream e falhará com "nenhum link" até API voltar
+            episodes.add(newEpisode("${animeId}_0") {
+                this.name = "Episódio 1 — toque para tentar reproduzir"
+                this.posterUrl = poster
+                this.episode = 1
+            })
+            hasEpisodes = true
         }
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
@@ -461,8 +483,6 @@ class Tomato : MainAPI() {
             this.tags = tags
             if (hasEpisodes) {
                 addEpisodes(DubStatus.Subbed, episodes.distinctBy { it.data }.sortedBy { it.episode ?: 0 })
-            } else {
-                // CloudStream exige ao menos um; deixamos vazio mesmo -> UI mostra "sem episódios" em vez de crash
             }
         }
     }
@@ -489,9 +509,9 @@ class Tomato : MainAPI() {
         @JsonProperty("showInterstitial") val showInterstitial: Boolean? = null
     )
 
-    // Fallback offline para o único episódio com policy capturado válido no LAB (exp 1790514424 = 2026-09-27 13:07 UTC)
-    // Prova: GET wk4.../720p.m3u8?policy... -> 200 9214 bytes #EXTM3U e 720p_000.ts 7.2M h264/aac
-    // Não é possível forjar signature para outros ep_id (Invalid signature) — quando API 500, só este demo toca
+    // Fallback offline para o único episódio com policy capturado válido no LAB (exp 1790514424 = 2026-09-27 13:07 UTC, já expirado às 13:17 UTC)
+    // 13:15 UTC: CloudFront devolve "Invalid signature" -> assinaturas expiradas precisam /stream ao vivo, que está 500
+    // Mantido para reativar quando API voltar (nova policy) ou substituir; por enquanto apenas documenta a prova
     private val fallbackStreamByEpisode: Map<String, Streams> by lazy {
         mapOf(
             "36947" to Streams(
@@ -499,6 +519,19 @@ class Tomato : MainAPI() {
                 fhd = "https://wk4.oncourse-content.org/6888/36947/1080p.m3u8?policy=eyJpc3MiOiJodHRwczovL2FwaS5jcnVuY2h5cm9sbC5jb20vdjMiLCJpYXQiOjE3OTA1MDcyMjQsImV4cCI6MTc5MDUxNDQyNCwianRpIjoiSk5qMWlzbmxsUnVtZ0FzWmNPcTJWaGpac09VeWFOdzlNRnRNVmtZb3FpRWdldko3TDV4U0l4T0FHOVdDYjd1RyJ9&signature=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJrZXkiOiIzNjk0NyIsImlhdCI6MTc5MDUwNzIyNCwiZXhwIjoxNzkwNTE0NDI0fQ.cJscb22SJsaVg5FIKv950f8f3Imqye64oHMe9cEBDWs&key-pair-id=APKAJMWSQ5S7Zb3NF5VA"
             )
         )
+    }
+
+    private fun isPolicyExpired(url: String): Boolean {
+        return try {
+            val q = url.substringAfter("policy=", "").substringBefore("&")
+            if (q.isEmpty()) return false
+            var b64 = q
+            b64 += "=".repeat((4 - b64.length % 4) % 4)
+            val json = String(java.util.Base64.getUrlDecoder().decode(b64))
+            val exp = Regex("\"exp\"\\s*:\\s*(\\d+)").find(json)?.groupValues?.getOrNull(1)?.toLongOrNull() ?: return false
+            val now = System.currentTimeMillis() / 1000L
+            now >= exp
+        } catch (_: Exception) { false }
     }
 
     override suspend fun loadLinks(
@@ -519,16 +552,21 @@ class Tomato : MainAPI() {
                     }
                 } catch (_: Exception) {}
             }
-            // Fallback offline quando API 500 e temos captura (apenas 36947; outros dão Invalid signature se reusar)
+            // Fallback offline quando API 500 e temos captura (apenas 36947; expirado -> checado antes de enviar)
             if (parsed?.streams == null) {
                 val fb = fallbackStreamByEpisode[epId]
                 if (fb != null) {
+                    val anyValid = listOf(fb.mhd, fb.fhd).any { it != null && !isPolicyExpired(it) }
+                    if (!anyValid) return false
                     parsed = StreamResp(streams = fb)
                 } else {
                     return false
                 }
             }
             val streams = parsed.streams ?: return false
+            // Se policy já expirou, não envia link inválido (daria 405/Invalid signature no player)
+            val candidatesPre = listOf(streams.fhd, streams.mhd, streams.hd, streams.shd, streams.sd).filterNotNull().filter { it.isNotBlank() }
+            if (candidatesPre.isNotEmpty() && candidatesPre.all { isPolicyExpired(it) }) return false
 
             var found = false
             val candidates = listOf(

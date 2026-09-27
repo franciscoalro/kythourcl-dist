@@ -1,6 +1,6 @@
 {
     "name": "Kythour Repository",
-    "description": "Plugins Kythour \u2014 Tomato v151 (fix nenhum link encontrado: dual-host stream + fallback 36947), VeloPlayTV v7, CineGato v6, AnimesOrion v1, Pobreflix v150, CineVision v151, AnimeFire v151, NetCine v151, RedeCanais v151, TopAnimes v151, SuperCine v1 (11 plugins)",
+    "description": "Plugins Kythour \u2014 Tomato v152 (fix player ausente: fallback sint\u00e9tico + expira\u00e7\u00e3o policy, wk4 Invalid signature), SuperCine/CineVision/AnimeFire/NetCine/RedeCanais/TopAnimes v152, VeloPlayTV v5, AnimesOrion v1, CineGato v6, Pobreflix v150 (11 plugins)",
     "manifestVersion": 1,
     "pluginLists": [
         "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/plugins.json"
