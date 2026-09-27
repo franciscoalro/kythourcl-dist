@@ -45,7 +45,15 @@ subprojects {
     }
 
     cloudstream {
-        setRepo("https://github.com/franciscoalro/kythourcl-dist") 
+        // URLs must point to main/builds/*.cs3 (fresh, no CDN stale via orphan 'builds' branch)
+        // Using custom rawLinkFormat so %branch% = main and %filename% is prefixed with builds/
+        setRepo(
+            "franciscoalro",
+            "kythourcl-dist",
+            "https://github.com/franciscoalro/kythourcl-dist",
+            "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/%branch%/builds/%filename%"
+        )
+        buildBranch = "main"
         authors = listOf("franciscoalro")
         version = 152
     }

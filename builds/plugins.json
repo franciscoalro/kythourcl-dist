@@ -10,7 +10,7 @@
         ],
         "version": 152,
         "internalName": "AnimeFire",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/AnimeFire.cs3",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/AnimeFire.cs3",
         "name": "AnimeFire"
     },
     {
@@ -24,7 +24,7 @@
         ],
         "version": 1,
         "internalName": "AnimesOrion",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/AnimesOrion.cs3",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/AnimesOrion.cs3",
         "name": "AnimesOrion"
     },
     {
@@ -38,7 +38,7 @@
         ],
         "version": 6,
         "internalName": "CineGato",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/CineGato.cs3",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/CineGato.cs3",
         "name": "CineGato"
     },
     {
@@ -52,7 +52,7 @@
         ],
         "version": 152,
         "internalName": "CineVision",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/CineVision.cs3",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/CineVision.cs3",
         "name": "CineVision"
     },
     {
@@ -66,7 +66,7 @@
         ],
         "version": 152,
         "internalName": "NetCine",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/NetCine.cs3",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/NetCine.cs3",
         "name": "NetCine"
     },
     {
@@ -80,7 +80,7 @@
         ],
         "version": 150,
         "internalName": "Pobreflix",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/Pobreflix.cs3",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/Pobreflix.cs3",
         "name": "Pobreflix"
     },
     {
@@ -94,7 +94,7 @@
         ],
         "version": 152,
         "internalName": "RedeCanais",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/RedeCanais.cs3",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/RedeCanais.cs3",
         "name": "RedeCanais"
     },
     {
@@ -108,7 +108,7 @@
         ],
         "version": 3,
         "internalName": "SuperCine",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/SuperCine.cs3",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/SuperCine.cs3",
         "name": "SuperCine"
     },
     {
@@ -122,7 +122,7 @@
         ],
         "version": 152,
         "internalName": "Tomato",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/Tomato.cs3",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/Tomato.cs3",
         "name": "Tomato"
     },
     {
@@ -136,7 +136,7 @@
         ],
         "version": 152,
         "internalName": "TopAnimes",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/TopAnimes.cs3",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/TopAnimes.cs3",
         "name": "TopAnimes"
     },
     {
@@ -150,7 +150,7 @@
         ],
         "version": 5,
         "internalName": "VeloPlayTV",
-        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/builds/VeloPlayTV.cs3",
+        "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/VeloPlayTV.cs3",
         "name": "VeloPlayTV"
     }
 ]
