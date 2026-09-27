@@ -27,13 +27,19 @@ class Tomato : MainAPI() {
         const val APP_UA = "tomato-android"
         // Quantidade de tentativas no endpoint /stream + espera entre falhas.
         // Medido 2026-09-27: taxa de sucesso oscila 12-20% (500 em rajadas) na janela
-        // parcial, e cai a 0% quando a origem inteira cai. Ver bloco de health check.
+        // parcial, e cai a 0% quando a origem inteira cai. Ver bloco de health check_origina.
+        // v158: a deteccao de origem morta passa a ser feita por catch-all 500 (ver
+        // isOriginDead()), que e conclusivo em 1 request e nao depende de /feed.
         const val STREAM_ATTEMPTS = 20
         const val RETRY_DELAY_MS = 500L
         // Apos este numero de falhas seguidas no /stream, faz 1 sonda de saude na
         // origem. Medido: com a origem NO AR e sem token a API devolve 403; com a
         // origem FORA devolve 500. A sonda distingue os dois estados em 1 request.
         const val HEALTH_PROBE_AFTER = 6
+        // v158: nonce no caminho da sonda de origem morta, para que o edge/qualquer
+        // cache intermediario nunca devolva uma resposta guardada de uma chamada
+        // anterior -- a sonda precisa refletir o estado atual da origem.
+        val PROBE_NONCE = System.currentTimeMillis().toString()
         // Tentativas em detalhes e temporada. Medido no redroid com a v156: 8
         // tentativas deixavam load() em 11.1s, porque 8 x (timeout + 500ms) de
         // backoff domina o tempo antes do loadLinks. 3 tentativas cortam para
@@ -88,6 +94,10 @@ class Tomato : MainAPI() {
     // 2026-09-27: prod-api oscila entre 500 e 200 -> feed embutido evita catálogo vazio
     private suspend fun fetchFeed(): JsonNode? {
         val mapper = jacksonObjectMapper().apply { configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false) }
+        // v158: antes de gastar 4 tentativas em /feed, 1 request barato detecta
+        // origem morta. No cenario medido (queda total) isso troca 4 x (15s timeout
+        // + 500ms) por 1 request de ~0.15s, e cai direto no feed embutido.
+        if (isOriginDead()) return try { mapper.readTree(TomatoFallback.FEED_JSON) } catch (_: Exception) { null }
         repeat(4) { attempt ->
             try {
                 val res = app.get("$mainUrl/v2/animes/feed", headers = API_HEADERS, timeout = 15)
@@ -114,7 +124,13 @@ class Tomato : MainAPI() {
         // probeBudget = 2, nao 3: com DETAIL_ATTEMPTS = 3 o budget de 3 so
         // zerava na ultima tentativa, ou seja, a sonda rodava tarde demais para
         // encurtar o caminho. 2 dispara na segunda, sobrando uma para tentar
-        // de novo caso a origem tenha voltado entre as duas.
+        // de novo caso a origem tenha voltou entre as duas.
+        //
+        // v158: a sonda e isOriginDead() (catch-all 500 em rota inexistente), que
+        // confirma origem morta estrutural em 1 request. Se ela nao for conclusiva
+        // (a origem respondeu de verdade, ex 404/403), cai para isOriginDown(), que
+        // ainda distingue "endpoint /feed ruim" de "origem fora" pelo par 403/500.
+        // A ordem importa: primeiro a evidencia mais forte, depois a mais fraca.
         var probeBudget = 2
         repeat(attempts) { attempt ->
             try {
@@ -125,6 +141,7 @@ class Tomato : MainAPI() {
             } catch (_: Exception) {}
             if (attempt < attempts - 1) kotlinx.coroutines.delay(RETRY_DELAY_MS)
             if (--probeBudget == 0) {
+                if (isOriginDead()) return null
                 if (isOriginDown()) return null
                 probeBudget = 3
             }
@@ -145,6 +162,7 @@ class Tomato : MainAPI() {
             } catch (_: Exception) {}
             if (attempt < attempts - 1) kotlinx.coroutines.delay(RETRY_DELAY_MS)
             if (--probeBudget == 0) {
+                if (isOriginDead()) return null
                 if (isOriginDown()) return null
                 probeBudget = 3
             }
@@ -611,17 +629,31 @@ class Tomato : MainAPI() {
 
         // Fallback 3: sintético para garantir botão de player quando API 500 e feed não tinha ep em type7
         // Ex: 1089, 1279, 1179, 6881 (só em "Em alta") ficam sem episódios -> CloudStream não mostra player
+        //
+        // v159 -- o "Fallback 3" e MOITO. A entrada sintetica tinha data
+        // "${animeId}_0", que o loadLinks transformava num ID de episodio inventado
+        // (o ID do anime) e resultava em "Nenhum link encontrado" apos 5s. O
+        // loadLinks agora rejeita o placeholder, mas ainda assim um botao de play
+        // que so pode falhar e pior que nenhum: gasta o tempo do usuario para
+        // entregar "nada". O catalogo offline continua mostrando titulo, capa,
+        // sinopse e tags, mas o aviso no `plot` diz o que esta acontecendo.
+        //
+        // A entrada e mantida para o catalogo nao ficar vazio (o CloudStream usa
+        // a lista de episodios para montar a tela e o botao do player), mas a
+        // sinopse explica que reproducao depende da API voltar.
         var hasEpisodes = episodes.isNotEmpty()
         var apiOffline = false
         if (!hasEpisodes) {
             apiOffline = true
             // Sinopse vazia = catálogo offline; não poluímos sinopse real quando já existe
             if (plot.isNullOrBlank()) {
-                plot = "Catálogo offline (feed embutido) — API instável no momento. Toque no episódio para tentar reproduzir; quando a API voltar os episódios reais aparecerão aqui."
+                plot = "Catálogo offline (feed embutido). A origem do Tomato está fora do ar no momento — títulos e metadados abaixo vêm do cache local, mas a reprodução precisa que a API volte. Se o botão de tocar não responder, é por isso."
             }
-            // Cria 1 episódio sintético para o botão aparecer; loadLinks informará status offline se ainda 500
+            // Cria 1 episódio sintético apenas para a tela não ficar vazia.
+            // data = "${animeId}_0" e o marcador sintetico que o loadLinks
+            // reconhece e rejeita em vez de inventar um episode_id (ver loadLinks v159).
             episodes.add(newEpisode("${animeId}_0") {
-                this.name = "Episódio 1 — offline (toque para tentar)"
+                this.name = "Episódio 1 — indisponível (API fora do ar)"
                 this.posterUrl = poster
                 this.episode = 1
             })
@@ -682,6 +714,38 @@ class Tomato : MainAPI() {
     // Sem isso, uma origem 100% fora faz o usuario esperar as 20 tentativas
     // (medido: 17s media, 27.7s pior caso) para receber o mesmo "nenhum link" que
     // a versao antiga devolvia em menos de 1s.
+    //
+    // v158 -- deteccao de origem morta por catch-all 500.
+    // A sonda acima usa /feed, mas /feed e um endpoint de CONTEUDO: quando ele falha
+    // por outro motivo (cache frio, rota especifica quebrada, 5xx parcial) o 500 nao
+    // diz que a origem inteira morreu, e a sonda erra ao cortar o retry cedo demais.
+    // O sinal definitivo de origem morta e diferente: um 500 em um caminho que
+    // NAO EXISTE. Medido em 2026-09-27 na queda real:
+    //   GET /zzz-nao-existe-12345      -> 500
+    //   GET /v2/anime/99999999         -> 500
+    //   GET /  (raiz)                 -> 500
+    //   OPTIONS /v2/animes/feed       -> 204   (edge/TLS/CORS OK, so a app caiu)
+    // Um backend com rotas vivas devolveria 404 nesse caminho aleatorio. 500 em
+    // caminho inexistente = o dispatch nunca roda = origem morta de forma estrutural.
+    // Isso e 1 request sem token, sem peso de payload, e conclusivo.
+    private suspend fun isOriginDead(): Boolean {
+        return try {
+            val res = app.get("$mainUrl/zzz-nao-existe-$${PROBE_NONCE}", headers = mapOf("User-Agent" to APP_UA), timeout = 10)
+            when (res.code) {
+                404, 410 -> false          // rota respondeu 404 de verdade: origem VIVA
+                in 500..599 -> true        // 500 em rota inexistente: origem MORTA
+                401, 403 -> false           // autenticacao falhou, mas o dispatch rodou
+                else -> false
+            }
+        } catch (_: Exception) {
+            // timeout/erro de rede tambem contam como origem indisponivel
+            true
+        }
+    }
+
+    // Sonda de saude legada: usada quando a deteccao estrutural nao e conclusiva
+    // (origem viva mas /feed ruim). Mantida porque distingue 403 (credencial) de
+    // 500 (endpoint), info que o catch-all nao entrega.
     private suspend fun isOriginDown(): Boolean {
         return try {
             // rota barata e sempre presente; sem Authorization de proposito
@@ -699,7 +763,25 @@ class Tomato : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val epId = Regex("""(\d+)""").find(data)?.value ?: data
+        // v159 -- correcao do bug de ID sintetico.
+        // Antes: Regex("""(\d+)""").find(data) pegava o PRIMEIRO bloco de digitos de
+        // `data`. Para episodio real `data` e um "36937" limpo e funciona. Mas o
+        // catalogo offline cria data = "${animeId}_0" (ex: "7115_0") e a regex
+        // devolvia 7115 -- o ID do ANIME, nao de um episodio. Resultado: o plugin
+        // pedia /v2/anime/episode/7115/stream, um episodio inexistente, e o
+        // CloudStream exibia "Nenhum link encontrado" depois de 5s de retry.
+        // Prova no logcat: "CS3ExoPlayer: newInstance = {kitsu=7115}".
+        //
+        // Nao extrai digitos de string composta. `data` de episodio real e sempre
+        // um ID numerico puro; qualquer coisa fora desse formato e o placeholder
+        // offline, que nao tem /stream para resolver.
+        val epId = data.trim()
+        if (epId.isEmpty() || epId.any { !it.isDigit() }) {
+            // Placeholder offline (data contem '_' ou nao-numerico). Nao ha
+            // episodio real para resolver: falhar agora em vez de gastar
+            // STREAM_ATTEMPTS tentativas num ID inventado.
+            return false
+        }
         return try {
             // Retry no host que responde. edge.betomato.com e 0/50 medido -> fora.
             // O /stream devolve 500 com corpo plain ~80% das vezes na janela parcial,
@@ -726,7 +808,11 @@ class Tomato : MainAPI() {
                 if (attempt < STREAM_ATTEMPTS) kotlinx.coroutines.delay(RETRY_DELAY_MS)
                 // Origem fora do ar: insistir so piora a espera do usuario.
                 if (consecutiveFails == HEALTH_PROBE_AFTER) {
-                    if (isOriginDown()) return false
+                    // v158: primeiro a evidencia estrutural (catch-all 500 em rota
+                    // inexistente). Antes o unico sinal era isOriginDown(), que
+                    // pergunta ao /feed e pode dar falso positivo quando o /feed
+                    // sozinho falha com a origem de pe.
+                    if (isOriginDead() || isOriginDown()) return false
                     // origem viva, so o /stream que esta ruim -> segue tentando
                     consecutiveFails = 0
                 }
