@@ -1,6 +1,6 @@
 [
     {
-        "fileHash": "sha256-d7b5b9e5510c64ab308dfd65285b5dba4b15ecc267249890ba2a0b11d44b739b",
+        "fileHash": "sha256-75263fa8207a9ceb0de8cd5e50e27dca73746cbd729bf0b82863c93ecd1d4531",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
         "fileSize": 41960,
@@ -8,7 +8,7 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 153,
+        "version": 157,
         "internalName": "AnimeFire",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/AnimeFire.cs3",
         "name": "AnimeFire"
@@ -42,7 +42,7 @@
         "name": "CineGato"
     },
     {
-        "fileHash": "sha256-fb5f6fd0e228bbf6b4247cb48007d5f31a50fbce703b46c3f7a518404c16d52a",
+        "fileHash": "sha256-fdd947ec77e9bcca112587c46d98a6bd58dfdf8e09a6a9d7d75e6f2bf9ea7b6e",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
         "fileSize": 56542,
@@ -50,13 +50,13 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 153,
+        "version": 157,
         "internalName": "CineVision",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/CineVision.cs3",
         "name": "CineVision"
     },
     {
-        "fileHash": "sha256-15aaef1e17117aecd1c63509737dfd18c0b829c781f389b4ad0d879e0ed0222e",
+        "fileHash": "sha256-03707eb3f98e6b93463e29b43ac4240997227be4c22c4618fef239f6d25a4780",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
         "fileSize": 53388,
@@ -64,7 +64,7 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 153,
+        "version": 157,
         "internalName": "NetCine",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/NetCine.cs3",
         "name": "NetCine"
@@ -84,7 +84,7 @@
         "name": "Pobreflix"
     },
     {
-        "fileHash": "sha256-cd0e8b868f784895d724702c942b07485c966bbe8ae56d9622954346571c5d6f",
+        "fileHash": "sha256-158411b803a5ec6ba57ccf685c04bad29ec1c96219731df56fbc17279c0c6749",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
         "fileSize": 30157,
@@ -92,7 +92,7 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 153,
+        "version": 157,
         "internalName": "RedeCanais",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/RedeCanais.cs3",
         "name": "RedeCanais"
@@ -126,7 +126,7 @@
         "name": "Tomato"
     },
     {
-        "fileHash": "sha256-6e476f0284ed4ca91e3530227950432a481f8a881f4023397fa27dd93dc8b146",
+        "fileHash": "sha256-ea10b77c54adc9cb0d5fe550905923d789b8cee79a29b12c71f8c9896afdc12a",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
         "fileSize": 25201,
@@ -134,7 +134,7 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 153,
+        "version": 157,
         "internalName": "TopAnimes",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/TopAnimes.cs3",
         "name": "TopAnimes"
