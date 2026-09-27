@@ -22,15 +22,32 @@ class Tomato : MainAPI() {
     // válido até exp da policy (~2h por stream) mas JWT não expira rápido; quando expirar refazer login via hCaptcha
     companion object {
         const val BEARER_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6NDg0NjcyOSwidXVpZCI6ImQ0ODk1NjZjLTI0NDMtNDU3OS1iMzkwLWI1YjQxOTgzMTA5MCIsImlhdCI6MTc5MDUwNjI4MH0.3MP87IJav4bhPJzt5YUUv1mEeOdWp2zxo5_hc6w51YU"
+        // UA original do app. O Dalvik falso foi testado A/B (25 rodadas cada):
+        // tomato-android 5/25 vs Dalvik 1/25 -> nao ajuda, e nao vale virar fingerprint.
+        const val APP_UA = "tomato-android"
+        // Quantidade de tentativas no endpoint /stream + espera entre falhas.
+        // Medido 2026-09-27: taxa de sucesso oscila 12-20% (500 em rajadas) na janela
+        // parcial, e cai a 0% quando a origem inteira cai. Ver bloco de health check.
+        const val STREAM_ATTEMPTS = 20
+        const val RETRY_DELAY_MS = 500L
+        // Apos este numero de falhas seguidas no /stream, faz 1 sonda de saude na
+        // origem. Medido: com a origem NO AR e sem token a API devolve 403; com a
+        // origem FORA devolve 500. A sonda distingue os dois estados em 1 request.
+        const val HEALTH_PROBE_AFTER = 6
         val API_HEADERS = mapOf(
-            "User-Agent" to "tomato-android",
+            "User-Agent" to APP_UA,
             "Authorization" to "Bearer $BEARER_TOKEN",
-            "Accept" to "application/json"
+            "Accept" to "application/json",
+            "Accept-Encoding" to "gzip",
+            "Connection" to "Keep-Alive"
         )
         val SEARCH_HEADERS = mapOf(
-            "User-Agent" to "tomato-android",
+            "User-Agent" to APP_UA,
             "Authorization" to "Bearer $BEARER_TOKEN",
-            "Content-Type" to "application/json"
+            "Content-Type" to "application/json",
+            "Accept" to "application/json",
+            "Accept-Encoding" to "gzip",
+            "Connection" to "Keep-Alive"
         )
     }
 
@@ -61,16 +78,64 @@ class Tomato : MainAPI() {
     // ---------- Feed ----------
     // /v2/animes/feed -> {status:true,status_code:4,remote_settings:{},data:[{type:3,title:"Em alta",data:[{anime_id,thumbnail}]},{type:7,title:"Novos episódios",data:[{ep_id,ep_anime_id,anime_name,ep_name}]},...]}
     // Usamos JsonNode para lidar com tipos heterogêneos
-    // 2026-09-27: prod-api e edge retornaram 500 global (CloudFront FRA60-P7) -> feed embutido evita catálogo vazio
+    // 2026-09-27: prod-api oscila entre 500 e 200 -> feed embutido evita catálogo vazio
     private suspend fun fetchFeed(): JsonNode? {
         val mapper = jacksonObjectMapper().apply { configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false) }
-        for (host in listOf(mainUrl, "https://edge.betomato.com")) {
+        repeat(4) { attempt ->
             try {
-                val res = app.get("$host/v2/animes/feed", headers = API_HEADERS, timeout = 15)
-                if (res.code == 200) return mapper.readTree(res.text)
+                val res = app.get("$mainUrl/v2/animes/feed", headers = API_HEADERS, timeout = 15)
+                if (res.code == 200) {
+                    val node = mapper.readTree(res.text)
+                    if (node.get("data") != null) return node
+                }
             } catch (_: Exception) {}
+            if (attempt < 3) kotlinx.coroutines.delay(RETRY_DELAY_MS)
         }
-        return try { mapper.readTree(TomatoFallback.FEED_JSON) } catch (_: Exception) { null }
+        return try {
+            mapper.readTree(TomatoFallback.FEED_JSON)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    // Busca JSON com retry. Usado por detalhes e temporada, que oscilam igual ao stream.
+    // A sonda de saude encurta o caminho quando a origem esta FORA: medido no aparelho,
+    // sem ela o load() levava 13.8s (8 tentativas de detalhe + 8 de temporada) para
+    // so entao chamar o loadLinks e descobrir que nao havia link.
+    private suspend fun getJsonWithRetry(path: String, headers: Map<String, String> = API_HEADERS, attempts: Int = 8): String? {
+        var probeBudget = 3
+        repeat(attempts) { attempt ->
+            try {
+                val res = app.get("$mainUrl$path", headers = headers, timeout = 15)
+                if (res.code == 200 && res.text.isNotBlank()) return res.text
+                // 403 aqui = credencial, nao origem fora. 5xx = origem.
+                if (res.code == 403) return null
+            } catch (_: Exception) {}
+            if (attempt < attempts - 1) kotlinx.coroutines.delay(RETRY_DELAY_MS)
+            if (--probeBudget == 0) {
+                if (isOriginDown()) return null
+                probeBudget = 3
+            }
+        }
+        return null
+    }
+
+    // POST JSON com retry (temporada usa body {page, order}).
+    private suspend fun postJsonWithRetry(path: String, body: Any, attempts: Int = 8): String? {
+        var probeBudget = 3
+        repeat(attempts) { attempt ->
+            try {
+                val res = app.post("$mainUrl$path", headers = SEARCH_HEADERS, json = body, timeout = 15)
+                if (res.code == 200 && res.text.isNotBlank()) return res.text
+                if (res.code == 403) return null
+            } catch (_: Exception) {}
+            if (attempt < attempts - 1) kotlinx.coroutines.delay(RETRY_DELAY_MS)
+            if (--probeBudget == 0) {
+                if (isOriginDown()) return null
+                probeBudget = 3
+            }
+        }
+        return null
     }
 
     override val mainPage = mainPageOf(
@@ -238,9 +303,9 @@ class Tomato : MainAPI() {
         // 1) Tenta API remota; 2) fallback no feed embutido (tolerante a 500)
         val apiRes = try {
             val body = SearchReq(search = q, contentType = "anime", page = 1, tags = emptyList())
-            val res = app.post("$mainUrl/v2/content/search", headers = SEARCH_HEADERS, json = body, timeout = 15)
-            if (res.code == 200) {
-                val parsed = tryParseJson<SearchRespWrapper>(res.text)
+            val text = postJsonWithRetry("/v2/content/search", body, attempts = 6)
+            if (text != null) {
+                val parsed = tryParseJson<SearchRespWrapper>(text)
                 val lst = parsed?.data?.result ?: parsed?.data?.data ?: parsed?.result ?: emptyList()
                 lst.mapNotNull { item ->
                     val animeId = item.animeId ?: item.id ?: return@mapNotNull null
@@ -400,9 +465,10 @@ class Tomato : MainAPI() {
         var seasons: List<AnimeSeason> = emptyList()
 
         try {
-            val res = app.get("$mainUrl/v2/anime/$animeId", headers = API_HEADERS, timeout = 15)
-            if (res.code == 200) {
-                val text = res.text
+            var resText: String? = null
+            resText = getJsonWithRetry("/v2/anime/$animeId", attempts = 8)
+            if (resText != null) {
+                val text = resText
                 // Tenta parse tipado; se falhar, usa JsonNode genérico
                 val wrapper = tryParseJson<JsonNode>(text)
                 val dataNode = wrapper?.get("data") ?: wrapper
@@ -451,14 +517,11 @@ class Tomato : MainAPI() {
         // Busca episódios por temporada (bundle: {page,order} sem token)
         val episodes = mutableListOf<Episode>()
         for (season in seasons.ifEmpty { listOf(AnimeSeason(animeId, null)) }) {
-            val isFallback = seasons.isEmpty()
             try {
                 val reqBody = SeasonReq(page = 1, order = "asc")
-                val epRes = app.post("$mainUrl/season/${season.seasonId}/episodes", headers = SEARCH_HEADERS, json = reqBody, timeout = 15)
-                if (epRes.code != 200) {
-                    if (isFallback) continue else continue
-                }
-                val parsed = tryParseJson<SeasonEpisodesResp>(epRes.text) ?: continue
+                val epText = postJsonWithRetry("/season/${season.seasonId}/episodes", reqBody, attempts = 8)
+                if (epText == null) continue
+                val parsed = tryParseJson<SeasonEpisodesResp>(epText) ?: continue
                 val data = parsed.data ?: emptyList()
                 if (data.isEmpty()) continue
                 data.forEach { ep ->
@@ -472,7 +535,7 @@ class Tomato : MainAPI() {
                         this.posterUrl = thumb
                     })
                 }
-                if (episodes.isNotEmpty() && !isFallback) break // já achou na primeira season válida
+                if (episodes.isNotEmpty()) break // já achou na primeira season válida
             } catch (_: Exception) { continue }
         }
 
@@ -564,8 +627,10 @@ class Tomato : MainAPI() {
     // ---------- loadLinks ----------
     // GET /v2/anime/episode/{ep_id}/stream  -> {streams:{mhd:"https://wk4.oncourse-content.org/6888/36947/720p.m3u8?policy=...&signature=...&key-pair-id=APKAJ...", fhd:"...1080p.m3u8"}, episodeHasNext, ...}
     // policy iss=api.crunchyroll.com/v3 ttl 2h (LAB §6.10 validado: curl -> 9214 bytes #EXTM3U + 7.1M 000.ts h264/aac)
-    // 2026-09-27 12:55 UTC: prod-api e edge (FRA60-P7/P2U) retornam 500 em TODOS os endpoints (feed/anime/search/stream/season)
-    // loadLinks faz dual-host + fallback offline para prova 36947 antes de retornar "nenhum link encontrado"
+    // 2026-09-27 17:00 UTC: medido novamente. /stream oscila entre 500 e 200 a 12-20%,
+    // edge.betomato.com e 0/50 (morto), e os 500 tem corpo "Internal Server Error" puro
+    // (nenhum JSON recuperavel atras do status). Logo: retry com backoff no host vivo,
+    // parando no primeiro 200 com streams. Ver comentarios no companion object.
     data class Streams(
         @JsonProperty("mhd") val mhd: String? = null,
         @JsonProperty("fhd") val fhd: String? = null,
@@ -583,18 +648,6 @@ class Tomato : MainAPI() {
         @JsonProperty("showInterstitial") val showInterstitial: Boolean? = null
     )
 
-    // Fallback offline para o único episódio com policy capturado válido no LAB (exp 1790514424 = 2026-09-27 13:07 UTC, já expirado às 13:17 UTC)
-    // 13:15 UTC: CloudFront devolve "Invalid signature" -> assinaturas expiradas precisam /stream ao vivo, que está 500
-    // Mantido para reativar quando API voltar (nova policy) ou substituir; por enquanto apenas documenta a prova
-    private val fallbackStreamByEpisode: Map<String, Streams> by lazy {
-        mapOf(
-            "36947" to Streams(
-                mhd = "https://wk4.oncourse-content.org/6888/36947/720p.m3u8?policy=eyJpc3MiOiJodHRwczovL2FwaS5jcnVuY2h5cm9sbC5jb20vdjMiLCJpYXQiOjE3OTA1MDcyMjQsImV4cCI6MTc5MDUxNDQyNCwianRpIjoiSk5qMWlzbmxsUnVtZ0FzWmNPcTJWaGpac09VeWFOdzlNRnRNVmtZb3FpRWdldko3TDV4U0l4T0FHOVdDYjd1RyJ9&signature=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJrZXkiOiIzNjk0NyIsImlhdCI6MTc5MDUwNzIyNCwiZXhwIjoxNzkwNTE0NDI0fQ.cJscb22SJsaVg5FIKv950f8f3Imqye64oHMe9cEBDWs&key-pair-id=APKAJMWSQ5S7Zb3NF5VA",
-                fhd = "https://wk4.oncourse-content.org/6888/36947/1080p.m3u8?policy=eyJpc3MiOiJodHRwczovL2FwaS5jcnVuY2h5cm9sbC5jb20vdjMiLCJpYXQiOjE3OTA1MDcyMjQsImV4cCI6MTc5MDUxNDQyNCwianRpIjoiSk5qMWlzbmxsUnVtZ0FzWmNPcTJWaGpac09VeWFOdzlNRnRNVmtZb3FpRWdldko3TDV4U0l4T0FHOVdDYjd1RyJ9&signature=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJrZXkiOiIzNjk0NyIsImlhdCI6MTc5MDUwNzIyNCwiZXhwIjoxNzkwNTE0NDI0fQ.cJscb22SJsaVg5FIKv950f8f3Imqye64oHMe9cEBDWs&key-pair-id=APKAJMWSQ5S7Zb3NF5VA"
-            )
-        )
-    }
-
     private fun isPolicyExpired(url: String): Boolean {
         return try {
             val q = url.substringAfter("policy=", "").substringBefore("&")
@@ -608,6 +661,24 @@ class Tomato : MainAPI() {
         } catch (_: Exception) { false }
     }
 
+    // Sonda de saude da origem. Distingue "API fora do ar" de "endpoint oscilando"
+    // em UMA requisicao, sem token de proposito:
+    //   origem NO AR  -> 403 {"status":false,"message":"authentication failed"}
+    //   origem FORA   -> 500 "Internal Server Error"
+    // Sem isso, uma origem 100% fora faz o usuario esperar as 20 tentativas
+    // (medido: 17s media, 27.7s pior caso) para receber o mesmo "nenhum link" que
+    // a versao antiga devolvia em menos de 1s.
+    private suspend fun isOriginDown(): Boolean {
+        return try {
+            // rota barata e sempre presente; sem Authorization de proposito
+            val res = app.get("$mainUrl/v2/animes/feed", headers = mapOf("User-Agent" to APP_UA), timeout = 10)
+            res.code >= 500
+        } catch (_: Exception) {
+            // timeout/erro de rede tambem contam como origem indisponivel
+            true
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -616,27 +687,37 @@ class Tomato : MainAPI() {
     ): Boolean {
         val epId = Regex("""(\d+)""").find(data)?.value ?: data
         return try {
+            // Retry no host que responde. edge.betomato.com e 0/50 medido -> fora.
+            // O /stream devolve 500 com corpo plain ~80% das vezes na janela parcial,
+            // entao nao ha nada a reaproveitar: cada tentativa e um GET novo.
+            //
+            // Duas sondas de saude cortam o caminho quando a origem esta 100% fora,
+            // que e o caso em que retry nao ajuda (medido 0/10 mesmo com 20 tentativas).
             var parsed: StreamResp? = null
-            for (host in listOf(mainUrl, "https://edge.betomato.com")) {
+            var attempt = 0
+            var consecutiveFails = 0
+            while (attempt < STREAM_ATTEMPTS) {
                 try {
-                    val res = app.get("$host/v2/anime/episode/$epId/stream", headers = API_HEADERS, timeout = 15)
+                    val res = app.get("$mainUrl/v2/anime/episode/$epId/stream", headers = API_HEADERS, timeout = 15)
                     if (res.code == 200) {
-                        parsed = tryParseJson<StreamResp>(res.text)
-                        if (parsed?.streams != null) break
+                        val body = tryParseJson<StreamResp>(res.text)
+                        if (body?.streams != null) {
+                            parsed = body
+                            break
+                        }
                     }
                 } catch (_: Exception) {}
-            }
-            // Fallback offline quando API 500 e temos captura (apenas 36947; expirado -> checado antes de enviar)
-            if (parsed?.streams == null) {
-                val fb = fallbackStreamByEpisode[epId]
-                if (fb != null) {
-                    val anyValid = listOf(fb.mhd, fb.fhd).any { it != null && !isPolicyExpired(it) }
-                    if (!anyValid) return false
-                    parsed = StreamResp(streams = fb)
-                } else {
-                    return false
+                attempt++
+                consecutiveFails++
+                if (attempt < STREAM_ATTEMPTS) kotlinx.coroutines.delay(RETRY_DELAY_MS)
+                // Origem fora do ar: insistir so piora a espera do usuario.
+                if (consecutiveFails == HEALTH_PROBE_AFTER) {
+                    if (isOriginDown()) return false
+                    // origem viva, so o /stream que esta ruim -> segue tentando
+                    consecutiveFails = 0
                 }
             }
+            if (parsed == null) return false
             val streams = parsed.streams ?: return false
             // Se policy já expirou, não envia link inválido (daria 405/Invalid signature no player)
             val candidatesPre = listOf(streams.fhd, streams.mhd, streams.hd, streams.shd, streams.sd).filterNotNull().filter { it.isNotBlank() }
@@ -668,7 +749,7 @@ class Tomato : MainAPI() {
                                 ) {
                                     this.referer = mainUrl
                                     this.quality = link.quality
-                                    this.headers = mapOf("User-Agent" to "tomato-android")
+                                    this.headers = mapOf("User-Agent" to APP_UA)
                                 }
                             )
                             found = true
@@ -683,7 +764,7 @@ class Tomato : MainAPI() {
                             ) {
                                 this.referer = mainUrl
                                 this.quality = qual
-                                this.headers = mapOf("User-Agent" to "tomato-android")
+                                this.headers = mapOf("User-Agent" to APP_UA)
                             }
                         )
                         found = true
@@ -698,6 +779,7 @@ class Tomato : MainAPI() {
                         ) {
                             this.referer = mainUrl
                             this.quality = qual
+                            this.headers = mapOf("User-Agent" to APP_UA)
                         }
                     )
                     found = true
