@@ -55,7 +55,7 @@ subprojects {
         )
         buildBranch = "main"
         authors = listOf("franciscoalro")
-        version = 166
+        version = 167
     }
 
     android {

@@ -8,7 +8,6 @@ import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
-import com.lagradost.api.getContext
 import android.util.Log
 
 class Tomato : MainAPI() {
@@ -21,70 +20,11 @@ class Tomato : MainAPI() {
 
     private val TAG = "Tomato"
 
-    // ---------- Egress: proxy HTTP opcional, por configuracao ----------
-    //
-    // Medido em 2026-09-28 (A/B, mesmo Bearer, mesma rota, mesma janela):
-    //   saida DIRETA do VPS -> 18/18 500, Server: cloudflare, text/html, 21 B
-    //   saida via Tor        -> 18/18 200, application/json
-    // Logo o bloqueio e' do IP de saida, e a unica correcao e' TROCAR DE ROTA.
-    //
-    // O proxy e' OPCIONAL e nasce DESLIGADO. Motivo: o aparelho do usuario sai
-    // por IP residencial e nunca teve o problema; fixar 172.17.0.1 (gateway
-    // docker deste host) no artefato publicado entregaria um plugin que so
-    // funciona no ambiente de build. Ver references/plugin-egress-proxy-injection.md.
-    //
-    // Como liga: a chave de preferencia "tomato_proxy_url" no SharedPreferences
-    // do CloudStream. Exemplo de valor: "http://172.17.0.1:10882". Ausente ou
-    // vazia = saida normal do aparelho. Nao ha interface para configurar isso:
-    // o CloudStream so expoe preferencias de plugins via API publica, entao a
-    // chave e' lida direto, e documentada aqui e no repositorio.
-    //
-    // Exemplo de como setar por adb (o -e e' obrigatorio, o pref e' XML):
-    //   adb shell 'am start -n com.lagradost.cloudstream3/com.lagradost.cloudstream3.MainActivity'
-    //   # via editor de prefs, ou rewriting o XML do app e forçando STOP
-    private fun proxyUrlConfigurada(): String? {
-        return try {
-            // com.lagradost.api.ContextHelper e' a API PUBLICA de plugin para
-            // obter o Context. As classes internas do app (CloudStreamApp.getContext,
-            // DataStore.getKey) NAO resolvem no Kotlin do plugin: verificado no
-            // jar de compilacao, sao unresolved reference mesmo existindo no jar.
-            //
-            // O arquivo vive no filesDir do APP, e nao no do plugin, porque o
-            // plugin roda com o contexto do app e nao tem storage proprio. O
-            // files/ do CloudStream e' gravavel (medido), e sobrevive a update.
-            val ctx = getContext() as? android.content.Context ?: return null
-            val f = java.io.File(ctx.filesDir, PROXY_CONF_FILE)
-            if (!f.exists()) return null
-            f.readText().trim().takeIf { it.isNotEmpty() }
-        } catch (_: Exception) { null }
-    }
-
-    // Injeta o proxy no baseClient do nicehttp. `app.baseClient` e' o cliente
-    // COMPARTILHADO do CloudStream: injetar aqui faz todo request do plugin
-    // sair pela rota nova. Regra: injetar UMA vez e guardar a flag, porque
-    // reconstruir o cliente a cada chamada custa conexao e derruba o reaproveitamento.
-    //
-    // Medido: o proxy de SISTEMA do Android (settings global http_proxy_host)
-    // NAO serve -- configurei no ReDroid e o app continuou saindo pelo IP
-    // bloqueado. O OkHttp do app nao herda ProxySelector.getDefault() aqui.
-    private var proxyJaInjetado = false
-
-    private fun ligarProxySeConfigurado() {
-        if (proxyJaInjetado) return
-        val url = proxyUrlConfigurada() ?: return
-        try {
-            val addr = java.net.URI(url)
-            val port = if (addr.port > 0) addr.port else 80
-            val novo = app.baseClient.newBuilder()
-                .proxy(java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress(addr.host, port)))
-                .build()
-            app.baseClient = novo
-            proxyJaInjetado = true
-            Log.i(TAG, "egress: proxy HTTP injetado em ${addr.host}:$port")
-        } catch (e: Exception) {
-            Log.w(TAG, "egress: falha ao injetar proxy ($url): ${e.javaClass.simpleName}")
-        }
-    }
+    // v167: removido o proxy configurável que dependia de
+    // com.lagradost.api.getContext. Essa API existe no ambiente de compilação,
+    // mas não em todas as versões instaladas do CloudStream e causava
+    // NoClassDefFoundError: ContextHelper_jvmKt ao carregar o provider.
+    // O plugin usa agora somente APIs estáveis da biblioteca CloudStream.
 
     // Reconhece a assinatura do 500 DE BORDA, e so ela:
     //   500 + Server: cloudflare + Content-Type: text/html + corpo 21 B
@@ -106,12 +46,6 @@ class Tomato : MainAPI() {
         } catch (_: Exception) { false }
     }
 
-    // Aplica a rota antes de qualquer request. Barato (le a pref) e idempotente,
-    // entao chamar em todos os pontos de entrada e' seguro e nao custa conexao.
-    private fun egressPronto() {
-        ligarProxySeConfigurado()
-    }
-
     // BEARER_TOKEN e' um JWT de sessao de cliente, sem claim `exp`, capturado de
     // /data/data/com.tomatos.clientapp/shared_prefs/...xml. Nao e' chave de servidor
     // nem credencial de escrita; identifica uma conta de terceiro. Por isso nao
@@ -126,9 +60,6 @@ class Tomato : MainAPI() {
     // permanece exposta. A saida real e' rotacao server-side, que depende de
     // login no aplicativo (hCaptcha) e nao pode ser feita por este repositorio.
     companion object {
-        // Arquivo de configuracao que liga o proxy de saida, no filesDir do
-        // CloudStream. Ausente/ vazio = saida normal do aparelho (padrao).
-        const val PROXY_CONF_FILE = "tomato_proxy.conf"
         const val BEARER_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6NDg0NjcyOSwidXVpZCI6ImQ0ODk1NjZjLTI0NDMtNDU3OS1iMzkwLWI1YjQxOTgzMTA5MCIsImlhdCI6MTc5MDUwNjI4MH0.3MP87IJav4bhPJzt5YUUv1mEeOdWp2zxo5_hc6w51YU"
         // UA original do app. O Dalvik falso foi testado A/B (25 rodadas cada):
         // tomato-android 5/25 vs Dalvik 1/25 -> nao ajuda, e nao vale virar fingerprint.
@@ -222,7 +153,6 @@ class Tomato : MainAPI() {
     // Usamos JsonNode para lidar com tipos heterogêneos
     // 2026-09-27: prod-api oscila entre 500 e 200 -> feed embutido evita catálogo vazio
     private suspend fun fetchFeed(): JsonNode? {
-        egressPronto()
         val mapper = jacksonObjectMapper().apply { configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false) }
         // v164: antes de gastar 4 tentativas em /feed, 1 request barato detecta
         // falta de resposta. No cenario medido (queda total) isso troca 4 x (15s
@@ -1146,8 +1076,6 @@ class Tomato : MainAPI() {
             // Retry no host que responde. edge.betomato.com e 0/50 medido -> fora.
             // O /stream devolve 500 com corpo plain ~80% das vezes na janela parcial,
             // entao nao ha nada a reaproveitar: cada tentativa e um GET novo.
-            egressPronto()
-            //
             // Duas sondas de saude cortam o caminho quando a origem esta 100% fora,
             // que e o caso em que retry nao ajuda (medido 0/10 mesmo com 20 tentativas).
             var parsed: StreamResp? = null
@@ -1163,14 +1091,10 @@ class Tomato : MainAPI() {
                             break
                         }
                     }
-                    if (parece500DeBorda(res) && !proxyJaInjetado) {
-                        // 500 de BORDA confirmado. Este e' o unico caso em que
-                        // insistir NAO resolve: todas as 20 tentativas sairiam pelo
-                        // mesmo IP bloqueado. Se ha proxy configurado, ele ja foi
-                        // aplicado em egressPronto() antes do laco -- se o 500
-                        // persiste aqui, o proxy tambem esta bloqueado.
-                        Log.w(TAG, "500 de BORDA em /stream apos o proxy: o IP de saida do proxy tambem esta bloqueado. "
-                                + "A API responde 200 por uma saida livre (medido via Tor); nenhuma config do plugin resolve isso.")
+                    if (parece500DeBorda(res)) {
+                        // Mantém os retries porque as capturas no Redroid mostraram
+                        // alternância 200/500 para chamadas idênticas.
+                        Log.w(TAG, "500 intermitente do edge em /stream; mantendo retry")
                     }
                 } catch (_: Exception) {}
                 attempt++
