@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 
 class Tomato : MainAPI() {
     override var mainUrl = "https://prod-api.tomatoanimes.com"
@@ -70,8 +71,10 @@ class Tomato : MainAPI() {
         // healthCheck() para a leitura correta desse 500.
         // v164: a deteccao de origem morta saiu; quem decide o corte do retry e'
         // healthCheck(), e apenas no caso de falta de resposta.
-        const val STREAM_ATTEMPTS = 20
-        const val RETRY_DELAY_MS = 500L
+        // Com failover entre dois hosts, três ciclos completos são suficientes e
+        // ficam dentro da janela de loadLinks do CloudStream (~10 s).
+        const val STREAM_ATTEMPTS = 4
+        const val RETRY_DELAY_MS = 150L
         // Apos este numero de falhas seguidas no /stream, faz 1 sonda de saude na
         // origem. A sonda so encerra o retry se nao houver resposta nenhuma; em 5xx
         // ela mantem o retry, porque 5xx e' o estado que o retry ainda resolve.
@@ -99,12 +102,18 @@ class Tomato : MainAPI() {
         // Também envia request-time e x-app que podem influenciar rate-limiting.
         const val APP_VERSION = "1.4.3"
         const val OKHTTP_UA = "okhttp/4.11.0"
+        // v168: ambos são hosts oficiais. Medido no mesmo segundo: prod pode
+        // devolver 500 enquanto edge devolve 200 (e vice-versa). Alternar os
+        // hosts por tentativa evita cair no catálogo parcial por uma falha local.
+        val API_HOSTS = listOf(
+            "https://edge.betomato.com",
+            "https://prod-api.tomatoanimes.com"
+        )
 
         fun apiHeaders(): Map<String, String> = mapOf(
             "User-Agent" to OKHTTP_UA,
             "Authorization" to "Bearer $BEARER_TOKEN",
             "Accept" to "application/json, text/plain, */*",
-            "Accept-Encoding" to "gzip, deflate",
             "request-time" to System.currentTimeMillis().toString(),
             "x-app" to APP_VERSION
         )
@@ -120,7 +129,10 @@ class Tomato : MainAPI() {
             "User-Agent" to APP_UA,
             "Authorization" to "Bearer $BEARER_TOKEN",
             "Content-Type" to "application/json",
-            "Accept-Encoding" to "gzip"
+            // Não definir Accept-Encoding manualmente: o OkHttp adiciona gzip e
+            // descomprime transparentemente somente quando controla esse header.
+            // A versão anterior recebia bytes gzip crus em res.text.
+            "Accept" to "application/json, text/plain, */*"
         )
     }
 
@@ -201,7 +213,8 @@ class Tomato : MainAPI() {
         var probeBudget = 2
         repeat(attempts) { attempt ->
             try {
-                val res = app.get("$mainUrl$path", headers = headers, timeout = 15)
+                val host = API_HOSTS[attempt % API_HOSTS.size]
+                val res = app.get("$host$path", headers = headers, timeout = 15)
                 if (res.code == 200 && res.text.isNotBlank()) return res.text
                 // 403 aqui = credencial, nao origem fora. 5xx = origem.
                 if (res.code == 403) return null
@@ -209,6 +222,8 @@ class Tomato : MainAPI() {
                     Log.w(TAG, "500 de BORDA (cloudflare/text-html) em $path: o IP de saida esta bloqueado; "
                             + "se este aparelho sair por IP de datacenter, configure a chave tomato_proxy_url para trocar a rota")
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {}
             if (attempt < attempts - 1) kotlinx.coroutines.delay(RETRY_DELAY_MS)
             if (--probeBudget == 0) {
@@ -226,13 +241,16 @@ class Tomato : MainAPI() {
         var probeBudget = 2
         repeat(attempts) { attempt ->
             try {
-                val res = app.post("$mainUrl$path", headers = searchHeaders(), json = body, timeout = 15)
+                val host = API_HOSTS[attempt % API_HOSTS.size]
+                val res = app.post("$host$path", headers = searchHeaders(), json = body, timeout = 15)
                 if (res.code == 200 && res.text.isNotBlank()) return res.text
                 if (res.code == 403) return null
                 if (parece500DeBorda(res)) {
                     Log.w(TAG, "500 de BORDA (cloudflare/text-html) em $path: IP de saida bloqueado; "
                             + "configure a chave tomato_proxy_url para trocar a rota")
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {}
             if (attempt < attempts - 1) kotlinx.coroutines.delay(RETRY_DELAY_MS)
             if (--probeBudget == 0) {
@@ -561,6 +579,25 @@ class Tomato : MainAPI() {
         @JsonProperty("order") val order: String = "ASC"
     )
 
+    private fun parseSeasonNumber(name: String?): Int? {
+        if (name.isNullOrBlank()) return null
+        Regex("""(?:season|temporada)\s*(\d+)""", RegexOption.IGNORE_CASE)
+            .find(name)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
+        val roman = Regex("""(?:season|temporada)\s*([IVXLCDM]+)""", RegexOption.IGNORE_CASE)
+            .find(name)?.groupValues?.getOrNull(1)?.uppercase() ?: return null
+        var total = 0
+        var previous = 0
+        for (c in roman.reversed()) {
+            val value = when (c) {
+                'I' -> 1; 'V' -> 5; 'X' -> 10; 'L' -> 50; 'C' -> 100; 'D' -> 500; 'M' -> 1000
+                else -> return null
+            }
+            total += if (value < previous) -value else value
+            if (value > previous) previous = value
+        }
+        return total.takeIf { it > 0 }
+    }
+
     override suspend fun load(url: String): LoadResponse? {
         // url pode ser "$mainUrl/anime/{id}" ou "$mainUrl/episode/{epId}" (vindo de Novos episódios)
         val animeId = Regex("""/anime/(\d+)""").find(url)?.groupValues?.getOrNull(1)?.toIntOrNull()
@@ -570,21 +607,29 @@ class Tomato : MainAPI() {
         // Se a URL era de episódio direto, devolvemos série com 1 episódio apontando para stream
         if (url.contains("/episode/")) {
             val epId = Regex("""/episode/(\d+)""").find(url)?.groupValues?.getOrNull(1) ?: animeId.toString()
-            // Tenta buscar nome via stream endpoint para título melhor
-            var epTitle: String? = null
-            var poster: String? = null
-            try {
-                val s = app.get("$mainUrl/v2/anime/episode/$epId/stream", headers = STREAM_HEADERS).text
-                val sj = tryParseJson<StreamResp>(s)
-                epTitle = sj?.episodeName
-            } catch (_: Exception) {}
-            return newAnimeLoadResponse("Episódio $epId", url, TvType.Anime) {
-                addEpisodes(DubStatus.Subbed, listOf(
-                    newEpisode(epId) {
-                        this.name = epTitle ?: "Episódio $epId"
-                        this.posterUrl = poster
+            var streamInfo: StreamResp? = null
+            for (host in API_HOSTS) {
+                try {
+                    val res = app.get("$host/v2/anime/episode/$epId/stream", headers = STREAM_HEADERS, timeout = 2)
+                    if (res.code == 200) {
+                        streamInfo = tryParseJson<StreamResp>(res.text)
+                        if (streamInfo != null) break
                     }
-                ))
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {}
+            }
+            // O endpoint de stream informa episodeAnimeID. Redirecionamos o item
+            // de "Novos episódios" para a página completa do anime para exibir
+            // todas as temporadas, em vez de criar uma série artificial de 1 ep.
+            val parentAnimeId = streamInfo?.episodeAnimeID ?: streamInfo?.episodeAnimeIdSnake
+            if (parentAnimeId != null && parentAnimeId > 0) {
+                return load("$mainUrl/anime/$parentAnimeId")
+            }
+            return newAnimeLoadResponse("Episódio $epId", url, TvType.Anime) {
+                addEpisodes(DubStatus.Subbed, listOf(newEpisode(epId) {
+                    this.name = streamInfo?.episodeName ?: "Episódio $epId"
+                }))
             }
         }
 
@@ -668,9 +713,15 @@ class Tomato : MainAPI() {
         var seasonsRequested = 0
         val seasonsFailed = mutableListOf<String>()
         val seasonsTruncated = mutableListOf<String>()
-        var epIdsSeen = mutableSetOf<String>()
-        for (season in seasons) {
+        // Dedup preserva o mesmo ep_id em faixas legendada/dublada distintas.
+        val presentationSeen = mutableSetOf<Pair<Boolean, String>>()
+        for ((seasonIndex, season) in seasons.withIndex()) {
             val seasonLabel = "${season.seasonName ?: "season"}#${season.seasonId}"
+            val seasonNumber = season.seasonNumber?.takeIf { it > 0 }
+                ?: parseSeasonNumber(season.seasonName)
+                ?: (seasonIndex + 1)
+            val seasonEpIdsSeen = mutableSetOf<String>()
+            var truncationRecorded = false
             try {
                 var page = 0
                 var declaredTotal: Int? = null
@@ -693,6 +744,7 @@ class Tomato : MainAPI() {
                             Log.w(TAG, "v163: temporada $seasonLabel truncada: pagina $page falhou com ${fetchedForSeason} episodios ja obtidos (declarado=$declaredTotal)")
                             if (declaredTotal != null && fetchedForSeason < declaredTotal) {
                                 seasonsTruncated.add("$seasonLabel ($fetchedForSeason/$declaredTotal)")
+                                truncationRecorded = true
                             }
                         }
                         break
@@ -728,16 +780,20 @@ class Tomato : MainAPI() {
                         // sobreposta repetiria episodios, e o distinctBy do
                         // fim ja nao segura duplicatas dentro da mesma lista
                         // quando o mesmo ep volta de duas paginas.
-                        if (!epIdsSeen.add(epId.toString())) return@forEach
-                        val newEp = newEpisode(epId.toString()) {
+                        val epKey = epId.toString()
+                        if (!seasonEpIdsSeen.add(epKey)) return@forEach
+                        fetchedForSeason++
+                        // Só deduplica dentro da mesma faixa; legendado e dublado
+                        // podem compartilhar ep_id sem um apagar o outro.
+                        if (!presentationSeen.add(isDubbed to epKey)) return@forEach
+                        val newEp = newEpisode(epKey) {
                             this.name = epName
                             this.episode = epNum
                             this.posterUrl = thumb
-                            this.season = season.seasonNumber ?: 1
+                            this.season = seasonNumber
                         }
                         if (isDubbed) dubbedEpisodes.add(newEp) else subbedEpisodes.add(newEp)
                         episodes.add(newEp)
-                        fetchedForSeason++
                     }
                     // v163: condicao de termino pelo total declarado. Se a API
                     // nao declarar (null), aceitamos a pagina e paramos no
@@ -747,12 +803,14 @@ class Tomato : MainAPI() {
                     if (total != null && fetchedForSeason >= total) break
                     page++
                 }
-                if (declaredTotal != null && fetchedForSeason < declaredTotal) {
-                    Log.w(TAG, "v163: temporada $seasonLabel truncada apos $MAX_SEASON_PAGES paginas: $fetchedForSeason/$declaredTotal")
+                if (!truncationRecorded && declaredTotal != null && fetchedForSeason < declaredTotal) {
+                    Log.w(TAG, "v168: temporada $seasonLabel: API declarou $declaredTotal mas entregou $fetchedForSeason")
                     seasonsTruncated.add("$seasonLabel ($fetchedForSeason/$declaredTotal)")
                 }
                 // v161: NÃO fazer break — processar TODAS as seasons para ter todos os episódios
                 // O break anterior causava que só a primeira season funcionasse (ex: só Season I de Shingeki)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 seasonsRequested++
                 seasonsFailed.add(seasonLabel)
@@ -917,6 +975,8 @@ class Tomato : MainAPI() {
         @JsonProperty("episode_name") val episode_name: String? = null,
         @JsonProperty("episodeNumber") val episodeNumber: Int? = null,
         @JsonProperty("episode_number") val episode_number: Int? = null,
+        @JsonProperty("episodeAnimeID") val episodeAnimeID: Int? = null,
+        @JsonProperty("episode_anime_id") val episodeAnimeIdSnake: Int? = null,
         @JsonProperty("episodeHasNext") val episodeHasNext: Boolean? = null,
         @JsonProperty("showInterstitial") val showInterstitial: Boolean? = null
     )
@@ -1065,13 +1125,18 @@ class Tomato : MainAPI() {
         // Nao extrai digitos de string composta. `data` de episodio real e sempre
         // um ID numerico puro; qualquer coisa fora desse formato e o placeholder
         // offline, que nao tem /stream para resolver.
-        val epId = data.trim()
-        if (epId.isEmpty() || epId.any { !it.isDigit() }) {
-            // Placeholder offline (data contem '_' ou nao-numerico). Nao ha
-            // episodio real para resolver: falhar agora em vez de gastar
-            // STREAM_ATTEMPTS tentativas num ID inventado.
-            return false
+        val rawData = data.trim()
+        // CloudStream normaliza data numérica relativa contra mainUrl, portanto
+        // newEpisode("36959") chega aqui como https://.../36959. Aceitar somente
+        // ID puro ou último segmento numérico; continuar rejeitando placeholders
+        // offline no formato animeId_0.
+        val epId = when {
+            rawData.all { it.isDigit() } -> rawData
+            rawData.contains('_') -> ""
+            else -> Regex("""/(\d+)/?$""").find(rawData)?.groupValues?.getOrNull(1).orEmpty()
         }
+        Log.i(TAG, "v168 loadLinks inicio data=$rawData ep=$epId")
+        if (epId.isEmpty()) return false
         return try {
             // Retry no host que responde. edge.betomato.com e 0/50 medido -> fora.
             // O /stream devolve 500 com corpo plain ~80% das vezes na janela parcial,
@@ -1083,20 +1148,29 @@ class Tomato : MainAPI() {
             var consecutiveFails = 0
             while (attempt < STREAM_ATTEMPTS) {
                 try {
-                    val res = app.get("$mainUrl/v2/anime/episode/$epId/stream", headers = STREAM_HEADERS, timeout = 15)
+                    val host = API_HOSTS[attempt % API_HOSTS.size]
+                    Log.i(TAG, "v168 consultando stream $host tentativa ${attempt + 1}")
+                    val res = app.get("$host/v2/anime/episode/$epId/stream", headers = STREAM_HEADERS, timeout = 2)
+                    Log.i(TAG, "v168 resposta stream $host HTTP ${res.code}")
                     if (res.code == 200) {
-                        val body = tryParseJson<StreamResp>(res.text)
+                        val responseText = res.text
+                        val body = tryParseJson<StreamResp>(responseText)
+                        Log.i(TAG, "v168 parse stream=${body?.streams != null} body=${responseText.take(80)}")
                         if (body?.streams != null) {
+                            Log.i(TAG, "v168 stream resolvido via $host na tentativa ${attempt + 1}")
                             parsed = body
                             break
                         }
                     }
                     if (parece500DeBorda(res)) {
-                        // Mantém os retries porque as capturas no Redroid mostraram
-                        // alternância 200/500 para chamadas idênticas.
-                        Log.w(TAG, "500 intermitente do edge em /stream; mantendo retry")
+                        Log.w(TAG, "500 intermitente do edge em /stream ($host); tentando host alternativo")
                     }
-                } catch (_: Exception) {}
+                } catch (e: CancellationException) {
+                    Log.w(TAG, "v168 loadLinks cancelado durante tentativa ${attempt + 1}")
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "v168 falha stream tentativa ${attempt + 1}: ${e.javaClass.simpleName}: ${e.message}")
+                }
                 attempt++
                 consecutiveFails++
                 if (attempt < STREAM_ATTEMPTS) kotlinx.coroutines.delay(RETRY_DELAY_MS)
@@ -1106,7 +1180,7 @@ class Tomato : MainAPI() {
                 // e' indistinguivel de origem morta). Cortar em 5xx fazia o usuario
                 // receber "nenhum link" em menos de 1s em janelas em que a API
                 // voltaria -- exatamente o estado que o retry existe para cobrir.
-                if (consecutiveFails == HEALTH_PROBE_AFTER) {
+                if (consecutiveFails % HEALTH_PROBE_AFTER == 0) {
                     when (val h = healthCheck()) {
                         Health.INDISPONIVEL -> {
                             Log.w(TAG, "origem sem resposta (timeout/rede): cortando retry apos $attempt tentativas")
@@ -1139,68 +1213,32 @@ class Tomato : MainAPI() {
                 Triple(streams.sd, "360p", Qualities.P360.value)
             ).filter { !it.first.isNullOrBlank() }
 
-            for ((url, label, qual) in candidates) {
+            // v168: as URLs retornadas pela API já são playlists VOD assinadas e
+            // reproduzíveis diretamente. M3u8Helper fazia uma requisição bloqueante
+            // extra por qualidade e podia ultrapassar o ciclo de loadLinks do player,
+            // que cancelava a coroutine antes de qualquer callback. Emitimos os links
+            // conhecidos imediatamente e deixamos o ExoPlayer ler a playlist.
+            val streamHeaders = mapOf("User-Agent" to APP_UA)
+            for ((url, label, qual) in candidates.distinctBy { it.first }) {
                 val u = url ?: continue
-                // URL já é HLS assinado CloudFront; usamos M3U8Helper para resolver variantes ou direto
-                // v165: passar User-Agent correto para o M3u8Helper resolver o master
-                // playlist. O oncourse-content.org é CloudFront com signed URL; o UA
-                // não é autenticação mas pode influenciar a resposta de CDN.
-                // O fallback direto (sem resolver variantes) garante que mesmo se
-                // M3u8Helper falhar, o player receba a URL assinada e reproduza.
-                val streamHeaders = mapOf("User-Agent" to APP_UA)
-                try {
-                    // Tenta resolver via M3U8Helper para extrair variantes de qualidade internas
-                    val m3u8Links = M3u8Helper.generateM3u8(name, u, mainUrl, headers = streamHeaders)
-                    if (m3u8Links.isNotEmpty()) {
-                        m3u8Links.forEach { link ->
-                            callback.invoke(
-                                newExtractorLink(
-                                    source = name,
-                                    name = "$name $label",
-                                    url = link.url,
-                                    type = ExtractorLinkType.M3U8
-                                ) {
-                                    this.referer = mainUrl
-                                    this.quality = link.quality ?: qual
-                                    this.headers = streamHeaders
-                                }
-                            )
-                            found = true
-                        }
-                    } else {
-                        // M3u8Helper não encontrou variantes → serve link direto
-                        callback.invoke(
-                            newExtractorLink(
-                                source = name,
-                                name = "$name $label",
-                                url = u,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = mainUrl
-                                this.quality = qual
-                                this.headers = streamHeaders
-                            }
-                        )
-                        found = true
+                Log.i(TAG, "v168 emitindo $label: ${u.substringBefore('?')}")
+                callback.invoke(
+                    newExtractorLink(
+                        source = name,
+                        name = "$name $label",
+                        url = u,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = mainUrl
+                        this.quality = qual
+                        this.headers = streamHeaders
                     }
-                } catch (_: Exception) {
-                    // Qualquer falha no M3u8Helper → fallback direto para o player
-                    callback.invoke(
-                        newExtractorLink(
-                            source = name,
-                            name = "$name $label",
-                            url = u,
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            this.referer = mainUrl
-                            this.quality = qual
-                            this.headers = streamHeaders
-                        }
-                    )
-                    found = true
-                }
+                )
+                found = true
             }
             found
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {
             false
         }
