@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
+import com.lagradost.api.getContext
 import android.util.Log
 
 class Tomato : MainAPI() {
@@ -19,6 +20,97 @@ class Tomato : MainAPI() {
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
 
     private val TAG = "Tomato"
+
+    // ---------- Egress: proxy HTTP opcional, por configuracao ----------
+    //
+    // Medido em 2026-09-28 (A/B, mesmo Bearer, mesma rota, mesma janela):
+    //   saida DIRETA do VPS -> 18/18 500, Server: cloudflare, text/html, 21 B
+    //   saida via Tor        -> 18/18 200, application/json
+    // Logo o bloqueio e' do IP de saida, e a unica correcao e' TROCAR DE ROTA.
+    //
+    // O proxy e' OPCIONAL e nasce DESLIGADO. Motivo: o aparelho do usuario sai
+    // por IP residencial e nunca teve o problema; fixar 172.17.0.1 (gateway
+    // docker deste host) no artefato publicado entregaria um plugin que so
+    // funciona no ambiente de build. Ver references/plugin-egress-proxy-injection.md.
+    //
+    // Como liga: a chave de preferencia "tomato_proxy_url" no SharedPreferences
+    // do CloudStream. Exemplo de valor: "http://172.17.0.1:10882". Ausente ou
+    // vazia = saida normal do aparelho. Nao ha interface para configurar isso:
+    // o CloudStream so expoe preferencias de plugins via API publica, entao a
+    // chave e' lida direto, e documentada aqui e no repositorio.
+    //
+    // Exemplo de como setar por adb (o -e e' obrigatorio, o pref e' XML):
+    //   adb shell 'am start -n com.lagradost.cloudstream3/com.lagradost.cloudstream3.MainActivity'
+    //   # via editor de prefs, ou rewriting o XML do app e forçando STOP
+    private fun proxyUrlConfigurada(): String? {
+        return try {
+            // com.lagradost.api.ContextHelper e' a API PUBLICA de plugin para
+            // obter o Context. As classes internas do app (CloudStreamApp.getContext,
+            // DataStore.getKey) NAO resolvem no Kotlin do plugin: verificado no
+            // jar de compilacao, sao unresolved reference mesmo existindo no jar.
+            //
+            // O arquivo vive no filesDir do APP, e nao no do plugin, porque o
+            // plugin roda com o contexto do app e nao tem storage proprio. O
+            // files/ do CloudStream e' gravavel (medido), e sobrevive a update.
+            val ctx = getContext() as? android.content.Context ?: return null
+            val f = java.io.File(ctx.filesDir, PROXY_CONF_FILE)
+            if (!f.exists()) return null
+            f.readText().trim().takeIf { it.isNotEmpty() }
+        } catch (_: Exception) { null }
+    }
+
+    // Injeta o proxy no baseClient do nicehttp. `app.baseClient` e' o cliente
+    // COMPARTILHADO do CloudStream: injetar aqui faz todo request do plugin
+    // sair pela rota nova. Regra: injetar UMA vez e guardar a flag, porque
+    // reconstruir o cliente a cada chamada custa conexao e derruba o reaproveitamento.
+    //
+    // Medido: o proxy de SISTEMA do Android (settings global http_proxy_host)
+    // NAO serve -- configurei no ReDroid e o app continuou saindo pelo IP
+    // bloqueado. O OkHttp do app nao herda ProxySelector.getDefault() aqui.
+    private var proxyJaInjetado = false
+
+    private fun ligarProxySeConfigurado() {
+        if (proxyJaInjetado) return
+        val url = proxyUrlConfigurada() ?: return
+        try {
+            val addr = java.net.URI(url)
+            val port = if (addr.port > 0) addr.port else 80
+            val novo = app.baseClient.newBuilder()
+                .proxy(java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress(addr.host, port)))
+                .build()
+            app.baseClient = novo
+            proxyJaInjetado = true
+            Log.i(TAG, "egress: proxy HTTP injetado em ${addr.host}:$port")
+        } catch (e: Exception) {
+            Log.w(TAG, "egress: falha ao injetar proxy ($url): ${e.javaClass.simpleName}")
+        }
+    }
+
+    // Reconhece a assinatura do 500 DE BORDA, e so ela:
+    //   500 + Server: cloudflare + Content-Type: text/html + corpo 21 B
+    //   "Internal Server Error"
+    // O 500 de origem morta e' indistinguivel no status; o que separa e' o
+    // header, e o unico jeito de provar que o header separa e' o A/B por saida
+    // (medido: 18/18 200 pelo Tor com o mesmo Bearer). Nao confundir este
+    // detector com healthCheck(): aquele responde "houve resposta?", este
+    // responde "a resposta veio do edge bloqueando o IP?".
+    private fun parece500DeBorda(res: com.lagradost.nicehttp.NiceResponse): Boolean {
+        return try {
+            if (res.code != 500) return false
+            val server = res.headers["server"] ?: ""
+            val ctype = res.headers["content-type"] ?: ""
+            val corpo = try { res.text } catch (_: Exception) { "" }
+            server.contains("cloudflare", ignoreCase = true) &&
+                ctype.contains("text/html", ignoreCase = true) &&
+                corpo.length <= 64
+        } catch (_: Exception) { false }
+    }
+
+    // Aplica a rota antes de qualquer request. Barato (le a pref) e idempotente,
+    // entao chamar em todos os pontos de entrada e' seguro e nao custa conexao.
+    private fun egressPronto() {
+        ligarProxySeConfigurado()
+    }
 
     // BEARER_TOKEN e' um JWT de sessao de cliente, sem claim `exp`, capturado de
     // /data/data/com.tomatos.clientapp/shared_prefs/...xml. Nao e' chave de servidor
@@ -34,6 +126,9 @@ class Tomato : MainAPI() {
     // permanece exposta. A saida real e' rotacao server-side, que depende de
     // login no aplicativo (hCaptcha) e nao pode ser feita por este repositorio.
     companion object {
+        // Arquivo de configuracao que liga o proxy de saida, no filesDir do
+        // CloudStream. Ausente/ vazio = saida normal do aparelho (padrao).
+        const val PROXY_CONF_FILE = "tomato_proxy.conf"
         const val BEARER_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6NDg0NjcyOSwidXVpZCI6ImQ0ODk1NjZjLTI0NDMtNDU3OS1iMzkwLWI1YjQxOTgzMTA5MCIsImlhdCI6MTc5MDUwNjI4MH0.3MP87IJav4bhPJzt5YUUv1mEeOdWp2zxo5_hc6w51YU"
         // UA original do app. O Dalvik falso foi testado A/B (25 rodadas cada):
         // tomato-android 5/25 vs Dalvik 1/25 -> nao ajuda, e nao vale virar fingerprint.
@@ -66,20 +161,35 @@ class Tomato : MainAPI() {
         // corte do servidor, mas isso é hipótese, não contrato. O teto existe
         // para que uma season patológica não vire laço infinito de requests.
         const val MAX_SEASON_PAGES = 20
-        val API_HEADERS = mapOf(
-            "User-Agent" to APP_UA,
+        // v166: headers baseados em captura mitmproxy do app real 1.4.3 (Redroid 2026-09-28).
+        // O app alterna User-Agent entre endpoints:
+        //   - Feed/recents/season/search: okhttp/4.11.0  (React-Native network stack)
+        //   - Stream:                     tomato-android  (módulo nativo de streaming)
+        // Também envia request-time e x-app que podem influenciar rate-limiting.
+        const val APP_VERSION = "1.4.3"
+        const val OKHTTP_UA = "okhttp/4.11.0"
+
+        fun apiHeaders(): Map<String, String> = mapOf(
+            "User-Agent" to OKHTTP_UA,
             "Authorization" to "Bearer $BEARER_TOKEN",
-            "Accept" to "application/json",
-            "Accept-Encoding" to "gzip",
-            "Connection" to "Keep-Alive"
+            "Accept" to "application/json, text/plain, */*",
+            "Accept-Encoding" to "gzip, deflate",
+            "request-time" to System.currentTimeMillis().toString(),
+            "x-app" to APP_VERSION
         )
-        val SEARCH_HEADERS = mapOf(
+        fun searchHeaders(): Map<String, String> = mapOf(
+            "User-Agent" to OKHTTP_UA,
+            "Authorization" to "Bearer $BEARER_TOKEN",
+            "Content-Type" to "application/json",
+            "Accept" to "application/json, text/plain, */*",
+            "Accept-Encoding" to "gzip, deflate",
+            "request-time" to System.currentTimeMillis().toString()
+        )
+        val STREAM_HEADERS = mapOf(
             "User-Agent" to APP_UA,
             "Authorization" to "Bearer $BEARER_TOKEN",
             "Content-Type" to "application/json",
-            "Accept" to "application/json",
-            "Accept-Encoding" to "gzip",
-            "Connection" to "Keep-Alive"
+            "Accept-Encoding" to "gzip"
         )
     }
 
@@ -112,6 +222,7 @@ class Tomato : MainAPI() {
     // Usamos JsonNode para lidar com tipos heterogêneos
     // 2026-09-27: prod-api oscila entre 500 e 200 -> feed embutido evita catálogo vazio
     private suspend fun fetchFeed(): JsonNode? {
+        egressPronto()
         val mapper = jacksonObjectMapper().apply { configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false) }
         // v164: antes de gastar 4 tentativas em /feed, 1 request barato detecta
         // falta de resposta. No cenario medido (queda total) isso troca 4 x (15s
@@ -126,7 +237,7 @@ class Tomato : MainAPI() {
         if (healthCheck() == Health.INDISPONIVEL) return try { mapper.readTree(TomatoFallback.FEED_JSON) } catch (_: Exception) { null }
         repeat(4) { attempt ->
             try {
-                val res = app.get("$mainUrl/v2/animes/feed", headers = API_HEADERS, timeout = 15)
+                val res = app.get("$mainUrl/v2/animes/feed", headers = apiHeaders(), timeout = 15)
                 if (res.code == 200) {
                     val node = mapper.readTree(res.text)
                     if (node.get("data") != null) return node
@@ -146,7 +257,7 @@ class Tomato : MainAPI() {
     // sem ela o load() levava 13.8s (8 tentativas de detalhe + 8 de temporada) para
     // so entao chamar o loadLinks e descobrir que nao havia link.
     // v157: o default caiu de 8 para DETAIL_ATTEMPTS (3), medido em 11.1s na v156.
-    private suspend fun getJsonWithRetry(path: String, headers: Map<String, String> = API_HEADERS, attempts: Int = DETAIL_ATTEMPTS): String? {
+    private suspend fun getJsonWithRetry(path: String, headers: Map<String, String> = apiHeaders(), attempts: Int = DETAIL_ATTEMPTS): String? {
         // probeBudget = 2, nao 3: com DETAIL_ATTEMPTS = 3 o budget de 3 so
         // zerava na ultima tentativa, ou seja, a sonda rodava tarde demais para
         // encurtar o caminho. 2 dispara na segunda, sobrando uma para tentar
@@ -164,6 +275,10 @@ class Tomato : MainAPI() {
                 if (res.code == 200 && res.text.isNotBlank()) return res.text
                 // 403 aqui = credencial, nao origem fora. 5xx = origem.
                 if (res.code == 403) return null
+                if (parece500DeBorda(res)) {
+                    Log.w(TAG, "500 de BORDA (cloudflare/text-html) em $path: o IP de saida esta bloqueado; "
+                            + "se este aparelho sair por IP de datacenter, configure a chave tomato_proxy_url para trocar a rota")
+                }
             } catch (_: Exception) {}
             if (attempt < attempts - 1) kotlinx.coroutines.delay(RETRY_DELAY_MS)
             if (--probeBudget == 0) {
@@ -181,9 +296,13 @@ class Tomato : MainAPI() {
         var probeBudget = 2
         repeat(attempts) { attempt ->
             try {
-                val res = app.post("$mainUrl$path", headers = SEARCH_HEADERS, json = body, timeout = 15)
+                val res = app.post("$mainUrl$path", headers = searchHeaders(), json = body, timeout = 15)
                 if (res.code == 200 && res.text.isNotBlank()) return res.text
                 if (res.code == 403) return null
+                if (parece500DeBorda(res)) {
+                    Log.w(TAG, "500 de BORDA (cloudflare/text-html) em $path: IP de saida bloqueado; "
+                            + "configure a chave tomato_proxy_url para trocar a rota")
+                }
             } catch (_: Exception) {}
             if (attempt < attempts - 1) kotlinx.coroutines.delay(RETRY_DELAY_MS)
             if (--probeBudget == 0) {
@@ -326,24 +445,27 @@ class Tomato : MainAPI() {
     }
 
     // ---------- Search ----------
-    // POST /v2/content/search  body {search, content_type:"anime", page, tags:[] } -> {data:{result:[...]} }  (hermes bundle_decompiled.js:304)
-    // v160 -- paginacao do /v2/content/search e 0-INDEXADA (medido: page 0 devolve
-    // o catalogo, page 1/2 devolvem paginas seguintes, 3+ volta vazio). O default
-    // era 1, entao a busca do plugin saltava a primeira pagina e devolvia
-    // "nada encontrado" para consultas que o app encontra normalmente.
-    // `tags` aceita [] mas NAO null (null devolve 400) -- ver dossie.
+    // v166: contrato capturado no app oficial 1.4.3 via mitmproxy:
+    // POST /v2/content/search
+    // body {token, search, content_type:"all", page:0}
+    // response {status, result:[{id,type,name,episodes,date,image,...}]}
+    // O contrato anterior usava content_type:"anime" + tags:[], e a API devolvia
+    // result vazio mesmo para "naruto". Filtramos type=="anime" na resposta para
+    // não mostrar os mangás que vêm junto no content_type:"all".
     data class SearchReq(
+        @JsonProperty("token") val token: String = BEARER_TOKEN,
         @JsonProperty("search") val search: String,
-        @JsonProperty("content_type") val contentType: String? = "anime",
-        @JsonProperty("page") val page: Int = 0,
-        @JsonProperty("tags") val tags: List<String> = emptyList()
+        @JsonProperty("content_type") val contentType: String = "all",
+        @JsonProperty("page") val page: Int = 0
     )
     data class SearchAnimeItem(
         @JsonProperty("anime_id") val animeId: Int? = null,
         @JsonProperty("id") val id: Int? = null,
+        @JsonProperty("type") val type: String? = null,
         @JsonProperty("anime_name") val animeName: String? = null,
         @JsonProperty("name") val name: String? = null,
         @JsonProperty("title") val title: String? = null,
+        @JsonProperty("image") val image: String? = null,
         @JsonProperty("cape") val cape: String? = null,
         @JsonProperty("thumbnail") val thumbnail: String? = null,
         @JsonProperty("banner") val banner: String? = null,
@@ -363,16 +485,17 @@ class Tomato : MainAPI() {
         val q = query.trim()
         // 1) Tenta API remota; 2) fallback no feed embutido (tolerante a 500)
         val apiRes = try {
-            // v160: page 0 e a primeira pagina (0-indexado, medido).
-            val body = SearchReq(search = q, contentType = "anime", page = 0, tags = emptyList())
+            // v166: exatamente o body observado no app oficial.
+            val body = SearchReq(search = q, contentType = "all", page = 0)
             val text = postJsonWithRetry("/v2/content/search", body, attempts = 6)
             if (text != null) {
                 val parsed = tryParseJson<SearchRespWrapper>(text)
                 val lst = parsed?.data?.result ?: parsed?.data?.data ?: parsed?.result ?: emptyList()
                 lst.mapNotNull { item ->
+                    if (item.type != null && !item.type.equals("anime", ignoreCase = true)) return@mapNotNull null
                     val animeId = item.animeId ?: item.id ?: return@mapNotNull null
                     val name = item.animeName ?: item.name ?: item.title ?: "Anime $animeId"
-                    val poster = item.cape ?: item.thumbnail ?: item.banner ?: item.poster
+                    val poster = item.image ?: item.cape ?: item.thumbnail ?: item.banner ?: item.poster
                     newAnimeSearchResponse(name, "$mainUrl/anime/$animeId", TvType.Anime) { this.posterUrl = poster }
                 }
             } else null
@@ -492,7 +615,10 @@ class Tomato : MainAPI() {
         @JsonProperty("episodes") val episodes: Int? = null,
         @JsonProperty("data") val data: List<SeasonEpisodeItem>? = null
     )
-    // v160 -- POST /season/{season_id}/episodes, corpo {page, order}.
+    // v166: captura do app oficial mostra corpo {token, page, order}. O endpoint
+    // aceita Authorization sozinho em testes, mas enviamos também o token no body
+    // para reproduzir exatamente o contrato nativo e evitar diferenças de edge.
+    // v160 -- POST /season/{season_id}/episodes.
     // Dois bugs medidos contra o bundle Hermes + trafego real:
     //   page  era 1  -> a season so tem a pagina 0; page:1 devolve 500.
     //   order era "asc" minusculo -> o servidor so aceitou "ASC" maiusculo
@@ -500,6 +626,7 @@ class Tomato : MainAPI() {
     // ATENCAO: a rota e sem o prefixo /v2, e so responde com season_id.
     // anime_id nessa rota devolve erro.
     data class SeasonReq(
+        @JsonProperty("token") val token: String = BEARER_TOKEN,
         @JsonProperty("page") val page: Int = 0,
         @JsonProperty("order") val order: String = "ASC"
     )
@@ -517,7 +644,7 @@ class Tomato : MainAPI() {
             var epTitle: String? = null
             var poster: String? = null
             try {
-                val s = app.get("$mainUrl/v2/anime/episode/$epId/stream", headers = API_HEADERS).text
+                val s = app.get("$mainUrl/v2/anime/episode/$epId/stream", headers = STREAM_HEADERS).text
                 val sj = tryParseJson<StreamResp>(s)
                 epTitle = sj?.episodeName
             } catch (_: Exception) {}
@@ -924,11 +1051,40 @@ class Tomato : MainAPI() {
     // Cloudflare. O IP do servidor nao esta bloqueado. O 500 medido sem WARP e o
     // 500 medido por Tor sao o MESMO fenomeno, nao dois cenarios distintos.
     //
-    // A CORRECAO DE CODIGO DA v164 continua correta, mas pelo motivo certo:
-    // a origem oscila de verdade e volta a responder (medido: 200 no meio de
-    // sequencias de 500, em janelas de segundos). Cortar o retry em 5xx
-    // entregaria "nenhum link" ao usuario em menos de 1s durante exatamente as
-    // janelas em que insistir resolveria. Ver a regra de corte abaixo.
+    // SEGUNDA CORRECAO, 2026-09-28 (tarde). O bloco acima ainda estava errado,
+    // e na direcao oposta. Medido com tools/ab_edge_vs_origin.py, 3 rotas x 6
+    // rodadas intercaladas, mudando SO o IP de saida:
+    //   DIRETO (NAT do VPS)  -> 18/18  500, Server: cloudflare, text/html, 21B
+    //   TOR (proxy HTTP)     -> 18/18  200, application/json
+    // Os dois lados com o MESMO Bearer, na MESMA janela, na MESMA sessao. Logo
+    // o 500 NAO e' a origem: o backend responde 200 com o token que ja estava no
+    // fonte, e so nao responde quando a requisicao entra pelo IP bloqueado.
+    // A leitura correta e' "deteccao por IP de saida", e a prova de que a API
+    // esta' viva e' o 200 do outro lado -- nao a ausencia de cf-mitigated.
+    // (A confusao vem de que o Cloudflare tunnela o 500 da ORIGEM corretamente
+    // quando a origem oscila, e esse 500 tem a MESMA assinatura de borda. Sao
+    // dois fenomenos que se sobrepoem no corpo; so o A/B por saida separa.)
+    //
+    // A CORRECAO DE CODIGO da v164 continua correta, e agora pelo motivo certo:
+    // cortar o retry em 5xx entrega "nenhum link" ao usuario em menos de 1s,
+    // tanto quando o IP esta' bloqueado (e' preciso TROCAR de saida) quanto
+    // quando a origem oscila (e' preciso INSISTIR). Nos dois casos parar e' errado.
+    // Ver a regra de corte abaixo.
+    //
+    // CONTORNO. A solucao nao e' no parser: e' rotear a saida. O caminho que
+    // FUNCIONA e' injetar o proxy no baseClient do nicehttp (app.baseClient),
+    // porque todo request do plugin passa por ele.
+    //
+    // CORRECAO 2026-09-28 (v166). A nota abaixo (do bloco CONTORNO anterior)
+    // afirmava que o Android usaria o proxy de SISTEMA via ProxySelector.getDefault().
+    // Isso foi medido e esta ERRADO: configurei http_proxy_host/port no ReDroid
+    // e o app continuou saindo pelo IP bloqueado. Provado ponta a ponta pelo lado
+    // que funciona: ReDroid 172.17.0.2 -> proxy 172.17.0.1:10882 -> Tor ->
+    // /v2/anime/1921 = 200 com payload real.
+    //
+    // A injecao e' OPCIONAL e nasce DESLIGADA (chave tomato_proxy_url). Ver o
+    // bloco "Egress" no topo do arquivo. A entrega do .m3u8 NAO precisa do
+    // proxy: o CDN abre direto, 200 medido.
     //
     // Regra adotada: cortar o retry SO quando nao ha resposta (timeout/erro de
     // rede), onde insistir e' comprovadamente inutil. Em 5xx, manter o retry e
@@ -952,7 +1108,7 @@ class Tomato : MainAPI() {
     // healthCheck() nao entrega: ele so diz se houve resposta.
     private suspend fun isOriginDown(): Boolean {
         return try {
-            val res = app.get("$mainUrl/v2/animes/feed", headers = mapOf("User-Agent" to APP_UA), timeout = 10)
+            val res = app.get("$mainUrl/v2/animes/feed", headers = apiHeaders(), timeout = 10)
             val down = res.code >= 500
             if (down) Log.w(TAG, "diagnostico: /feed devolveu ${res.code} (edge ou endpoint, nao conclusivo)")
             down
@@ -990,6 +1146,7 @@ class Tomato : MainAPI() {
             // Retry no host que responde. edge.betomato.com e 0/50 medido -> fora.
             // O /stream devolve 500 com corpo plain ~80% das vezes na janela parcial,
             // entao nao ha nada a reaproveitar: cada tentativa e um GET novo.
+            egressPronto()
             //
             // Duas sondas de saude cortam o caminho quando a origem esta 100% fora,
             // que e o caso em que retry nao ajuda (medido 0/10 mesmo com 20 tentativas).
@@ -998,13 +1155,22 @@ class Tomato : MainAPI() {
             var consecutiveFails = 0
             while (attempt < STREAM_ATTEMPTS) {
                 try {
-                    val res = app.get("$mainUrl/v2/anime/episode/$epId/stream", headers = API_HEADERS, timeout = 15)
+                    val res = app.get("$mainUrl/v2/anime/episode/$epId/stream", headers = STREAM_HEADERS, timeout = 15)
                     if (res.code == 200) {
                         val body = tryParseJson<StreamResp>(res.text)
                         if (body?.streams != null) {
                             parsed = body
                             break
                         }
+                    }
+                    if (parece500DeBorda(res) && !proxyJaInjetado) {
+                        // 500 de BORDA confirmado. Este e' o unico caso em que
+                        // insistir NAO resolve: todas as 20 tentativas sairiam pelo
+                        // mesmo IP bloqueado. Se ha proxy configurado, ele ja foi
+                        // aplicado em egressPronto() antes do laco -- se o 500
+                        // persiste aqui, o proxy tambem esta bloqueado.
+                        Log.w(TAG, "500 de BORDA em /stream apos o proxy: o IP de saida do proxy tambem esta bloqueado. "
+                                + "A API responde 200 por uma saida livre (medido via Tor); nenhuma config do plugin resolve isso.")
                     }
                 } catch (_: Exception) {}
                 attempt++
