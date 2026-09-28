@@ -303,10 +303,15 @@ class Tomato : MainAPI() {
 
     // ---------- Search ----------
     // POST /v2/content/search  body {search, content_type:"anime", page, tags:[] } -> {data:{result:[...]} }  (hermes bundle_decompiled.js:304)
+    // v160 -- paginacao do /v2/content/search e 0-INDEXADA (medido: page 0 devolve
+    // o catalogo, page 1/2 devolvem paginas seguintes, 3+ volta vazio). O default
+    // era 1, entao a busca do plugin saltava a primeira pagina e devolvia
+    // "nada encontrado" para consultas que o app encontra normalmente.
+    // `tags` aceita [] mas NAO null (null devolve 400) -- ver dossie.
     data class SearchReq(
         @JsonProperty("search") val search: String,
         @JsonProperty("content_type") val contentType: String? = "anime",
-        @JsonProperty("page") val page: Int = 1,
+        @JsonProperty("page") val page: Int = 0,
         @JsonProperty("tags") val tags: List<String> = emptyList()
     )
     data class SearchAnimeItem(
@@ -334,7 +339,8 @@ class Tomato : MainAPI() {
         val q = query.trim()
         // 1) Tenta API remota; 2) fallback no feed embutido (tolerante a 500)
         val apiRes = try {
-            val body = SearchReq(search = q, contentType = "anime", page = 1, tags = emptyList())
+            // v160: page 0 e a primeira pagina (0-indexado, medido).
+            val body = SearchReq(search = q, contentType = "anime", page = 0, tags = emptyList())
             val text = postJsonWithRetry("/v2/content/search", body, attempts = 6)
             if (text != null) {
                 val parsed = tryParseJson<SearchRespWrapper>(text)
@@ -456,10 +462,16 @@ class Tomato : MainAPI() {
         @JsonProperty("episodes") val episodes: Int? = null,
         @JsonProperty("data") val data: List<SeasonEpisodeItem>? = null
     )
-    // Bundle HBC v90 getSeasonEpisodes: POST /season/{id}/episodes body {page, order} — sem token (bundle_decompiled.js r7['page']=r8; r7['order']=r1)
+    // v160 -- POST /season/{season_id}/episodes, corpo {page, order}.
+    // Dois bugs medidos contra o bundle Hermes + trafego real:
+    //   page  era 1  -> a season so tem a pagina 0; page:1 devolve 500.
+    //   order era "asc" minusculo -> o servidor so aceitou "ASC" maiusculo
+    //   ("DESC" tambem deu 500 no teste). `order` e obrigatorio: sem ele, 500.
+    // ATENCAO: a rota e sem o prefixo /v2, e so responde com season_id.
+    // anime_id nessa rota devolve erro.
     data class SeasonReq(
-        @JsonProperty("page") val page: Int = 1,
-        @JsonProperty("order") val order: String = "asc"
+        @JsonProperty("page") val page: Int = 0,
+        @JsonProperty("order") val order: String = "ASC"
     )
 
     override suspend fun load(url: String): LoadResponse? {
@@ -546,11 +558,15 @@ class Tomato : MainAPI() {
             }
         } catch (_: Exception) {}
 
-        // Busca episódios por temporada (bundle: {page,order} sem token)
+        // Busca episódios por temporada.
+        // v160: page 0 (a season só tem a página 0) e order "ASC" maiúsculo.
+        // Também remove o fallback `AnimeSeason(animeId)`: /season/{id}/episodes
+        // só aceita season_id, e usar anime_id ali só gastava 3 tentativas em
+        // uma rota que não tem esse contrato.
         val episodes = mutableListOf<Episode>()
-        for (season in seasons.ifEmpty { listOf(AnimeSeason(animeId, null)) }) {
+        for (season in seasons) {
             try {
-                val reqBody = SeasonReq(page = 1, order = "asc")
+                val reqBody = SeasonReq(page = 0, order = "ASC")
                 val epText = postJsonWithRetry("/season/${season.seasonId}/episodes", reqBody, attempts = DETAIL_ATTEMPTS)
                 if (epText == null) continue
                 val parsed = tryParseJson<SeasonEpisodesResp>(epText) ?: continue
