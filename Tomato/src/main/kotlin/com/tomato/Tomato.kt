@@ -122,7 +122,8 @@ class Tomato : MainAPI() {
             "Authorization" to "Bearer $BEARER_TOKEN",
             "Content-Type" to "application/json",
             "Accept" to "application/json, text/plain, */*",
-            "Accept-Encoding" to "gzip, deflate",
+            // Não definir Accept-Encoding: OkHttp só faz a descompressão gzip
+            // transparente quando ele próprio adiciona esse header.
             "request-time" to System.currentTimeMillis().toString()
         )
         val STREAM_HEADERS = mapOf(
@@ -579,6 +580,13 @@ class Tomato : MainAPI() {
         @JsonProperty("order") val order: String = "ASC"
     )
 
+    private fun episodeIdFromData(data: String?): String? {
+        val raw = data?.trim().orEmpty()
+        if (raw.isEmpty() || raw.contains('_')) return null
+        if (raw.all { it.isDigit() }) return raw
+        return Regex("""/(\d+)/?$""").find(raw)?.groupValues?.getOrNull(1)
+    }
+
     private fun parseSeasonNumber(name: String?): Int? {
         if (name.isNullOrBlank()) return null
         Regex("""(?:season|temporada)\s*(\d+)""", RegexOption.IGNORE_CASE)
@@ -732,7 +740,11 @@ class Tomato : MainAPI() {
                 // comparado -- dado chega, codigo ignora, truncamento invisivel.
                 while (page < MAX_SEASON_PAGES) {
                     val reqBody = SeasonReq(page = page, order = "ASC")
-                    val epText = postJsonWithRetry("/season/${season.seasonId}/episodes", reqBody, attempts = DETAIL_ATTEMPTS)
+                    // Página 0 recebe os retries normais. Continuação usa somente
+                    // uma tentativa por host: a API frequentemente declara N+1,
+                    // entrega N na página 0 e responde 500 na página 1.
+                    val pageAttempts = if (page == 0) DETAIL_ATTEMPTS else API_HOSTS.size
+                    val epText = postJsonWithRetry("/season/${season.seasonId}/episodes", reqBody, attempts = pageAttempts)
                     if (epText == null) {
                         // v163: a season falhou. Nao engolimos: registramos e
                         // accounted, e o usuario e avisado na sinopse.
@@ -822,7 +834,10 @@ class Tomato : MainAPI() {
         // Fallback 2: feed completo (type 3/5/7) quando API 500 — preenche título/poster/episódios
         // Motivo: alguns animes só aparecem em "Em alta" (type3) ou categorias (type5) sem entrada em type7,
         // então ficavam sem episódios e sem botão de player.
-        if (episodes.isEmpty() || title == "Anime $animeId" || poster == null) {
+        // O feed de "Novos episódios" também serve para completar a última
+        // página quando /season declara mais itens do que entrega. Ele deve ser
+        // consultado sempre, não apenas quando a lista inteira está vazia.
+        if (episodes.isEmpty() || seasonsTruncated.isNotEmpty() || title == "Anime $animeId" || poster == null) {
             // offline map corrige título antes mesmo do feed (type3/5 não tem anime_name)
             if (title == "Anime $animeId") {
                 fallbackTitleById[animeId]?.let { title = it }
@@ -857,15 +872,24 @@ class Tomato : MainAPI() {
                         for (n in arr) {
                             if (n.get("ep_anime_id")?.asInt() != animeId) continue
                             val epId = n.get("ep_id")?.asInt() ?: continue
-                            if (episodes.none { it.data == epId.toString() }) {
+                            if (episodes.none { episodeIdFromData(it.data) == epId.toString() }) {
                                 val epName2 = n.get("ep_name")?.asText() ?: "Episódio $epId"
                                 val thumb = n.get("thumbnail")?.asText()
+                                val parsedNumber = Regex("""^\s*(\d+)""")
+                                    .find(epName2)?.groupValues?.getOrNull(1)?.toIntOrNull()
                                 val newEp = newEpisode(epId.toString()) {
                                     this.name = epName2
                                     this.posterUrl = thumb
+                                    this.episode = parsedNumber
+                                    // Feed não informa season_id. Se só há uma
+                                    // temporada, a atribuição é inequívoca.
+                                    if (seasons.size == 1) {
+                                        this.season = seasons.first().seasonNumber?.takeIf { it > 0 }
+                                            ?: parseSeasonNumber(seasons.first().seasonName)
+                                            ?: 1
+                                    }
                                 }
                                 episodes.add(newEp)
-                                // v162: também adicionar a subbedEpisodes para o when final funcionar
                                 subbedEpisodes.add(newEp)
                             }
                         }
@@ -1155,7 +1179,7 @@ class Tomato : MainAPI() {
                     if (res.code == 200) {
                         val responseText = res.text
                         val body = tryParseJson<StreamResp>(responseText)
-                        Log.i(TAG, "v168 parse stream=${body?.streams != null} body=${responseText.take(80)}")
+                        Log.i(TAG, "v169 parse stream=${body?.streams != null}")
                         if (body?.streams != null) {
                             Log.i(TAG, "v168 stream resolvido via $host na tentativa ${attempt + 1}")
                             parsed = body
