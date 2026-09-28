@@ -20,9 +20,18 @@ class Tomato : MainAPI() {
 
     private val TAG = "Tomato"
 
-    // token extraído de /data/data/com.tomatos.clientapp/shared_prefs/com.tomatos.clientapp_preferences.xml
-    // USER_TOKEN id=4846729 uuid=d489566c-2443-4579-b390-b5b419831090 iat=1790506280
-    // válido até exp da policy (~2h por stream) mas JWT não expira rápido; quando expirar refazer login via hCaptcha
+    // BEARER_TOKEN é um JWT de sessão de cliente, sem claim `exp`, capturado de
+    // /data/data/com.tomatos.clientapp/shared_prefs/...xml. Não é chave de servidor
+    // nem credencial de escrita; identifica uma conta de terceiro. Por isso não
+    // entra em log, nem em comentário, nem em constante pública exposta.
+    //
+    // Estado atual: o header é enviado, mas a API ainda não foi provada como
+    // dispensável. tools/token_requirement_probe.py compara a mesma rota com e sem
+    // Authorization; medir com a origem no ar é pré-requisito para remover isto.
+    //
+    // Enquanto o token estiver no fonte, e o repositório é público, a conta
+    // permanece exposta. Tirar o id e o uuid daqui é o que dá; o token em si
+    // só sai quando a prova acima fechar, ou por decisão consciente.
     companion object {
         const val BEARER_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6NDg0NjcyOSwidXVpZCI6ImQ0ODk1NjZjLTI0NDMtNDU3OS1iMzkwLWI1YjQxOTgzMTA5MCIsImlhdCI6MTc5MDUwNjI4MH0.3MP87IJav4bhPJzt5YUUv1mEeOdWp2zxo5_hc6w51YU"
         // UA original do app. O Dalvik falso foi testado A/B (25 rodadas cada):

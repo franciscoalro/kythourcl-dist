@@ -1,84 +1,73 @@
 #!/usr/bin/env python3
-"""Responde UMA pergunta: a API do Tomato exige o Bearer token?
-
-Le o token do proprio plugin em disco e NUNCA o imprime. Compara a mesma
-rota com e sem o header Authorization. Se as duas respostas forem iguais e
-utilizaveis, o token e dispensavel e pode sair do fonte.
-
-Nao imprime corpo de resposta inteiro: em caso de erro o corpo pode carregar
-detalhe de autenticacao. Mostra apenas status, contagem de episodios e um
-prefixo curto e sanitizado.
 """
-import json
-import pathlib
+Prova de dispensabilidade do header Authorization na API do Tomato.
+
+Compara a MESMA rota em duas variantes (com e sem Bearer) e diz se o header
+e' exigido. Le a constante do fonte em Tomato.kt, sem imprimir o valor.
+
+Uso: python3 tools/token_requirement_probe.py
+"""
 import re
 import sys
 import time
 import urllib.error
 import urllib.request
 
-BASE = "https://prod-api.tomatoanimes.com"
-SEASON = 215
-UA = "tomato-android"
-PLUGIN = pathlib.Path("Tomato/src/main/kotlin/com/tomato/Tomato.kt")
+SRC = "Tomato/src/main/kotlin/com/tomato/Tomato.kt"
+HOSTS = ["https://prod-api.tomatoanimes.com", "https://edge.betomato.com"]
+ROUTES = ["/v2/animes/feed", "/v2/animes/2131/details"]  # rota inexistente = sonda de origem morta
 
 
-def load_token() -> str:
-    txt = PLUGIN.read_text(encoding="utf-8", errors="ignore")
-    m = re.search(r'BEARER_TOKEN\s*=\s*"([^"]+)"', txt)
-    return m.group(1) if m else ""
+def read_token():
+    txt = open(SRC, encoding="utf-8").read()
+    m = re.search(r'const val BEARER_TOKEN\s*=\s*"([^"]+)"', txt)
+    return m.group(1) if m else None
 
 
-def call(label, headers, body):
-    req = urllib.request.Request(
-        f"{BASE}/season/{SEASON}/episodes",
-        data=json.dumps(body).encode(),
-        headers=headers,
-        method="POST",
-    )
+def probe(url, headers, timeout=15):
+    req = urllib.request.Request(url, headers=headers)
     t0 = time.time()
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
-            code, raw = r.status, r.read()
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, len(r.read()), round(time.time() - t0, 2)
     except urllib.error.HTTPError as e:
-        code, raw = e.code, e.read()
-    except Exception as e:  # rede/DNS/TLS
-        print(f"{label:<34} EXC    {type(e).__name__}: {str(e)[:60]}")
-        return None
-    ms = (time.time() - t0) * 1000
-
-    n_ep = n_total = None
-    try:
-        d = json.loads(raw)
-        eps = d.get("episodes") or []
-        n_ep = len(eps) if isinstance(eps, list) else None
-        n_total = d.get("total") if isinstance(d, dict) else None
-    except Exception:
-        pass
-
-    print(f"{label:<34} {code}  {ms:6.0f}ms  episodios={n_ep}  total={n_total}")
-    return code, n_ep
+        return e.code, len(e.read()), round(time.time() - t0, 2)
+    except Exception as e:
+        return type(e).__name__, 0, round(time.time() - t0, 2)
 
 
-BASE_H = {"User-Agent": UA, "Accept": "application/json",
-          "Content-Type": "application/json"}
-AUTH_H = dict(BASE_H, Authorization=f"Bearer {load_token()}")
-BODY = {"page": 0, "order": "ASC"}
+def main():
+    token = read_token()
+    if not token:
+        print("ERRO: BEARER_TOKEN nao encontrado em", SRC)
+        return 1
+    print(f"fonte: {SRC}")
+    print(f"token lido do fonte: {len(token)} chars (valor NAO impresso)")
+    print(f"nonce: {int(time.time())}\n")
 
-print(f"rota: POST /season/{SEASON}/episodes  body={BODY}")
-print("-" * 78)
-a = call("COM Authorization", AUTH_H, BODY)
-b = call("SEM Authorization", BASE_H, BODY)
-print("-" * 78)
+    for host in HOSTS:
+        for route in ROUTES:
+            url = f"{host}{route}?nc={int(time.time()*1000)}"
+            base = {"User-Agent": "tomato-android", "Accept": "application/json"}
+            with_auth = dict(base)
+            with_auth["Authorization"] = f"Bearer {token}"
+            a = probe(url, with_auth)
+            b = probe(url, base)
+            print(f"{host}{route}")
+            print(f"   COM Authorization : {a[0]}  bytes={a[1]}  {a[2]}s")
+            print(f"   SEM Authorization : {b[0]}  bytes={b[1]}  {b[2]}s")
+            if a[0] == 200 and b[0] == 200:
+                print("   => DISPENSAVEL: header nao muda o resultado")
+            elif a[0] == 200 and b[0] in (401, 403):
+                print("   => EXIGIDO: sem header a origem nega")
+            elif a[0] == 500:
+                print("   => ORIGEM INDISPONIVEL (500): inconclusivo")
+            else:
+                print("   => inconclusivo")
+            print()
+            time.sleep(1)
+    return 0
 
-if a is None or b is None:
-    print("INDETERMINADO: origem nao respondeu (caiu ou rede). Reexecutar depois.")
-    sys.exit(2)
 
-if b[0] == 200 and b[1] and b[1] == a[1]:
-    print(f"VEREDITO: token DISPENSAVEL - sem Authorization devolveu {b[1]} episodios, igual ao com token.")
-    print("          O token pode sair do fonte sem quebrar o plugin.")
-elif b[0] in (401, 403):
-    print("VEREDITO: token EXIGIDO - sem Authorization a API nega.")
-else:
-    print(f"VEREDITO: INCONCLUSIVO - com={a[0]}/{a[1]} sem={b[0]}/{b[1]}. Repetir em outra janela.")
+if __name__ == "__main__":
+    sys.exit(main())
