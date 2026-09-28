@@ -1,6 +1,6 @@
 [
     {
-        "fileHash": "sha256-30f6e3d4452e4b76d23b228c5857030d574e6893aea4105f048a46ef42e0aac0",
+        "fileHash": "sha256-8670fd3bb87db88c4a907a4ccd18550680b63d1bbfb11f10acfb4709a28ee725",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
         "fileSize": 41960,
@@ -8,7 +8,7 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 165,
+        "version": 166,
         "internalName": "AnimeFire",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/AnimeFire.cs3",
         "name": "AnimeFire"
@@ -42,7 +42,7 @@
         "name": "CineGato"
     },
     {
-        "fileHash": "sha256-54bb82fcc62cbb1de5f713ef24e56ebc178ad0e035ef7a293ef349fbbe8f3fcf",
+        "fileHash": "sha256-97c050d5dc979e7d6b8ff1a65a34baa3096862c4c51e0872bd31be7e6c8cc8d5",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
         "fileSize": 56542,
@@ -50,21 +50,21 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 165,
+        "version": 166,
         "internalName": "CineVision",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/CineVision.cs3",
         "name": "CineVision"
     },
     {
-        "fileHash": "sha256-1882ba3a4b9f35d0b740cbbc2fc3a46718622a8f4a8e1a5ff041dad8ee5d1e80",
+        "fileHash": "sha256-52cc9cab2016471ab671d94aefabda8796d01ff9387104cff073c2232ccf25f2",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 53388,
+        "fileSize": 53386,
         "status": 3,
         "authors": [
             "franciscoalro"
         ],
-        "version": 165,
+        "version": 166,
         "internalName": "NetCine",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/NetCine.cs3",
         "name": "NetCine"
@@ -84,15 +84,15 @@
         "name": "Pobreflix"
     },
     {
-        "fileHash": "sha256-8d7b665149bc02dc8c9d2898362489d60c5240e06c25a0db511c411e02059a0b",
+        "fileHash": "sha256-f947fbc8948ef52ea111d601ec15428608bff5e93eb0c884303d05e42b12000f",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 30157,
+        "fileSize": 30156,
         "status": 3,
         "authors": [
             "franciscoalro"
         ],
-        "version": 165,
+        "version": 166,
         "internalName": "RedeCanais",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/RedeCanais.cs3",
         "name": "RedeCanais"
@@ -112,21 +112,21 @@
         "name": "SuperCine"
     },
     {
-        "fileHash": "sha256-3f5e825a0817b891fbc1baa4820d88bbf0ba9b453174d46e0fa6943be2712937",
+        "fileHash": "sha256-3cd5e861de3fd62b1371b1a243aeaa6cb09e36401594d93f1c2535291d167f4a",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 69124,
+        "fileSize": 72085,
         "status": 3,
         "authors": [
             "franciscoalro"
         ],
-        "version": 165,
+        "version": 166,
         "internalName": "Tomato",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/Tomato.cs3",
         "name": "Tomato"
     },
     {
-        "fileHash": "sha256-f2b07121039cdb9992de233947d4f56340fdc0fd2b39c28ad00f8369ea26d422",
+        "fileHash": "sha256-5a667422e6ee8bef72dce8ea778e7c7f20ddcff65063eb63da82477cfdfb9a66",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
         "fileSize": 25201,
@@ -134,7 +134,7 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 165,
+        "version": 166,
         "internalName": "TopAnimes",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/TopAnimes.cs3",
         "name": "TopAnimes"
