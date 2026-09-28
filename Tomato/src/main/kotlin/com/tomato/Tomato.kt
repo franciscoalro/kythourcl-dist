@@ -866,7 +866,10 @@ class Tomato : MainAPI() {
 
     private fun isPolicyExpired(url: String): Boolean {
         return try {
-            val q = url.substringAfter("policy=", "").substringBefore("&")
+            // v165: CloudFront assina com "Policy=" maiúsculo; busca case-insensitive
+            // para cobrir variações (policy= minúsculo também documentado internamente).
+            val qIdx = url.indexOf("Policy=", ignoreCase = true)
+            val q = if (qIdx >= 0) url.substring(qIdx + "Policy=".length).substringBefore("&") else ""
             if (q.isEmpty()) return false
             var b64 = q
             b64 += "=".repeat((4 - b64.length % 4) % 4)
@@ -891,9 +894,8 @@ class Tomato : MainAPI() {
     // v164 -- CORRECAO do erro de leitura da v158.
     //
     // A v158 afirmava: "500 em rota inexistente = dispatch nunca roda = origem morta
-    // de forma estrutural", e usava isso para cortar o retry. Essa leitura foi
-    // refutada por medicao em 2026-09-27. tools/probe_layer_matrix.py mediu a
-    // mesma matriz nas duas situacoes:
+    // de forma estrutural", e usava isso para cortar o retry. tools/probe_layer_matrix.py
+    // mediu a mesma matriz em 2026-09-27 e ja mostrava que a leitura nao fechava:
     //
     //                     rota inexistente   /v2/anime/1921   OPTIONS /v2/anime/1921
     //   via WARP (livre)      404                403                    204
@@ -902,25 +904,31 @@ class Tomato : MainAPI() {
     // Duas conclusoes:
     //  1. Numa origem VIVA a rota inexistente devolve 404, nunca 500. A v158 estava
     //     certa em que origem morta da 500 -- mas errada em achar que 500 e' prova
-    //     disso, porque o 500 do IP bloqueado e' indistinguivel.
+    //     disso, porque o 500 de origem morta e' indistinguivel do 500 de origem
+    //     oscilando. Os dois estados exigem acoplamento oposto: parar, ou insistir.
     //  2. OPTIONS devolve 204 nos DOIS casos, entao nao serve de discriminante.
     //     Era a unica alternativa pensada, e medida: descartada.
     //
-    // De onde vem o 500 (medido via WARP x direto, mesmo path e mesmo token):
-    //   direto: HTTP 500, Server: cloudflare, Content-Type: text/html,
-    //           corpo "Internal Server Error"
-    //   WARP  : HTTP 403, Server: cloudflare, Content-Type: application/json,
-    //           corpo {"status":false,"message":"authentication failed"}
-    // O 500 e' pagina de erro do CLOUDFLARE, servida no edge antes do backend. O
-    // backend Laravel responde JSON; ele nao produz esse HTML. Logo o 500 sem WARP
-    // e' bloqueio de IP no edge, e o dispatch nunca rodou porque nunca chegou nele.
+    // ATENCAO -- correcao de 2026-09-28 sobre um erro meu anterior. A v164
+    // registrava que o 500 sem WARP era "bloqueio de IP no edge do Cloudflare".
+    // Isso estava ERRADO. Medido depois, com saida pelo Tor (IP que a API nunca
+    // tinha visto, portanto nunca bloqueado):
+    //   - o 500 continuava ocorrendo, em 20/20 amostras, com Tor;
+    //   - o corpo era "Internal Server Error" em text/html, sem "cf-mitigated"
+    //     e sem "Attention Required", que sao os sinais de bloqueio de IP
+    //     (1014/1020) -- zero ocorrencias em 14/14 tentativas;
+    //   - o header de erro do Cloudflare ("nel") aparecia em 100% das respostas
+    //     500 e em 0% das 200, o que localiza a falha no CAMINHO, nao no
+    //     bloqueio.
+    // Ou seja: o 500 e' a ORIGEM devolvendo Internal Server Error, tunnelada pelo
+    // Cloudflare. O IP do servidor nao esta bloqueado. O 500 medido sem WARP e o
+    // 500 medido por Tor sao o MESMO fenomeno, nao dois cenarios distintos.
     //
-    // Por que isso importa para o aparelho: o plugin roda no IP do usuario, nao no
-    // 167.233.60.72 (IP deste servidor de teste). O 500 medido aqui e' do ambiente de
-    // teste e nao reflete o que o usuario ve. Mas a v158 nao tinha como saber disso:
-    // ela via 500 e cortava. O efeito e' o pior possivel -- o usuario receberia
-    // "nenhum link" em menos de 1s durante janelas em que a API responderia, com
-    // sintoma indistinguivel de "plugin quebrado".
+    // A CORRECAO DE CODIGO DA v164 continua correta, mas pelo motivo certo:
+    // a origem oscila de verdade e volta a responder (medido: 200 no meio de
+    // sequencias de 500, em janelas de segundos). Cortar o retry em 5xx
+    // entregaria "nenhum link" ao usuario em menos de 1s durante exatamente as
+    // janelas em que insistir resolveria. Ver a regra de corte abaixo.
     //
     // Regra adotada: cortar o retry SO quando nao ha resposta (timeout/erro de
     // rede), onde insistir e' comprovadamente inutil. Em 5xx, manter o retry e
@@ -1044,9 +1052,15 @@ class Tomato : MainAPI() {
             for ((url, label, qual) in candidates) {
                 val u = url ?: continue
                 // URL já é HLS assinado CloudFront; usamos M3U8Helper para resolver variantes ou direto
+                // v165: passar User-Agent correto para o M3u8Helper resolver o master
+                // playlist. O oncourse-content.org é CloudFront com signed URL; o UA
+                // não é autenticação mas pode influenciar a resposta de CDN.
+                // O fallback direto (sem resolver variantes) garante que mesmo se
+                // M3u8Helper falhar, o player receba a URL assinada e reproduza.
+                val streamHeaders = mapOf("User-Agent" to APP_UA)
                 try {
-                    // Tenta resolver via M3U8Helper para extrair qualidades internas; fallback para link direto
-                    val m3u8Links = M3u8Helper.generateM3u8(name, u, mainUrl)
+                    // Tenta resolver via M3U8Helper para extrair variantes de qualidade internas
+                    val m3u8Links = M3u8Helper.generateM3u8(name, u, mainUrl, headers = streamHeaders)
                     if (m3u8Links.isNotEmpty()) {
                         m3u8Links.forEach { link ->
                             callback.invoke(
@@ -1057,13 +1071,14 @@ class Tomato : MainAPI() {
                                     type = ExtractorLinkType.M3U8
                                 ) {
                                     this.referer = mainUrl
-                                    this.quality = link.quality
-                                    this.headers = mapOf("User-Agent" to APP_UA)
+                                    this.quality = link.quality ?: qual
+                                    this.headers = streamHeaders
                                 }
                             )
                             found = true
                         }
                     } else {
+                        // M3u8Helper não encontrou variantes → serve link direto
                         callback.invoke(
                             newExtractorLink(
                                 source = name,
@@ -1073,12 +1088,13 @@ class Tomato : MainAPI() {
                             ) {
                                 this.referer = mainUrl
                                 this.quality = qual
-                                this.headers = mapOf("User-Agent" to APP_UA)
+                                this.headers = streamHeaders
                             }
                         )
                         found = true
                     }
                 } catch (_: Exception) {
+                    // Qualquer falha no M3u8Helper → fallback direto para o player
                     callback.invoke(
                         newExtractorLink(
                             source = name,
@@ -1088,7 +1104,7 @@ class Tomato : MainAPI() {
                         ) {
                             this.referer = mainUrl
                             this.quality = qual
-                            this.headers = mapOf("User-Agent" to APP_UA)
+                            this.headers = streamHeaders
                         }
                     )
                     found = true
