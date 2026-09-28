@@ -429,7 +429,11 @@ class Tomato : MainAPI() {
     data class AnimeSeason(
         @JsonProperty("season_id") val seasonId: Int,
         @JsonProperty("season_name") val seasonName: String? = null,
-        @JsonProperty("name") val name: String? = null
+        @JsonProperty("name") val name: String? = null,
+        // v161: season_number para mapear episódios na season correta no player
+        @JsonProperty("season_number") val seasonNumber: Int? = null,
+        // v161: season_dubbed para classificar DubStatus sem depender do nome
+        @JsonProperty("season_dubbed") val seasonDubbed: Int? = null
     )
     data class AnimeDataWrapper(
         @JsonProperty("data") val data: AnimeData? = null,
@@ -453,6 +457,8 @@ class Tomato : MainAPI() {
         @JsonProperty("episode_number") val episodeNumber: Int? = null,
         @JsonProperty("ep_number") val epNumber: Int? = null,
         @JsonProperty("number") val number: Int? = null,
+        // v161: campo real da API é "ep_thumbnail", não "thumbnail"
+        @JsonProperty("ep_thumbnail") val epThumbnail: String? = null,
         @JsonProperty("thumbnail") val thumbnail: String? = null,
         @JsonProperty("thumb") val thumb: String? = null,
         @JsonProperty("dubbed") val dubbed: Boolean? = null
@@ -564,6 +570,9 @@ class Tomato : MainAPI() {
         // só aceita season_id, e usar anime_id ali só gastava 3 tentativas em
         // uma rota que não tem esse contrato.
         val episodes = mutableListOf<Episode>()
+        // v161: separar seasons dubladas e legendadas para DubStatus correto
+        val dubbedEpisodes = mutableListOf<Episode>()
+        val subbedEpisodes = mutableListOf<Episode>()
         for (season in seasons) {
             try {
                 val reqBody = SeasonReq(page = 0, order = "ASC")
@@ -575,15 +584,24 @@ class Tomato : MainAPI() {
                 data.forEach { ep ->
                     val epId = ep.epId ?: ep.episodeId ?: ep.id ?: return@forEach
                     val epName = ep.epName ?: ep.episodeName ?: ep.name ?: "Episódio $epId"
-                    val epNum = ep.episodeNumber ?: ep.epNumber ?: ep.number
-                    val thumb = ep.thumbnail ?: ep.thumb
-                    episodes.add(newEpisode(epId.toString()) {
+                    val epNum = ep.epNumber ?: ep.episodeNumber ?: ep.number
+                    // v161: ep_thumbnail é o campo real da API
+                    val thumb = ep.epThumbnail ?: ep.thumbnail ?: ep.thumb
+                    // v161: season_dubbed=1 é o sinal canônico; fallback para nome da season
+                    val isDubbed = season.seasonDubbed == 1
+                        || ep.dubbed == true
+                        || season.seasonName?.contains("Dublado", ignoreCase = true) == true
+                    val newEp = newEpisode(epId.toString()) {
                         this.name = epName
                         this.episode = epNum
                         this.posterUrl = thumb
-                    })
+                        this.season = season.seasonNumber ?: 1
+                    }
+                    if (isDubbed) dubbedEpisodes.add(newEp) else subbedEpisodes.add(newEp)
+                    episodes.add(newEp)
                 }
-                if (episodes.isNotEmpty()) break // já achou na primeira season válida
+                // v161: NÃO fazer break — processar TODAS as seasons para ter todos os episódios
+                // O break anterior causava que só a primeira season funcionasse (ex: só Season I de Shingeki)
             } catch (_: Exception) { continue }
         }
 
@@ -681,7 +699,20 @@ class Tomato : MainAPI() {
             this.plot = plot
             this.tags = tags
             if (hasEpisodes) {
-                addEpisodes(DubStatus.Subbed, episodes.distinctBy { it.data }.sortedBy { it.episode ?: 0 })
+                // v161: separar dublado e legendado em DubStatus distintos quando disponíveis
+                // Ordenar por season primeiro, depois por episode number
+                val dedupSub  = subbedEpisodes.distinctBy { it.data }.sortedWith(compareBy({ it.season ?: 1 }, { it.episode ?: 0 }))
+                val dedupDub  = dubbedEpisodes.distinctBy { it.data }.sortedWith(compareBy({ it.season ?: 1 }, { it.episode ?: 0 }))
+                val dedupAll  = episodes.distinctBy { it.data }.sortedWith(compareBy({ it.season ?: 1 }, { it.episode ?: 0 }))
+                when {
+                    dedupSub.isNotEmpty() && dedupDub.isNotEmpty() -> {
+                        addEpisodes(DubStatus.Subbed, dedupSub)
+                        addEpisodes(DubStatus.Dubbed, dedupDub)
+                    }
+                    dedupDub.isNotEmpty() -> addEpisodes(DubStatus.Dubbed, dedupDub)
+                    dedupSub.isNotEmpty() -> addEpisodes(DubStatus.Subbed, dedupSub)
+                    else -> addEpisodes(DubStatus.Subbed, dedupAll)
+                }
             }
         }
     }
