@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
+import android.util.Log
 
 class Tomato : MainAPI() {
     override var mainUrl = "https://prod-api.tomatoanimes.com"
@@ -16,6 +17,8 @@ class Tomato : MainAPI() {
     override val hasMainPage = true
     override val hasQuickSearch = false
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
+
+    private val TAG = "Tomato"
 
     // token extraído de /data/data/com.tomatos.clientapp/shared_prefs/com.tomatos.clientapp_preferences.xml
     // USER_TOKEN id=4846729 uuid=d489566c-2443-4579-b390-b5b419831090 iat=1790506280
@@ -47,6 +50,11 @@ class Tomato : MainAPI() {
         // de sucesso, mas em rajadas -- 3 tentativas ja pegam uma rajada).
         // A sonda isOriginDown() ainda encurta o caminho quando a origem cai.
         const val DETAIL_ATTEMPTS = 3
+        // v163: teto de paginação por temporada. A API nunca documentou o
+        // tamanho de página; 25 aparece em todas as medições, o que sugere
+        // corte do servidor, mas isso é hipótese, não contrato. O teto existe
+        // para que uma season patológica não vire laço infinito de requests.
+        const val MAX_SEASON_PAGES = 20
         val API_HEADERS = mapOf(
             "User-Agent" to APP_UA,
             "Authorization" to "Bearer $BEARER_TOKEN",
@@ -577,36 +585,107 @@ class Tomato : MainAPI() {
         // v161: separar seasons dubladas e legendadas para DubStatus correto
         val dubbedEpisodes = mutableListOf<Episode>()
         val subbedEpisodes = mutableListOf<Episode>()
+        // v163: rastreamento de falhas por temporada. Antes, um `continue`
+        // silencioso (linha 584 no v162) engolia a season inteira e o usuario
+        // via um anime de 6 temporadas com 2, sem nenhuma indicacao. Medido no
+        // redroid 2026-09-27: Shingeki (anime 1089) tem 6 seasons, e as ids
+        // 215, 216, 554 e 1626 devolveram 500 em 5 tentativas cada enquanto 555
+        // e 214 respondiam 200 na mesma janela, com o mesmo token. Quatro
+        // temporadas desapareceram do resultado sem aviso.
+        var seasonsRequested = 0
+        val seasonsFailed = mutableListOf<String>()
+        val seasonsTruncated = mutableListOf<String>()
+        var epIdsSeen = mutableSetOf<String>()
         for (season in seasons) {
+            val seasonLabel = "${season.seasonName ?: "season"}#${season.seasonId}"
             try {
-                val reqBody = SeasonReq(page = 0, order = "ASC")
-                val epText = postJsonWithRetry("/season/${season.seasonId}/episodes", reqBody, attempts = DETAIL_ATTEMPTS)
-                if (epText == null) continue
-                val parsed = tryParseJson<SeasonEpisodesResp>(epText) ?: continue
-                val data = parsed.data ?: emptyList()
-                if (data.isEmpty()) continue
-                data.forEach { ep ->
-                    val epId = ep.epId ?: ep.episodeId ?: ep.id ?: return@forEach
-                    val epName = ep.epName ?: ep.episodeName ?: ep.name ?: "Episódio $epId"
-                    val epNum = ep.epNumber ?: ep.episodeNumber ?: ep.number
-                    // v161: ep_thumbnail é o campo real da API
-                    val thumb = ep.epThumbnail ?: ep.thumbnail ?: ep.thumb
-                    // v161: season_dubbed=1 é o sinal canônico; fallback para nome da season
-                    val isDubbed = season.seasonDubbed == 1
-                        || ep.dubbed == true
-                        || season.seasonName?.contains("Dublado", ignoreCase = true) == true
-                    val newEp = newEpisode(epId.toString()) {
-                        this.name = epName
-                        this.episode = epNum
-                        this.posterUrl = thumb
-                        this.season = season.seasonNumber ?: 1
+                var page = 0
+                var declaredTotal: Int? = null
+                var fetchedForSeason = 0
+                // v163: itera paginas de verdade usando o total DECLARADO
+                // (SeasonEpisodesResp.episodes, linha 468) como condicao de
+                // termino. Antes so a pagina 0 era lida e o contador nunca era
+                // comparado -- dado chega, codigo ignora, truncamento invisivel.
+                while (page < MAX_SEASON_PAGES) {
+                    val reqBody = SeasonReq(page = page, order = "ASC")
+                    val epText = postJsonWithRetry("/season/${season.seasonId}/episodes", reqBody, attempts = DETAIL_ATTEMPTS)
+                    if (epText == null) {
+                        // v163: a season falhou. Nao engolimos: registramos e
+                        // accounted, e o usuario e avisado na sinopse.
+                        if (page == 0) {
+                            seasonsRequested++
+                            seasonsFailed.add(seasonLabel)
+                            Log.w(TAG, "v163: temporada $seasonLabel falhou apos $DETAIL_ATTEMPTS tentativas (HTTP 5xx ou parse)")
+                        } else {
+                            Log.w(TAG, "v163: temporada $seasonLabel truncada: pagina $page falhou com ${fetchedForSeason} episodios ja obtidos (declarado=$declaredTotal)")
+                            if (declaredTotal != null && fetchedForSeason < declaredTotal) {
+                                seasonsTruncated.add("$seasonLabel ($fetchedForSeason/$declaredTotal)")
+                            }
+                        }
+                        break
                     }
-                    if (isDubbed) dubbedEpisodes.add(newEp) else subbedEpisodes.add(newEp)
-                    episodes.add(newEp)
+                    // v163: parse falha conta como season quebrada na pagina 0.
+                    // Nao usamos `?: run { break }` porque `break` dentro de
+                    // lambda inline so existe a partir do Kotlin 2.2, e o
+                    // projeto esta em 2.1.10.
+                    val parsed = tryParseJson<SeasonEpisodesResp>(epText)
+                    if (parsed == null) {
+                        if (page == 0) {
+                            seasonsRequested++
+                            seasonsFailed.add(seasonLabel)
+                            Log.w(TAG, "v163: temporada $seasonLabel: JSON de /episodes nao parseia")
+                        }
+                        break
+                    }
+                    if (declaredTotal == null) declaredTotal = parsed.episodes
+                    val data = parsed.data ?: emptyList()
+                    if (page == 0) seasonsRequested++
+                    if (data.isEmpty()) break
+                    data.forEach { ep ->
+                        val epId = ep.epId ?: ep.episodeId ?: ep.id ?: return@forEach
+                        val epName = ep.epName ?: ep.episodeName ?: ep.name ?: "Episódio $epId"
+                        val epNum = ep.epNumber ?: ep.episodeNumber ?: ep.number
+                        // v161: ep_thumbnail é o campo real da API
+                        val thumb = ep.epThumbnail ?: ep.thumbnail ?: ep.thumb
+                        // v161: season_dubbed=1 é o sinal canônico; fallback para nome da season
+                        val isDubbed = season.seasonDubbed == 1
+                            || ep.dubbed == true
+                            || season.seasonName?.contains("Dublado", ignoreCase = true) == true
+                        // v163: dedup por ep_id entre paginas. Paginacao
+                        // sobreposta repetiria episodios, e o distinctBy do
+                        // fim ja nao segura duplicatas dentro da mesma lista
+                        // quando o mesmo ep volta de duas paginas.
+                        if (!epIdsSeen.add(epId.toString())) return@forEach
+                        val newEp = newEpisode(epId.toString()) {
+                            this.name = epName
+                            this.episode = epNum
+                            this.posterUrl = thumb
+                            this.season = season.seasonNumber ?: 1
+                        }
+                        if (isDubbed) dubbedEpisodes.add(newEp) else subbedEpisodes.add(newEp)
+                        episodes.add(newEp)
+                        fetchedForSeason++
+                    }
+                    // v163: condicao de termino pelo total declarado. Se a API
+                    // nao declarar (null), aceitamos a pagina e paramos no
+                    // primeiro array vazio -- estado SEM_DECL, nunca assumido
+                    // como completo.
+                    val total = declaredTotal
+                    if (total != null && fetchedForSeason >= total) break
+                    page++
+                }
+                if (declaredTotal != null && fetchedForSeason < declaredTotal) {
+                    Log.w(TAG, "v163: temporada $seasonLabel truncada apos $MAX_SEASON_PAGES paginas: $fetchedForSeason/$declaredTotal")
+                    seasonsTruncated.add("$seasonLabel ($fetchedForSeason/$declaredTotal)")
                 }
                 // v161: NÃO fazer break — processar TODAS as seasons para ter todos os episódios
                 // O break anterior causava que só a primeira season funcionasse (ex: só Season I de Shingeki)
-            } catch (_: Exception) { continue }
+            } catch (e: Exception) {
+                seasonsRequested++
+                seasonsFailed.add(seasonLabel)
+                Log.w(TAG, "v163: temporada $seasonLabel lancou excecao: ${e.message}")
+                continue
+            }
         }
 
         // Fallback 2: feed completo (type 3/5/7) quando API 500 — preenche título/poster/episódios
@@ -665,6 +744,27 @@ class Tomato : MainAPI() {
             // garante que offline nunca deixe "Anime $id" passar
             if (title == "Anime $animeId") {
                 fallbackTitleById[animeId]?.let { title = it }
+            }
+        }
+
+        // v163: aviso de catalogo incompleto. Sem isto, uma temporada que falhou
+        // as tentativas simplesmente nao existe no resultado -- o usuario via
+        // "Attack on Titan" com 2 de 6 temporadas e nenhuma pista do motivo.
+        // Nao poluimos a sinopse real quando o catalogo esta completo.
+        if (seasonsFailed.isNotEmpty() || seasonsTruncated.isNotEmpty()) {
+            val partes = mutableListOf<String>()
+            if (seasonsFailed.isNotEmpty()) {
+                partes.add("${seasonsFailed.size} de $seasonsRequested temporada(s) não responderam a API e estão ausentes: ${seasonsFailed.joinToString(", ")}")
+            }
+            if (seasonsTruncated.isNotEmpty()) {
+                partes.add("Temporada(s) com episódios faltando (obtidos/declarados pela API): ${seasonsTruncated.joinToString(", ")}")
+            }
+            val aviso = "Aviso do plugin: o catálogo deste anime está incompleto. ${partes.joinToString(" ")} Não é um problema de reprodução — os episódios listados funcionam — mas há temporadas/linhas que a API do Tomato não entregou agora. Tente de novo mais tarde."
+            Log.w(TAG, "v163: catalogo incompleto para anime $animeId -> $aviso")
+            if (plot.isNullOrBlank()) {
+                plot = aviso
+            } else {
+                plot = "$plot\n\n$aviso"
             }
         }
 
