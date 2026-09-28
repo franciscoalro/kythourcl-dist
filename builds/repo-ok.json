@@ -1,6 +1,6 @@
 {
     "name": "Kythour Repository",
-    "description": "Plugins Kythour — Tomato v162 (seasonNumber/seasonDubbed populados + fallback a subbedEpisodes), AnimeFire/CineVision/NetCine/RedeCanais/TopAnimes v162, SuperCine v3, VeloPlayTV v5, CineGato v6, Pobreflix v150, AnimesOrion v1 (11 plugins)",
+    "description": "Plugins Kythour — Tomato v163 (paginacao de seasons pelo total declarado + log e aviso de temporadas falhas/truncadas), AnimeFire/CineVision/NetCine/RedeCanais/TopAnimes v162, SuperCine v3, VeloPlayTV v5, CineGato v6, Pobreflix v150, AnimesOrion v1 (11 plugins)",
     "manifestVersion": 1,
     "pluginLists": [
         "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/plugins.json"
