@@ -549,7 +549,11 @@ class Tomato : MainAPI() {
                         seasons = seasonsNode.mapNotNull { n ->
                             val sid = n.get("season_id")?.asInt() ?: n.get("id")?.asInt() ?: return@mapNotNull null
                             val sname = n.get("season_name")?.asText() ?: n.get("name")?.asText()
-                            AnimeSeason(sid, sname)
+                            // v162: passar season_number e season_dubbed que foram adicionados ao data class
+                            // mas não estavam sendo lidos aqui → season.seasonNumber era sempre null
+                            val snum = n.get("season_number")?.asInt()
+                            val sdubbed = n.get("season_dubbed")?.asInt()
+                            AnimeSeason(sid, sname, seasonNumber = snum, seasonDubbed = sdubbed)
                         }
                     }
                     // fallback: se ainda sem título, tenta direto no root
@@ -646,10 +650,13 @@ class Tomato : MainAPI() {
                             if (episodes.none { it.data == epId.toString() }) {
                                 val epName2 = n.get("ep_name")?.asText() ?: "Episódio $epId"
                                 val thumb = n.get("thumbnail")?.asText()
-                                episodes.add(newEpisode(epId.toString()) {
+                                val newEp = newEpisode(epId.toString()) {
                                     this.name = epName2
                                     this.posterUrl = thumb
-                                })
+                                }
+                                episodes.add(newEp)
+                                // v162: também adicionar a subbedEpisodes para o when final funcionar
+                                subbedEpisodes.add(newEp)
                             }
                         }
                     }
