@@ -266,6 +266,15 @@ class Tomato : MainAPI() {
         "$mainUrl/v2/animes/feed" to "Novos episódios",
         "$mainUrl/v2/animes/feed" to "Em alta",
         "$mainUrl/v2/animes/feed" to "Recém adicionados",
+        "$mainUrl/v2/animes/feed" to "Semanais",
+        "$mainUrl/v2/animes/feed" to "Com dublagem",
+        "$mainUrl/v2/animes/feed" to "Recomendados",
+        "$mainUrl/v2/animes/feed" to "Os mais curtidos de hoje!",
+        "$mainUrl/v2/animes/feed" to "Aventura",
+        "$mainUrl/v2/animes/feed" to "Comédia",
+        "$mainUrl/v2/animes/feed" to "Romance",
+        "$mainUrl/v2/animes/feed" to "Slice Of Life",
+        "$mainUrl/v2/animes/feed" to "Talvez você goste",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -286,7 +295,6 @@ class Tomato : MainAPI() {
             // Filtramos por request se mainPageOf foi usado, mas aqui tratamos todos; CloudStream chama uma vez por entry
             // Para compatibilidade mapeamos cada type para uma lista distinta e filtramos pelo título pedido
             // O truque: quando mainPageOf tem duplo entry com mesmo URL, o request.name diferencia
-            val wantAll = request.name == "Novos episódios" || request.name == "Em alta" || request.name == "Recém adicionados"
             // Se request.name não bate em título, ainda retornamos vazio para evitar duplicar tudo em cada tab
             // Porém para primeira versão retornamos todas as listas se o nome não casar (compat)
             // vamos construir listas e deixar CloudStream filtrar: retornamos uma lista cujo nome==request.name

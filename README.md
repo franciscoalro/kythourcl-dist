@@ -4,7 +4,7 @@
 
 <img src="https://img.shields.io/badge/CloudStream-blue?style=for-the-badge&logo=android" alt="CloudStream">
 
-### NetCine only
+### Extensões CloudStream em português
 
 </div>
 
@@ -24,6 +24,12 @@ No CloudStream: `Configurações > Extensões > Adicionar Repositório` e cole o
 - **Recursos:** Filmes, Séries com captcha automático via `ocr.space` dentro do app
 
 ---
+
+### TomatoAnimes
+- **Idioma:** `pt-br`
+- **Recursos validados:** catálogo, pesquisa, detalhes, temporadas completas, faixas legendadas/dubladas e reprodução HLS.
+- **Categorias da tela inicial:** Novos episódios, Em alta, Recém adicionados, Semanais, Com dublagem, Recomendados, Mais curtidos, Aventura, Comédia, Romance, Slice Of Life e Talvez você goste.
+- A API oficial pode oscilar entre os hosts `prod-api.tomatoanimes.com` e `edge.betomato.com`; o plugin alterna automaticamente entre ambos.
 
 ### DMCA
 Projeto educacional. Nenhum conteúdo hospedado aqui.
