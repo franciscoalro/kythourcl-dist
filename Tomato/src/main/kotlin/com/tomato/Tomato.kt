@@ -20,33 +20,35 @@ class Tomato : MainAPI() {
 
     private val TAG = "Tomato"
 
-    // BEARER_TOKEN é um JWT de sessão de cliente, sem claim `exp`, capturado de
-    // /data/data/com.tomatos.clientapp/shared_prefs/...xml. Não é chave de servidor
-    // nem credencial de escrita; identifica uma conta de terceiro. Por isso não
-    // entra em log, nem em comentário, nem em constante pública exposta.
+    // BEARER_TOKEN e' um JWT de sessao de cliente, sem claim `exp`, capturado de
+    // /data/data/com.tomatos.clientapp/shared_prefs/...xml. Nao e' chave de servidor
+    // nem credencial de escrita; identifica uma conta de terceiro. Por isso nao
+    // entra em log, nem em comentario, nem em constante publica exposta.
     //
-    // Estado atual: o header é enviado, mas a API ainda não foi provada como
-    // dispensável. tools/token_requirement_probe.py compara a mesma rota com e sem
-    // Authorization; medir com a origem no ar é pré-requisito para remover isto.
+    // O header e' OBRIGATORIO, medido em 2026-09-27: mesma rota, mesma sessao,
+    // 200 com o Bearer e 403 "authentication failed" sem ele. Logo nao existe
+    // publicacao sem token que continue funcionando, e o token so sai do artefato
+    // por rotacao do lado da origem.
     //
-    // Enquanto o token estiver no fonte, e o repositório é público, a conta
-    // permanece exposta. Tirar o id e o uuid daqui é o que dá; o token em si
-    // só sai quando a prova acima fechar, ou por decisão consciente.
+    // Enquanto o token estiver no fonte, e o repositorio e' publico, a conta
+    // permanece exposta. A saida real e' rotacao server-side, que depende de
+    // login no aplicativo (hCaptcha) e nao pode ser feita por este repositorio.
     companion object {
         const val BEARER_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6NDg0NjcyOSwidXVpZCI6ImQ0ODk1NjZjLTI0NDMtNDU3OS1iMzkwLWI1YjQxOTgzMTA5MCIsImlhdCI6MTc5MDUwNjI4MH0.3MP87IJav4bhPJzt5YUUv1mEeOdWp2zxo5_hc6w51YU"
         // UA original do app. O Dalvik falso foi testado A/B (25 rodadas cada):
         // tomato-android 5/25 vs Dalvik 1/25 -> nao ajuda, e nao vale virar fingerprint.
         const val APP_UA = "tomato-android"
         // Quantidade de tentativas no endpoint /stream + espera entre falhas.
-        // Medido 2026-09-27: taxa de sucesso oscila 12-20% (500 em rajadas) na janela
-        // parcial, e cai a 0% quando a origem inteira cai. Ver bloco de health check_origina.
-        // v158: a deteccao de origem morta passa a ser feita por catch-all 500 (ver
-        // isOriginDead()), que e conclusivo em 1 request e nao depende de /feed.
+        // Medido 2026-09-27: o /stream responde 200 em 20/20 (100%) quando o IP
+        // nao esta bloqueado pelo edge, e 500 em 20/20 quando esta. Ver o bloco de
+        // healthCheck() para a leitura correta desse 500.
+        // v164: a deteccao de origem morta saiu; quem decide o corte do retry e'
+        // healthCheck(), e apenas no caso de falta de resposta.
         const val STREAM_ATTEMPTS = 20
         const val RETRY_DELAY_MS = 500L
         // Apos este numero de falhas seguidas no /stream, faz 1 sonda de saude na
-        // origem. Medido: com a origem NO AR e sem token a API devolve 403; com a
-        // origem FORA devolve 500. A sonda distingue os dois estados em 1 request.
+        // origem. A sonda so encerra o retry se nao houver resposta nenhuma; em 5xx
+        // ela mantem o retry, porque 5xx e' o estado que o retry ainda resolve.
         const val HEALTH_PROBE_AFTER = 6
         // v158: nonce no caminho da sonda de origem morta, para que o edge/qualquer
         // cache intermediario nunca devolva uma resposta guardada de uma chamada
@@ -111,10 +113,17 @@ class Tomato : MainAPI() {
     // 2026-09-27: prod-api oscila entre 500 e 200 -> feed embutido evita catálogo vazio
     private suspend fun fetchFeed(): JsonNode? {
         val mapper = jacksonObjectMapper().apply { configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false) }
-        // v158: antes de gastar 4 tentativas em /feed, 1 request barato detecta
-        // origem morta. No cenario medido (queda total) isso troca 4 x (15s timeout
-        // + 500ms) por 1 request de ~0.15s, e cai direto no feed embutido.
-        if (isOriginDead()) return try { mapper.readTree(TomatoFallback.FEED_JSON) } catch (_: Exception) { null }
+        // v164: antes de gastar 4 tentativas em /feed, 1 request barato detecta
+        // falta de resposta. No cenario medido (queda total) isso troca 4 x (15s
+        // timeout + 500ms) por 1 request de ~0.15s, e cai direto no feed embutido.
+        //
+        // v164: a v158 chamava isOriginDead() aqui, e ela tratava QUALQUER 5xx como
+        // origem morta. Medido em 2026-09-27: o 5xx do edge (Cloudflare bloqueando
+        // IP) e' indistinguivel do 5xx de origem morta, e o primeiro e' transitorio.
+        // Com a leitura errada, um bloqueio de IP de poucos segundos derrubava o
+        // catalogo inteiro para o JSON offline sem tentar de novo. Agora so a falta
+        // de resposta (INDISPONIVEL) corta; 5xx segue para o retry normal.
+        if (healthCheck() == Health.INDISPONIVEL) return try { mapper.readTree(TomatoFallback.FEED_JSON) } catch (_: Exception) { null }
         repeat(4) { attempt ->
             try {
                 val res = app.get("$mainUrl/v2/animes/feed", headers = API_HEADERS, timeout = 15)
@@ -143,11 +152,11 @@ class Tomato : MainAPI() {
         // encurtar o caminho. 2 dispara na segunda, sobrando uma para tentar
         // de novo caso a origem tenha voltou entre as duas.
         //
-        // v158: a sonda e isOriginDead() (catch-all 500 em rota inexistente), que
-        // confirma origem morta estrutural em 1 request. Se ela nao for conclusiva
-        // (a origem respondeu de verdade, ex 404/403), cai para isOriginDown(), que
-        // ainda distingue "endpoint /feed ruim" de "origem fora" pelo par 403/500.
-        // A ordem importa: primeiro a evidencia mais forte, depois a mais fraca.
+        // v164: a v158 encerrava o retry quando isOriginDead() ou isOriginDown()
+        // davam 5xx, o que media "origem morta". A medicao de 2026-09-27 mostrou
+        // que 5xx do edge (IP bloqueado) e' indistinguivel de 5xx de origem morta.
+        // Encerrar ali cortava o retry na janela de flapping -- que e' exatamente a
+        // janela em que insistir resolve. Agora so a falta de resposta encerra.
         var probeBudget = 2
         repeat(attempts) { attempt ->
             try {
@@ -158,8 +167,7 @@ class Tomato : MainAPI() {
             } catch (_: Exception) {}
             if (attempt < attempts - 1) kotlinx.coroutines.delay(RETRY_DELAY_MS)
             if (--probeBudget == 0) {
-                if (isOriginDead()) return null
-                if (isOriginDown()) return null
+                if (healthCheck() == Health.INDISPONIVEL) return null
                 probeBudget = 3
             }
         }
@@ -179,8 +187,7 @@ class Tomato : MainAPI() {
             } catch (_: Exception) {}
             if (attempt < attempts - 1) kotlinx.coroutines.delay(RETRY_DELAY_MS)
             if (--probeBudget == 0) {
-                if (isOriginDead()) return null
-                if (isOriginDown()) return null
+                if (healthCheck() == Health.INDISPONIVEL) return null
                 probeBudget = 3
             }
         }
@@ -870,52 +877,78 @@ class Tomato : MainAPI() {
         } catch (_: Exception) { false }
     }
 
-    // Sonda de saude da origem. Distingue "API fora do ar" de "endpoint oscilando"
-    // em UMA requisicao, sem token de proposito:
-    //   origem NO AR  -> 403 {"status":false,"message":"authentication failed"}
-    //   origem FORA   -> 500 "Internal Server Error"
-    // Sem isso, uma origem 100% fora faz o usuario esperar as 20 tentativas
-    // (medido: 17s media, 27.7s pior caso) para receber o mesmo "nenhum link" que
-    // a versao antiga devolvia em menos de 1s.
+    // Resultado da sonda de saude da origem. O ponto central de v164: o 500
+    // isolado NAO distingue origem morta de IP bloqueado, entao nao pode cortar
+    // o retry. Ver comentario de healthCheck() para a medicao que motivou isso.
+    private enum class Health {
+        VIVA,        // rota respondeu: dispatch rodou (404/403/401/2xx)
+        INDISPONIVEL, // falha de rede/timeout: nao ha resposta, so insistir e' inutil
+        // 5xx: AMBIGUO. A origem pode estar morta, oscilando, ou o edge (Cloudflare)
+        // pode estar bloqueando o IP. Nao cortar o retry neste estado.
+        AMBIGUO_5XX
+    }
+
+    // v164 -- CORRECAO do erro de leitura da v158.
     //
-    // v158 -- deteccao de origem morta por catch-all 500.
-    // A sonda acima usa /feed, mas /feed e um endpoint de CONTEUDO: quando ele falha
-    // por outro motivo (cache frio, rota especifica quebrada, 5xx parcial) o 500 nao
-    // diz que a origem inteira morreu, e a sonda erra ao cortar o retry cedo demais.
-    // O sinal definitivo de origem morta e diferente: um 500 em um caminho que
-    // NAO EXISTE. Medido em 2026-09-27 na queda real:
-    //   GET /zzz-nao-existe-12345      -> 500
-    //   GET /v2/anime/99999999         -> 500
-    //   GET /  (raiz)                 -> 500
-    //   OPTIONS /v2/animes/feed       -> 204   (edge/TLS/CORS OK, so a app caiu)
-    // Um backend com rotas vivas devolveria 404 nesse caminho aleatorio. 500 em
-    // caminho inexistente = o dispatch nunca roda = origem morta de forma estrutural.
-    // Isso e 1 request sem token, sem peso de payload, e conclusivo.
-    private suspend fun isOriginDead(): Boolean {
-        return try {
-            val res = app.get("$mainUrl/zzz-nao-existe-$${PROBE_NONCE}", headers = mapOf("User-Agent" to APP_UA), timeout = 10)
-            when (res.code) {
-                404, 410 -> false          // rota respondeu 404 de verdade: origem VIVA
-                in 500..599 -> true        // 500 em rota inexistente: origem MORTA
-                401, 403 -> false           // autenticacao falhou, mas o dispatch rodou
-                else -> false
-            }
-        } catch (_: Exception) {
-            // timeout/erro de rede tambem contam como origem indisponivel
-            true
+    // A v158 afirmava: "500 em rota inexistente = dispatch nunca roda = origem morta
+    // de forma estrutural", e usava isso para cortar o retry. Essa leitura foi
+    // refutada por medicao em 2026-09-27. tools/probe_layer_matrix.py mediu a
+    // mesma matriz nas duas situacoes:
+    //
+    //                     rota inexistente   /v2/anime/1921   OPTIONS /v2/anime/1921
+    //   via WARP (livre)      404                403                    204
+    //   IP bloqueado          500                500                    204
+    //
+    // Duas conclusoes:
+    //  1. Numa origem VIVA a rota inexistente devolve 404, nunca 500. A v158 estava
+    //     certa em que origem morta da 500 -- mas errada em achar que 500 e' prova
+    //     disso, porque o 500 do IP bloqueado e' indistinguivel.
+    //  2. OPTIONS devolve 204 nos DOIS casos, entao nao serve de discriminante.
+    //     Era a unica alternativa pensada, e medida: descartada.
+    //
+    // De onde vem o 500 (medido via WARP x direto, mesmo path e mesmo token):
+    //   direto: HTTP 500, Server: cloudflare, Content-Type: text/html,
+    //           corpo "Internal Server Error"
+    //   WARP  : HTTP 403, Server: cloudflare, Content-Type: application/json,
+    //           corpo {"status":false,"message":"authentication failed"}
+    // O 500 e' pagina de erro do CLOUDFLARE, servida no edge antes do backend. O
+    // backend Laravel responde JSON; ele nao produz esse HTML. Logo o 500 sem WARP
+    // e' bloqueio de IP no edge, e o dispatch nunca rodou porque nunca chegou nele.
+    //
+    // Por que isso importa para o aparelho: o plugin roda no IP do usuario, nao no
+    // 167.233.60.72 (IP deste servidor de teste). O 500 medido aqui e' do ambiente de
+    // teste e nao reflete o que o usuario ve. Mas a v158 nao tinha como saber disso:
+    // ela via 500 e cortava. O efeito e' o pior possivel -- o usuario receberia
+    // "nenhum link" em menos de 1s durante janelas em que a API responderia, com
+    // sintoma indistinguivel de "plugin quebrado".
+    //
+    // Regra adotada: cortar o retry SO quando nao ha resposta (timeout/erro de
+    // rede), onde insistir e' comprovadamente inutil. Em 5xx, manter o retry e
+    // apenas registrar -- e' o unico estado em que o retry ainda pode salvar.
+    private suspend fun healthCheck(): Health {
+        val probe = try {
+            app.get("$mainUrl/zzz-nao-existe-$${PROBE_NONCE}", headers = mapOf("User-Agent" to APP_UA), timeout = 10)
+        } catch (e: Exception) {
+            // sem resposta nenhuma: timeout, DNS, TLS. Insistir nao ajuda.
+            return Health.INDISPONIVEL
+        }
+        return when {
+            probe.code >= 500 -> Health.AMBIGUO_5XX
+            probe.code in 400..499 -> Health.VIVA  // dispatch respondeu
+            else -> Health.VIVA
         }
     }
 
-    // Sonda de saude legada: usada quando a deteccao estrutural nao e conclusiva
-    // (origem viva mas /feed ruim). Mantida porque distingue 403 (credencial) de
-    // 500 (endpoint), info que o catch-all nao entrega.
+    // Sonda de diagnostico, sem efeito no controle de fluxo. Mantida porque
+    // distingue 403 (credencial) de 5xx (endpoint ou edge), informacao que o
+    // healthCheck() nao entrega: ele so diz se houve resposta.
     private suspend fun isOriginDown(): Boolean {
         return try {
-            // rota barata e sempre presente; sem Authorization de proposito
             val res = app.get("$mainUrl/v2/animes/feed", headers = mapOf("User-Agent" to APP_UA), timeout = 10)
-            res.code >= 500
+            val down = res.code >= 500
+            if (down) Log.w(TAG, "diagnostico: /feed devolveu ${res.code} (edge ou endpoint, nao conclusivo)")
+            down
         } catch (_: Exception) {
-            // timeout/erro de rede tambem contam como origem indisponivel
             true
         }
     }
@@ -969,15 +1002,28 @@ class Tomato : MainAPI() {
                 attempt++
                 consecutiveFails++
                 if (attempt < STREAM_ATTEMPTS) kotlinx.coroutines.delay(RETRY_DELAY_MS)
-                // Origem fora do ar: insistir so piora a espera do usuario.
+                // v164: corte de retry so quando NAO ha resposta nenhuma. A v158
+                // cortava tambem em 5xx, usando a heuristica de "origem morta" que a
+                // medicao de 2026-09-27 refutou (5xx do Cloudflare = IP bloqueado,
+                // e' indistinguivel de origem morta). Cortar em 5xx fazia o usuario
+                // receber "nenhum link" em menos de 1s em janelas em que a API
+                // voltaria -- exatamente o estado que o retry existe para cobrir.
                 if (consecutiveFails == HEALTH_PROBE_AFTER) {
-                    // v158: primeiro a evidencia estrutural (catch-all 500 em rota
-                    // inexistente). Antes o unico sinal era isOriginDown(), que
-                    // pergunta ao /feed e pode dar falso positivo quando o /feed
-                    // sozinho falha com a origem de pe.
-                    if (isOriginDead() || isOriginDown()) return false
-                    // origem viva, so o /stream que esta ruim -> segue tentando
-                    consecutiveFails = 0
+                    when (val h = healthCheck()) {
+                        Health.INDISPONIVEL -> {
+                            Log.w(TAG, "origem sem resposta (timeout/rede): cortando retry apos $attempt tentativas")
+                            return false
+                        }
+                        Health.AMBIGUO_5XX -> {
+                            // Nao cortar. 5xx pode ser edge bloqueando o IP ou origem
+                            // oscilando; nos dois casos o proximo request pode vir 200.
+                            Log.w(TAG, "sonda 5xx ambiguo (edge bloqueando IP ou origem oscilando): mantendo retry, tentativa $attempt")
+                        }
+                        Health.VIVA -> {
+                            Log.w(TAG, "origem viva (/stream instavel): mantendo retry, tentativa $attempt")
+                            consecutiveFails = 0
+                        }
+                    }
                 }
             }
             if (parsed == null) return false

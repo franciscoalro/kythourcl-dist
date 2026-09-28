@@ -24,6 +24,7 @@
    - [3.3 Resolução In-App de Captchas com OCR no NetCine](#33-resolução-in-app-de-captchas-com-ocr-no-netcine)
    - [3.4 Servidor HLS Local de Interoperabilidade (`LocalHlsServer`) no CineVision](#34-servidor-hls-local-de-interoperabilidade-localhlsserver-no-cinevision)
    - [3.5 Integração Reversa com DooPlayer e Alibaba CDN no TopAnimes](#35-integração-reversa-com-dooplayer-e-alibaba-cdn-no-topanimes)
+3. [Diagnóstico da origem Tomato (2026-09-28)](#3-diagnóstico-da-origem-tomato-2026-09-28)
 4. [Infraestrutura de Build, Distribuição e CI/CD](#4-infraestrutura-de-build-distribuição-e-cicd)
 5. [Guia de Resolução de Problemas (Troubleshooting)](#5-guia-de-resolução-de-problemas-troubleshooting)
 
@@ -117,7 +118,75 @@ O projeto é construído em cima do **CloudStream 3** (`com.lagradost.cloudstrea
 
 ---
 
-## 3. Infraestrutura de Build, Distribuição e CI/CD
+## 3. Diagnóstico da origem Tomato (2026-09-28)
+
+Este bloco existe para que a próxima sessão **não repita o erro de concluir
+"origem morta" a partir de um 500**. Detalhe completo das medidas em
+[`MEDICOES_TOMATO_2026-09-28.md`](MEDICOES_TOMATO_2026-09-28.md).
+
+### O 5xx é do Cloudflare, não do backend
+
+`prod-api.tomatoanimes.com` fica atrás do Cloudflare. Medido na mesma rota, com o
+mesmo token, mudando apenas o IP de saída:
+
+```
+direto: HTTP 500  Server: cloudflare  Content-Type: text/html
+        corpo: "Internal Server Error"
+WARP  : HTTP 403  Server: cloudflare  Content-Type: application/json
+        corpo: {"status":false,"message":"authentication failed","status_code":403}
+```
+
+O 500 é **página de erro HTML do edge**, servida antes do backend. O backend
+Laravel responde JSON e não produz esse HTML. Logo, 5xx sem WARP é bloqueio de IP
+no edge, e o dispatch nunca rodou porque nunca chegou nele.
+
+### O sinal antigo era enganoso, e o substituto também
+
+A v158 afirmava: *"500 em rota inexistente = dispatch nunca roda = origem morta
+de forma estrutural"*, e usava isso para cortar o retry. A medição desmente:
+
+| | rota inexistente | `/v2/anime/1921` | `OPTIONS /v2/anime/1921` |
+|---|---|---|---|
+| via WARP (livre) | **404** | 403 | 204 |
+| IP bloqueado | 500 | 500 | 204 |
+
+Duas leituras que a v158 errou:
+
+1. Numa origem viva a rota inexistente devolve **404**, nunca 500. A v158 estava
+   certa em que origem morta dá 500, mas errada em tratar 500 como prova disso:
+   o 500 do IP bloqueado é indistinguível.
+2. **OPTIONS devolve 204 nos dois casos** — não serve de discriminante. Era a
+   alternativa pensada, foi medida, e foi descartada.
+
+### O que a v164 mudou
+
+Cortar o retry em 5xx fazia o usuário receber "nenhum link" em menos de 1s
+durante janelas em que a API responderia, com sintoma indistinguível de plugin
+quebrado. Isso foi pior do que a espera que a v158 queria evitar.
+
+Regra adotada: **cortar o retry só quando não há resposta nenhuma** (timeout,
+DNS, TLS), onde insistir é comprovadamente inútil. Em 5xx, manter o retry e apenas
+registrar. É o único estado em que o retry ainda pode salvar.
+
+Isso vale para os quatro pontos que usavam a heurística: `fetchFeed()`,
+`getJsonWithRetry()`, `postJsonWithRetry()` e o retry do `/stream`.
+
+### Token
+
+O header `Authorization: Bearer` é **obrigatório**: mesma rota, mesma sessão,
+200 com e 403 `authentication failed` sem. Não existe publicação sem token que
+continue funcionando. O token só sai do artefato por rotação do lado da origem,
+que depende de login no aplicativo (hCaptcha).
+
+### O que não é bug
+
+O plugin roda no IP do usuário, não no `167.233.60.72` (IP do servidor de teste).
+Os 500 medidos aqui sem WARP são artefato do ambiente de teste, não da origem nem
+do que o usuário vê.
+
+---
+
+## 4. Infraestrutura de Build, Distribuição e CI/CD
 
 ### 🛡️ Regra de Ouro de Integridade do `plugins.json`:
 * O CloudStream valida estritamente o campo `fileHash` (SHA-256) e `fileSize` (em bytes).
