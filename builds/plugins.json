@@ -1,6 +1,6 @@
 [
     {
-        "fileHash": "sha256-6c423bd06655d4c6d322685361d3dcc90c71ef9b02a77f5f97a3424ac1726b42",
+        "fileHash": "sha256-9d405903a5d368f84dba003ebfb13276186a161f1a2b34d4af015d6d700e652e",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
         "fileSize": 41960,
@@ -8,7 +8,7 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 169,
+        "version": 171,
         "internalName": "AnimeFire",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/AnimeFire.cs3",
         "name": "AnimeFire"
@@ -42,29 +42,29 @@
         "name": "CineGato"
     },
     {
-        "fileHash": "sha256-418a4781575f04886622adc3899655c90b405269c847f2c8ab6776b91f0eeb2c",
+        "fileHash": "sha256-381769bd7d1791582e2b863250e6eda0eea4629cfb5d1f5dd478ac74b5543c6a",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 56542,
+        "fileSize": 56541,
         "status": 3,
         "authors": [
             "franciscoalro"
         ],
-        "version": 169,
+        "version": 171,
         "internalName": "CineVision",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/CineVision.cs3",
         "name": "CineVision"
     },
     {
-        "fileHash": "sha256-e421a8bab8169460d37f10d94a79be02f723aea3930c5975553bcffce1d6e16f",
+        "fileHash": "sha256-d9ab0891d5c83d5d8af057b924b5964ae0eb0bab1b901b3cc8aea7e8b9c71255",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 53388,
+        "fileSize": 53385,
         "status": 3,
         "authors": [
             "franciscoalro"
         ],
-        "version": 169,
+        "version": 171,
         "internalName": "NetCine",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/NetCine.cs3",
         "name": "NetCine"
@@ -84,15 +84,15 @@
         "name": "Pobreflix"
     },
     {
-        "fileHash": "sha256-0860f783bbb0bd30088799b372dd70a4bce12c829c015181af221752b1d5d116",
+        "fileHash": "sha256-505596b03b702f36d871fcbc71ae956878064fd226c56791e58a2bf9c0a85ca9",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 30157,
+        "fileSize": 30156,
         "status": 3,
         "authors": [
             "franciscoalro"
         ],
-        "version": 169,
+        "version": 171,
         "internalName": "RedeCanais",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/RedeCanais.cs3",
         "name": "RedeCanais"
@@ -112,21 +112,21 @@
         "name": "SuperCine"
     },
     {
-        "fileHash": "sha256-fe14fd364bfdf8ec3ae089f050386201ccdf3a082cdcca02aa53dbbebf871ed0",
+        "fileHash": "sha256-97c7d3d0a6ac8df41e9c4d06db3663190f11e9a583924ad15e35021bd3ae3cd4",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 73377,
+        "fileSize": 74543,
         "status": 3,
         "authors": [
             "franciscoalro"
         ],
-        "version": 170,
+        "version": 171,
         "internalName": "Tomato",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/Tomato.cs3",
         "name": "Tomato"
     },
     {
-        "fileHash": "sha256-0a1775e1a023eb67ad8d0c65ec70080c6f90e1ba275947781b14bc375e0b850a",
+        "fileHash": "sha256-20365c43cbdd6a11bc7622f4ac83da9225428a96b6ca65d439c216fbe3671e69",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
         "fileSize": 25201,
@@ -134,7 +134,7 @@
         "authors": [
             "franciscoalro"
         ],
-        "version": 169,
+        "version": 171,
         "internalName": "TopAnimes",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/TopAnimes.cs3",
         "name": "TopAnimes"
