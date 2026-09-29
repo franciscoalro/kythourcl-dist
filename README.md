@@ -30,6 +30,7 @@ No CloudStream: `Configurações > Extensões > Adicionar Repositório` e cole o
 - **Recursos validados:** catálogo, pesquisa, detalhes, temporadas completas, faixas legendadas/dubladas e reprodução HLS.
 - **Categorias da tela inicial:** Novos episódios, Em alta, Recém adicionados, Semanais, Com dublagem, Recomendados, Mais curtidos, Aventura, Comédia, Romance, Slice Of Life e Talvez você goste.
 - A API oficial pode oscilar entre os hosts `prod-api.tomatoanimes.com` e `edge.betomato.com`; o plugin alterna automaticamente entre ambos.
+- A Home reutiliza o feed em memória por 5 minutos, evitando repetir a mesma chamada para cada categoria; imagens e respostas HTTP continuam sob o cache próprio do CloudStream.
 
 ### DMCA
 Projeto educacional. Nenhum conteúdo hospedado aqui.

@@ -10,6 +10,8 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import android.util.Log
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class Tomato : MainAPI() {
     override var mainUrl = "https://prod-api.tomatoanimes.com"
@@ -95,6 +97,11 @@ class Tomato : MainAPI() {
         // corte do servidor, mas isso é hipótese, não contrato. O teto existe
         // para que uma season patológica não vire laço infinito de requests.
         const val MAX_SEASON_PAGES = 20
+        // A Home possui várias linhas apontando para o mesmo /feed. O CloudStream
+        // chama getMainPage uma vez por linha; sem cache isso repetia a mesma chamada
+        // 12 vezes e, em 500, fazia até 48 requests + backoff. Mantemos o feed em
+        // memória por cinco minutos e coalescemos carregamentos simultâneos.
+        const val FEED_CACHE_TTL_MS = 5 * 60 * 1000L
         // v166: headers baseados em captura mitmproxy do app real 1.4.3 (Redroid 2026-09-28).
         // O app alterna User-Agent entre endpoints:
         //   - Feed/recents/season/search: okhttp/4.11.0  (React-Native network stack)
@@ -163,10 +170,36 @@ class Tomato : MainAPI() {
 
     // ---------- Feed ----------
     // /v2/animes/feed -> {status:true,status_code:4,remote_settings:{},data:[{type:3,title:"Em alta",data:[{anime_id,thumbnail}]},{type:7,title:"Novos episódios",data:[{ep_id,ep_anime_id,anime_name,ep_name}]},...]}
-    // Usamos JsonNode para lidar com tipos heterogêneos
-    // 2026-09-27: prod-api oscila entre 500 e 200 -> feed embutido evita catálogo vazio
+    // Usamos JsonNode para lidar com tipos heterogêneos.
+    private val feedMapper = jacksonObjectMapper().apply {
+        configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+    }
+    private val feedMutex = Mutex()
+    @Volatile private var cachedFeed: JsonNode? = null
+    @Volatile private var cachedFeedAt = 0L
+
+    // v171: cada entrada de mainPage dispara getMainPage separadamente. Como todas
+    // as 12 entradas usam o mesmo endpoint, sem cache uma abertura da Home podia
+    // executar o fluxo completo 12 vezes. O Mutex evita rajada concorrente e o TTL
+    // curto preserva atualização do catálogo sem depender do cache HTTP do app.
     private suspend fun fetchFeed(): JsonNode? {
-        val mapper = jacksonObjectMapper().apply { configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false) }
+        val now = System.currentTimeMillis()
+        cachedFeed?.takeIf { now - cachedFeedAt < FEED_CACHE_TTL_MS }?.let { return it }
+        return feedMutex.withLock {
+            val lockedNow = System.currentTimeMillis()
+            cachedFeed?.takeIf { lockedNow - cachedFeedAt < FEED_CACHE_TTL_MS }?.let { return@withLock it }
+            val fresh = fetchFeedUncached()
+            if (fresh != null) {
+                cachedFeed = fresh
+                cachedFeedAt = System.currentTimeMillis()
+            }
+            fresh
+        }
+    }
+
+    // 2026-09-27: prod-api oscila entre 500 e 200 -> feed embutido evita catálogo vazio
+    private suspend fun fetchFeedUncached(): JsonNode? {
+        val mapper = feedMapper
         // v164: antes de gastar 4 tentativas em /feed, 1 request barato detecta
         // falta de resposta. No cenario medido (queda total) isso troca 4 x (15s
         // timeout + 500ms) por 1 request de ~0.15s, e cai direto no feed embutido.
@@ -180,7 +213,10 @@ class Tomato : MainAPI() {
         if (healthCheck() == Health.INDISPONIVEL) return try { mapper.readTree(TomatoFallback.FEED_JSON) } catch (_: Exception) { null }
         repeat(4) { attempt ->
             try {
-                val res = app.get("$mainUrl/v2/animes/feed", headers = apiHeaders(), timeout = 15)
+                // Alterna também o feed entre os hosts oficiais. Antes o failover
+                // existia em detalhes/temporadas, mas a Home insistia só no mainUrl.
+                val host = API_HOSTS[attempt % API_HOSTS.size]
+                val res = app.get("$host/v2/animes/feed", headers = apiHeaders(), timeout = 15)
                 if (res.code == 200) {
                     val node = mapper.readTree(res.text)
                     if (node.get("data") != null) return node
