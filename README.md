@@ -26,11 +26,16 @@ No CloudStream: `Configurações > Extensões > Adicionar Repositório` e cole o
 ---
 
 ### TomatoAnimes
+- **Versão estável:** `171`
+- **Estado do projeto:** funcional e em manutenção; desenvolvimento ativo encerrado temporariamente.
 - **Idioma:** `pt-br`
 - **Recursos validados:** catálogo, pesquisa, detalhes, temporadas completas, faixas legendadas/dubladas e reprodução HLS.
 - **Categorias da tela inicial:** Novos episódios, Em alta, Recém adicionados, Semanais, Com dublagem, Recomendados, Mais curtidos, Aventura, Comédia, Romance, Slice Of Life e Talvez você goste.
 - A API oficial pode oscilar entre os hosts `prod-api.tomatoanimes.com` e `edge.betomato.com`; o plugin alterna automaticamente entre ambos.
 - A Home reutiliza o feed em memória por 5 minutos, evitando repetir a mesma chamada para cada categoria; imagens e respostas HTTP continuam sob o cache próprio do CloudStream.
+- O plugin roda localmente no CloudStream e **não depende de VPS, proxy ou servidor próprio**. A VPS/Redroid foi utilizada somente para desenvolvimento, testes e publicação.
+- Limitação externa conhecida: disponibilidade e autenticação da API oficial do Tomato podem oscilar ou bloquear determinados IPs. Isso não é controlado pelo plugin.
+- Documento final de estado e manutenção: [`TOMATO_ESTADO_FINAL.md`](TOMATO_ESTADO_FINAL.md).
 
 ### DMCA
 Projeto educacional. Nenhum conteúdo hospedado aqui.

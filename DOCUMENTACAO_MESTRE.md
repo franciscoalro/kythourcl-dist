@@ -120,6 +120,13 @@ O projeto é construído em cima do **CloudStream 3** (`com.lagradost.cloudstrea
 
 ## 3. Diagnóstico da origem Tomato (2026-09-28)
 
+> **Estado consolidado em 29/09/2026:** Tomato v171 funcional, publicada e em
+> modo de manutenção. O desenvolvimento ativo foi encerrado temporariamente após
+> validação de catálogo, pesquisa, detalhes, temporadas, Home e reprodução. O
+> plugin roda localmente no CloudStream e não depende da VPS de testes. Consulte
+> [`TOMATO_ESTADO_FINAL.md`](TOMATO_ESTADO_FINAL.md) para o encerramento formal,
+> evidências e critérios de reabertura.
+
 Este bloco existe para que a próxima sessão **não repita o erro de concluir
 "origem morta" a partir de um 500**. Detalhe completo das medidas em
 [`MEDICOES_TOMATO_2026-09-28.md`](MEDICOES_TOMATO_2026-09-28.md).

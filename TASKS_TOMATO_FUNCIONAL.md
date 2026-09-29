@@ -1,8 +1,13 @@
 # TomatoAnimes — Plano de Functionalização
 
-> **Para Hermes:** Use o skill `subagent-driven-development` para executar este
-> plano tarefa por tarefa, com revisão em duas etapas (conformidade com a
-> especificação e depois qualidade do código).
+> **Status final (29/09/2026): CONCLUÍDO.** O objetivo funcional deste plano foi
+> alcançado e a versão estável publicada é a `171`. O desenvolvimento ativo está
+> encerrado temporariamente; este arquivo permanece como histórico do plano e das
+> decisões técnicas. Para o estado consolidado, consulte
+> [`TOMATO_ESTADO_FINAL.md`](TOMATO_ESTADO_FINAL.md).
+
+> **Nota histórica:** as tarefas abaixo registram o plano usado durante a
+> investigação. Não devem ser interpretadas como pendências atuais.
 
 **Objetivo:** Levar o plugin CloudStream3 TomatoAnimes a um estado em que o
 usuário consegue navegar o catálogo, abrir um anime e reproduzir um episódio,
