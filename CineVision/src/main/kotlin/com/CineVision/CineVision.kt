@@ -319,8 +319,11 @@ class CineVision : MainAPI() {
         val plot = doc.selectFirst("meta[property='og:description']")?.attr("content")
             ?: doc.select("div.overview p").map { it.text().trim() }
                 .firstOrNull { it.length > 25 && !it.startsWith("We don't have") }
-        val year = Regex("""\((\d{4})\)""").find(
-            doc.selectFirst("meta[property='og:title']")?.attr("content").orEmpty()
+        val year = Regex("""\((?:TV Series\s+)?(\d{4})""").find(
+            listOf(
+                doc.selectFirst("meta[property='og:title']")?.attr("content").orEmpty(),
+                doc.selectFirst("title")?.text().orEmpty()
+            ).joinToString(" ")
         )?.groupValues?.getOrNull(1)?.toIntOrNull()
         val tags = doc.select("span.genres a, div.genres a, a[href*='/genre/']").map { it.text().trim() }
             .filter { it.isNotBlank() && !it.contains("?") }.distinct()
@@ -331,35 +334,31 @@ class CineVision : MainAPI() {
         if (imdbId.isBlank()) {
             imdbId = Regex("""(tt\d{6,})""").find(doc.html())?.groupValues?.getOrNull(1).orEmpty()
         }
+        // O HTML SSR do TMDB deixou de expor external_ids. A API pública de
+        // sugestões do IMDb fornece o tt-id sem chave; título/ano/tipo evitam
+        // selecionar remakes ou especiais homônimos.
+        if (imdbId.isBlank()) {
+            imdbId = findImdbId(title, year, isSeries).orEmpty()
+        }
 
         val payload = "tmdb:$tmdbId|imdb:$imdbId|series:$isSeries"
 
         return if (isSeries) {
-            val episodes = if (imdbId.isNotBlank()) {
-                // 1 temporada placeholder → loadLinks resolve eps via painel; se
-                // vazio, o usuário entra pelo S1E1 e navega pelos servers.
-                listOf(
-                    newEpisode("$payload|season:1|episode:1") {
-                        this.name = "T1:E1"
-                        this.season = 1
-                        this.episode = 1
-                    }
-                )
-            } else emptyList()
-            if (episodes.isNotEmpty()) {
-                newTvSeriesLoadResponse(title, tmdbUrl, TvType.TvSeries, episodes) {
-                    this.posterUrl = poster
-                    this.plot = plot
-                    this.tags = tags
-                    this.year = year
+            // Mesmo sem IMDb, TMDB + S/E resolve nos fallbacks MegaEmbed/VidSrc.
+            // Converter uma série sem imdb_id em Movie fazia o testador chamar
+            // loadLinks sem temporada/episódio e tornava todos os fallbacks inválidos.
+            val episodes = listOf(
+                newEpisode("$payload|season:1|episode:1") {
+                    this.name = "T1:E1"
+                    this.season = 1
+                    this.episode = 1
                 }
-            } else {
-                newMovieLoadResponse(title, tmdbUrl, TvType.Movie, payload) {
-                    this.posterUrl = poster
-                    this.plot = plot
-                    this.tags = tags
-                    this.year = year
-                }
+            )
+            newTvSeriesLoadResponse(title, tmdbUrl, TvType.TvSeries, episodes) {
+                this.posterUrl = poster
+                this.plot = plot
+                this.tags = tags
+                this.year = year
             }
         } else {
             newMovieLoadResponse(title, tmdbUrl, TvType.Movie, payload) {
@@ -686,6 +685,44 @@ class CineVision : MainAPI() {
         @JsonProperty("hash") val hash: String
     )
 
+    data class ImdbSuggestionResponse(
+        @JsonProperty("d") val items: List<ImdbSuggestionItem>? = null
+    )
+
+    data class ImdbSuggestionItem(
+        @JsonProperty("id") val id: String? = null,
+        @JsonProperty("l") val title: String? = null,
+        @JsonProperty("y") val year: Int? = null,
+        @JsonProperty("qid") val type: String? = null
+    )
+
+    private suspend fun findImdbId(title: String, year: Int?, isSeries: Boolean): String? {
+        if (title.isBlank()) return null
+        return try {
+            val query = URLEncoder.encode(title, "UTF-8")
+            val suggestions = app.get(
+                "https://v2.sg.media-imdb.com/suggestion/x/$query.json",
+                headers = mapOf("User-Agent" to USER_AGENT),
+                timeout = 20
+            ).parsedSafe<ImdbSuggestionResponse>()?.items.orEmpty()
+            suggestions
+                .filter { it.id?.matches(Regex("tt\\d+")) == true }
+                .sortedByDescending { item ->
+                    val titleMatch = item.title?.equals(title, ignoreCase = true) == true
+                    val yearMatch = year != null && item.year == year
+                    val typeMatch = if (isSeries) {
+                        item.type?.contains("tv", ignoreCase = true) == true
+                    } else {
+                        item.type?.contains("movie", ignoreCase = true) == true
+                    }
+                    (if (titleMatch) 4 else 0) + (if (yearMatch) 2 else 0) + (if (typeMatch) 1 else 0)
+                }
+                .firstOrNull()?.id
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -727,16 +764,14 @@ class CineVision : MainAPI() {
                 if (foundAny) return true
             } catch (_: Exception) {}
         }
-        if (!tmdbPayloadId.isNullOrBlank() && !isSeriesPayload(data)) {
+        if (!tmdbPayloadId.isNullOrBlank()) {
             try {
-                if (resolveVidSrcGate(
-                        "https://vidsrc.sh/embed/movie/$tmdbPayloadId",
-                        "$mainUrl/",
-                        callback
-                    )
-                ) {
-                    return true
+                val vidSrcUrl = if (isSeriesPayload(data) && seasonParam != null && episodeParam != null) {
+                    "https://vidsrc.sh/embed/tv/$tmdbPayloadId/$seasonParam/$episodeParam"
+                } else {
+                    "https://vidsrc.sh/embed/movie/$tmdbPayloadId"
                 }
+                if (resolveVidSrcGate(vidSrcUrl, "$mainUrl/", callback)) return true
             } catch (_: Exception) {}
         }
 

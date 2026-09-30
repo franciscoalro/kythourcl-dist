@@ -1,4 +1,4 @@
-name: Build
+name: Build plugins
 
 permissions:
   contents: write
@@ -6,43 +6,84 @@ permissions:
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'builds/**'
+      - 'app-update.json'
+      - '*.md'
   workflow_dispatch:
+
+concurrency:
+  group: plugins-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           java-version: '21'
           distribution: 'temurin'
-      - name: Make gradlew executable
-        run: chmod +x ./gradlew
-      - name: Build Plugins
-        run: ./gradlew makePlugins --stacktrace
-      - name: Copy cs3 and plugins.json to builds
+          cache: gradle
+
+      - name: Build plugins
         run: |
-          mkdir -p builds
-          find . -maxdepth 3 -name "*.cs3" -exec cp {} builds/ \;
-          if [ -f build/plugins.json ]; then cp build/plugins.json builds/plugins.json; fi
+          chmod +x ./gradlew
+          ./gradlew makePlugins --stacktrace --no-daemon
+
+      - name: Collect and validate artifacts
+        run: |
+          rm -rf builds-ci
+          mkdir -p builds-ci
+          find . -mindepth 2 -maxdepth 3 -name '*.cs3' -not -path './builds/*' -exec cp {} builds-ci/ \;
+          cp build/plugins.json builds-ci/plugins.json
+          python3 - <<'PY'
+          import hashlib, json, pathlib, zipfile
+          root = pathlib.Path('builds-ci')
+          entries = json.loads((root / 'plugins.json').read_text())
+          assert entries, 'plugins.json vazio'
+          for item in entries:
+              name = item['internalName']
+              package = root / f'{name}.cs3'
+              assert package.is_file(), f'artefato ausente: {package}'
+              data = package.read_bytes()
+              assert item['fileSize'] == len(data), f'tamanho incorreto: {name}'
+              assert item['fileHash'] == 'sha256-' + hashlib.sha256(data).hexdigest(), f'hash incorreto: {name}'
+              with zipfile.ZipFile(package) as archive:
+                  manifest = json.loads(archive.read('manifest.json'))
+              assert manifest['name'] == name, f'manifesto incorreto: {name}'
+              assert manifest['version'] == item['version'], f'versão incorreta: {name}'
+          print(f'{len(entries)} plugins validados')
+          PY
+          rm -rf builds
+          mv builds-ci builds
           ls -lh builds/
-      - name: Commit builds
+
+      - name: Upload plugin bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudstream-plugins-${{ github.sha }}
+          path: builds/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish generated files
         run: |
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
           git add builds/
-          if ! git diff --staged --quiet; then
-            git commit -m "build plugins [skip ci]"
-            # Never rebase artifacts onto sources they were not built from.
-            git fetch origin main
-            if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
-              echo "main advanced during build; newer workflow will publish artifacts"
-              exit 0
-            fi
-            # Non-forced push also guards a race after the SHA check.
-            git push origin HEAD:main
-          else
-            echo "No changes to commit"
+          if git diff --staged --quiet; then
+            echo "Generated files are already current"
+            exit 0
           fi
+          git commit -m "build plugins [skip ci]"
+          git fetch origin main
+          if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
+            echo "main advanced during build; a newer workflow will publish artifacts"
+            exit 0
+          fi
+          git push origin HEAD:main

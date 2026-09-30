@@ -75,6 +75,11 @@ class AnimesOrion : MainAPI() {
         @JsonProperty("title") val title: String? = null
     )
 
+    data class VipPlayerResp(
+        @JsonProperty("securedLink") val securedLink: String? = null,
+        @JsonProperty("videoSource") val videoSource: String? = null
+    )
+
     override val mainPage = mainPageOf(
         "$mainUrl/animes/" to "Animes",
         "$mainUrl/filmes/" to "Filmes de Anime",
@@ -455,9 +460,13 @@ class AnimesOrion : MainAPI() {
                     else -> null
                 }
                 if (apiUrl != null) {
+                    // PlayerFlix valida a origem desta chamada AJAX. Sem Origin, a
+                    // mesma URL pode responder {"status":false} apesar de o player
+                    // e seus servidores estarem disponíveis.
                     val api = app.get(
                         apiUrl,
                         headers = pageHeaders(target) + mapOf(
+                            "Origin" to PLAYERFLIX,
                             "X-Requested-With" to "XMLHttpRequest",
                             "Accept" to "application/json"
                         ),
@@ -483,6 +492,10 @@ class AnimesOrion : MainAPI() {
                                     continue
                                 }
                             }
+                            if (eu.contains("embedplayer", ignoreCase = true) && extractVipPlayer(eu, target, tag, callback)) {
+                                found = true
+                                continue
+                            }
                             if (eu.contains("superflix")) continue // verificação JS, pula
                             if (loadExtractor(eu, target, subtitleCallback, callback)) found = true
                         } catch (_: Exception) {}
@@ -500,6 +513,39 @@ class AnimesOrion : MainAPI() {
             if (loadExtractor(target, referer, subtitleCallback, callback)) found = true
         } catch (_: Exception) {}
         return found
+    }
+
+    private suspend fun extractVipPlayer(
+        embedUrl: String,
+        referer: String,
+        label: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val id = Regex("""/video/([A-Za-z0-9]+)""").find(embedUrl)?.groupValues?.getOrNull(1)
+            ?: return false
+        return try {
+            val origin = Regex("""^(https?://[^/]+)""").find(embedUrl)?.groupValues?.getOrNull(1)
+                ?: return false
+            val response = app.post(
+                "$origin/player/index.php?data=$id&do=getVideo",
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Referer" to embedUrl,
+                    "Origin" to origin,
+                    "X-Requested-With" to "XMLHttpRequest",
+                    "Accept" to "application/json"
+                ),
+                data = mapOf("hash" to id, "r" to referer),
+                timeout = 30
+            ).parsedSafe<VipPlayerResp>()
+            val stream = response?.securedLink?.takeIf { it.isNotBlank() }
+                ?: response?.videoSource?.takeIf { it.isNotBlank() }
+                ?: return false
+            emitDirect(stream, embedUrl, "$label VIP", callback)
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private suspend fun emitDirect(url: String, referer: String, label: String, callback: (ExtractorLink) -> Unit) {
@@ -541,16 +587,17 @@ class AnimesOrion : MainAPI() {
                 timeout = 30
             ).text
 
-            val jsonArrayMatch = Regex("""\[\["wrb\.fr","WcwnYd","(.*?)",null,null,null,"generic"\]\]""").find(text)
-            val rawData = jsonArrayMatch?.groupValues?.getOrNull(1) ?: text
-            val unescaped = rawData
+            // O envelope wrb.fr mudou algumas vezes. Desescapar a resposta inteira
+            // mantém compatibilidade tanto com o formato antigo quanto com o atual.
+            val unescaped = text
                 .replace("\\\"", "\"")
                 .replace("\\\\", "\\")
                 .replace("\\u003d", "=")
                 .replace("\\u0026", "&")
+                .replace("\\u0025", "%")
 
             val streamRegex = Regex("""\["(https:[^"]+googlevideo\.com[^"]+)",\s*\[(\d+)\]\]""")
-            for (m in streamRegex.findAll(unescaped)) {
+            for (m in streamRegex.findAll(unescaped).distinctBy { it.groupValues[1] }) {
                 var streamUrl = m.groupValues[1]
                 val itag = m.groupValues[2].toIntOrNull() ?: 22
                 if (streamUrl.contains("\\u")) {
