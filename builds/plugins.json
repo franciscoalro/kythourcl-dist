@@ -14,15 +14,15 @@
         "name": "AnimeFire"
     },
     {
-        "fileHash": "sha256-5527c7f447691e7cb5ea3d27b8480cfc4509a61c17f8b53391812343e041f800",
+        "fileHash": "sha256-10445d2f7f67dcf00f58c832c5534749a849e39fb7b413d4b406827f7682e5ad",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 38769,
+        "fileSize": 41021,
         "status": 3,
         "authors": [
             "franciscoalro"
         ],
-        "version": 1,
+        "version": 3,
         "internalName": "AnimesOrion",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/AnimesOrion.cs3",
         "name": "AnimesOrion"
@@ -42,15 +42,15 @@
         "name": "CineGato"
     },
     {
-        "fileHash": "sha256-381769bd7d1791582e2b863250e6eda0eea4629cfb5d1f5dd478ac74b5543c6a",
+        "fileHash": "sha256-40ec457b8acdf53fb46d05857add6f99c15755527ac0f3aff226c12561cc06f0",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-        "fileSize": 56541,
+        "fileSize": 59850,
         "status": 3,
         "authors": [
             "franciscoalro"
         ],
-        "version": 171,
+        "version": 174,
         "internalName": "CineVision",
         "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/CineVision.cs3",
         "name": "CineVision"
