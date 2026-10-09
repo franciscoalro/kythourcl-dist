@@ -1,7 +1,7 @@
 {
-  "versionCode": 29844840,
-  "versionName": "4.8.0-PRE Kythour Premium",
-  "apkUrl": "https://github.com/franciscoalro/kythourcl-dist/releases/download/app-v29844840/cloudstream-kythour-premium-29844840-debug.apk",
-  "changelog": "Design premium escuro, 11 plugins Kythour pré-carregados para funcionamento inicial offline e atualizações automáticas do aplicativo e das extensões.",
-  "id": "app-v29844840"
+  "versionCode": 29844842,
+  "versionName": "4.8.1-PRE PPCineFix",
+  "apkUrl": "https://github.com/franciscoalro/kythourcl-dist/releases/download/app-v1791566737/CloudStream-Kythour-v1.1.apk",
+  "changelog": "Correção: Plugin PPCine agora aparece corretamente na lista de extensões.\n\n✅ PPCine URL corrigido (.cs3 em vez de .aar)\n✅ 12 plugins Kythour disponíveis\n✅ Repositório hardcoded\n✅ Build via GitHub Actions",
+  "id": "app-v1791566737"
 }
