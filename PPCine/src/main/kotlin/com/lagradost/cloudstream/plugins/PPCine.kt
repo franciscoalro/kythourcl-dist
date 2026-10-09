@@ -2,7 +2,7 @@
 // API reverse-engineered: i5hs.k9vo.com
 // Criptografia SHOK: AES-128-CBC com keys hardcoded
 
-package com.lagradost.cloudstream.plugins
+package com.lagradost.cloudstream.plugins.PPCine
 
 import com.lagradost.cloudstream3.*
 import javax.crypto.Cipher
