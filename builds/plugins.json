@@ -154,17 +154,17 @@
     "name": "VeloPlayTV"
   },
   {
-    "fileHash": "sha256-fac4875f41c58d47d9a35c81c6d32d718a831ccd2f032147958b87a16e5e627e",
+    "fileHash": "sha256-74920a09a394e0e306a2c16dfb7d26146bdf595908d34937e4a3e9465c04a42d",
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/franciscoalro/kythourcl-dist",
-    "fileSize": 20321,
+    "fileSize": 11926,
     "status": 3,
     "authors": [
       "franciscoalro"
     ],
-    "version": 1,
+    "version": 2,
     "internalName": "PPCine",
-    "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/PPCine.cs3",
+    "url": "https://raw.githubusercontent.com/franciscoalro/kythourcl-dist/main/builds/PPCine.aar",
     "name": "PPCine"
   }
 ]
