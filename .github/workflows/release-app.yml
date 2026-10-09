@@ -1,0 +1,126 @@
+name: Release App
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: 'Version name (e.g., 4.8.1-PRE)'
+        required: true
+        default: '4.8.1-PRE'
+      version_code:
+        description: 'Version code (increment)'
+        required: true
+        default: '29844842'
+      changelog:
+        description: 'Changelog'
+        required: true
+        default: 'Nova atualização'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: "app-release"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+    - name: Generate access token
+      id: generate_token
+      uses: tibdex/github-app-token@v2
+      with:
+        app_id: ${{ secrets.GH_APP_ID }}
+        private_key: ${{ secrets.GH_APP_KEY }}
+        repository: "recloudstream/secrets"
+
+    - uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
+        cache: gradle
+
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+
+    - name: Fetch keystore
+      id: fetch_keystore
+      run: |
+        TMP_KEYSTORE_FILE_PATH="${RUNNER_TEMP}"/keystore
+        mkdir -p "${TMP_KEYSTORE_FILE_PATH}"
+        curl -H "Authorization: token ${{ steps.generate_token.outputs.token }}" -o "${TMP_KEYSTORE_FILE_PATH}/prerelease_keystore.keystore" "https://raw.githubusercontent.com/recloudstream/secrets/master/keystore.jks"
+        curl -H "Authorization: token ${{ steps.generate_token.outputs.token }}" -o "keystore_password.txt" "https://raw.githubusercontent.com/recloudstream/secrets/master/keystore_password.txt"
+        KEY_PWD="$(cat keystore_password.txt)"
+        echo "::add-mask::${KEY_PWD}"
+        echo "key_pwd=$KEY_PWD" >> $GITHUB_OUTPUT
+
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v5
+      with:
+        cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+
+    - name: Build APK
+      run: ./gradlew assemblePrereleaseRelease --no-daemon --stacktrace
+      env:
+        SIGNING_KEY_ALIAS: "key0"
+        SIGNING_KEY_PASSWORD: ${{ steps.fetch_keystore.outputs.key_pwd }}
+        SIGNING_STORE_PASSWORD: ${{ steps.fetch_keystore.outputs.key_pwd }}
+        SIMKL_CLIENT_ID: ${{ secrets.SIMKL_CLIENT_ID }}
+        SIMKL_CLIENT_SECRET: ${{ secrets.SIMKL_CLIENT_SECRET }}
+        TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
+        MDL_API_KEY: ${{ secrets.MDL_API_KEY }}
+        MAL_KEY: ${{ secrets.MAL_KEY }}
+        ANILIST_KEY: ${{ secrets.ANILIST_KEY }}
+
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: "app-v${{ github.run_number }}"
+        release_name: "CloudStream Kythour ${{ github.event.inputs.version_name }}"
+        body: ${{ github.event.inputs.changelog }}
+        draft: false
+        prerelease: true
+
+    - name: Upload APK
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: app/build/outputs/apk/prerelease/release/app-prerelease-release.apk
+        asset_name: cloudstream-kythour-${{ github.event.inputs.version_code }}.apk
+        asset_content_type: application/vnd.android.package-archive
+
+    - name: Update app-update.json
+      uses: peter-evans/create-file-from-template@v1
+      with:
+        filename: app-update.json
+        token: ${{ secrets.GITHUB_TOKEN }}
+        commit-message: "Update app-update.json for ${{ github.event.inputs.version_name }}"
+
+    - name: Upload updated app-update.json
+      run: |
+        CONTENT=$(base64 -w0 << EOF
+        {
+          "versionCode": ${{ github.event.inputs.version_code }},
+          "versionName": "${{ github.event.inputs.version_name }}",
+          "apkUrl": "https://github.com/franciscoalro/kythourcl-dist/releases/download/app-v${{ github.run_number }}/cloudstream-kythour-${{ github.event.inputs.version_code }}.apk",
+          "changelog": "${{ github.event.inputs.changelog }}",
+          "id": "app-v${{ github.run_number }}"
+        }
+        EOF
+        )
+        curl -s -X PUT \
+          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          -H "Content-Type: application/json" \
+          --data "{\"message\":\"Update app-update.json for ${{ github.event.inputs.version_name }}\",\"content\":\"$CONTENT\"}" \
+          https://api.github.com/repos/franciscoalro/kythourcl-dist/contents/app-update.json
